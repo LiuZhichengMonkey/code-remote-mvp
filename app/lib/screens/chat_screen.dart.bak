@@ -1,0 +1,397 @@
+import 'dart:convert';
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../services/websocket_service.dart';
+import '../widgets/message_bubble.dart';
+import '../widgets/connection_dialog.dart';
+import '../widgets/connection_status.dart';
+import 'qr_scanner_screen.dart';
+
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  late WebSocketService _wsService;
+  final List<ChatMessage> _messages = [];
+  final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  bool _isConnected = false;
+  bool _isConnecting = false;
+  String? _connectionError;
+  String _serverUrl = '';
+  String _authToken = '';
+
+  StreamSubscription<String>? _messageSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _wsService = WebSocketService();
+
+    // Listen to connection state changes
+    _wsService.connectionStateStream.listen((state) {
+      setState(() {
+        _isConnected = state == WebSocketConnectionState.connected;
+        _isConnecting = state == WebSocketConnectionState.connecting;
+        _connectionError = null;
+      });
+    });
+
+    // Listen to errors
+    _wsService.errorStream.listen((error) {
+      setState(() {
+        _connectionError = error;
+        _isConnecting = false;
+      });
+    });
+
+    // Listen to messages
+    _messageSubscription = _wsService.messageStream.listen((message) {
+      _addMessage(MessageType.received, message);
+    });
+
+    // Load saved connection info
+    _loadConnectionInfo();
+  }
+
+  @override
+  void dispose() {
+    _messageSubscription?.cancel();
+    _wsService.dispose();
+    _controller.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadConnectionInfo() async {
+    final saved = await _wsService.loadConnectionInfo();
+    if (saved != null) {
+      setState(() {
+        _serverUrl = saved['url'] ?? '';
+        _authToken = saved['token'] ?? '';
+      });
+    }
+  }
+
+  Future<void> _showConnectionDialog() async {
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => ConnectionDialog(
+        initialUrl: _serverUrl,
+        initialToken: _authToken,
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _serverUrl = result['url'] ?? '';
+        _authToken = result['token'] ?? '';
+      });
+
+      await _connect();
+    }
+  }
+
+  Future<void> _connect() async {
+    if (_serverUrl.isEmpty || _authToken.isEmpty) {
+      setState(() {
+        _connectionError = 'Please enter server URL and token';
+      });
+      return;
+    }
+
+    setState(() {
+      _isConnecting = true;
+      _connectionError = null;
+    });
+
+    final success = await _wsService.connect(_serverUrl, _authToken);
+
+    if (!success) {
+      setState(() {
+        _isConnecting = false;
+        _connectionError = 'Failed to connect. Please check your settings.';
+      });
+    }
+  }
+
+  void _disconnect() {
+    _wsService.disconnect();
+    _messages.clear();
+    setState(() {});
+  }
+
+  void _addMessage(MessageType type, String content) {
+    setState(() {
+      _messages.add(ChatMessage(
+        type: type,
+        content: content,
+        timestamp: DateTime.now(),
+      ));
+    });
+
+    // Scroll to bottom
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || !_isConnected) return;
+
+    _controller.clear();
+
+    _addMessage(MessageType.sent, text);
+    await _wsService.sendMessage(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('CodeRemote'),
+        actions: [
+          ConnectionStatus(
+            isConnected: _isConnected,
+            isConnecting: _isConnecting,
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: Icon(_isConnected ? Icons.link_off : Icons.link),
+            onPressed: _isConnected ? _disconnect : _showConnectionDialog,
+            tooltip: _isConnected ? 'Disconnect' : 'Connect',
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Error banner
+          if (_connectionError != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: theme.colorScheme.errorContainer,
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.error_outline,
+                    color: theme.colorScheme.onErrorContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _connectionError!,
+                      style: TextStyle(
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      Icons.close,
+                      color: theme.colorScheme.onErrorContainer,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        _connectionError = null;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+
+          // Messages
+          Expanded(
+            child: _messages.isEmpty
+                ? _buildEmptyState()
+                : ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message = _messages[index];
+                      final showAvatar =
+                          index == 0 || _messages[index - 1].type != message.type;
+                      return MessageBubble(
+                        message: message,
+                        showAvatar: showAvatar,
+                      );
+                    },
+                  ),
+          ),
+
+          // Input area
+          _buildInputArea(theme),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    final theme = Theme.of(context);
+
+    if (!_isConnected && !_isConnecting) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.phone_android_outlined,
+                size: 80,
+                color: theme.colorScheme.primary.withOpacity(0.3),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Not Connected',
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Tap the link icon to connect to your CodeRemote server',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: theme.colorScheme.onSurfaceVariant.withOpacity(0.7),
+                ),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: _showConnectionDialog,
+                icon: const Icon(Icons.link),
+                label: const Text('Connect'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Center(
+      child: _isConnecting
+          ? Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(
+                  'Connecting...',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            )
+          : Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.chat_bubble_outline,
+                  size: 80,
+                  color: theme.colorScheme.primary.withOpacity(0.3),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'Connected',
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Send a message to get started',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant.withOpacity(0.7),
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildInputArea(ThemeData theme) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 8,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _controller,
+                decoration: InputDecoration(
+                  hintText: 'Type a message...',
+                  hintStyle: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant.withOpacity(0.5),
+                  ),
+                  suffixIcon: _controller.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear),
+                          onPressed: () => _controller.clear(),
+                        )
+                      : null,
+                ),
+                textCapitalization: TextCapitalization.sentences,
+                onSubmitted: (_) => _sendMessage(),
+                onChanged: (_) => setState(() {}),
+                enabled: _isConnected,
+              ),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.icon(
+              onPressed: _isConnected && _controller.text.isNotEmpty
+                  ? _sendMessage
+                  : null,
+              icon: const Icon(Icons.send),
+              label: const Text('Send'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum MessageType {
+  sent,
+  received,
+}
+
+class ChatMessage {
+  final MessageType type;
+  final String content;
+  final DateTime timestamp;
+
+  ChatMessage({
+    required this.type,
+    required this.content,
+    required this.timestamp,
+  });
+}

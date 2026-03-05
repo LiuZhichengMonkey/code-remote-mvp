@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeRemote Debug</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; background: #1a1a2e; min-height: 100vh; color: #fff; padding: 15px; }
+        .header { background: linear-gradient(135deg, #f59e0b, #d97706); padding: 15px; border-radius: 12px; margin-bottom: 15px; }
+        .header h1 { font-size: 18px; text-align: center; margin-bottom: 5px; }
+        .header p { font-size: 11px; text-align: center; opacity: 0.9; }
+        .section { background: #16213e; border-radius: 12px; padding: 15px; margin-bottom: 15px; }
+        .section h3 { font-size: 14px; color: #f59e0b; margin-bottom: 10px; }
+        .info-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #0f3460; font-size: 12px; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: #94a3b8; }
+        .info-value { color: #fff; font-weight: 500; }
+        .info-value.yes { color: #10b981; }
+        .info-value.no { color: #ef4444; }
+        .log { background: #0f3460; border-radius: 8px; padding: 10px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 11px; line-height: 1.4; }
+        .log-entry { padding: 4px 0; border-bottom: 1px solid #16213e; }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #64748b; }
+        .log-info { color: #60a5fa; }
+        .log-success { color: #10b981; }
+        .log-error { color: #ef4444; }
+        .log-warn { color: #f59e0b; }
+        .btn { width: 100%; padding: 14px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+        .btn-primary { background: linear-gradient(135deg, #10b981, #059669); color: white; }
+        .btn:disabled { opacity: 0.5; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🐛 CodeRemote Debug</h1>
+        <p>诊断连接问题</p>
+    </div>
+
+    <div class="section">
+        <h3>📱 设备信息</h3>
+        <div class="info-row">
+            <span class="info-label">User Agent</span>
+            <span class="info-value" id="userAgent">检测中...</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">平台</span>
+            <span class="info-value" id="platform">检测中...</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">网络类型</span>
+            <span class="info-value" id="networkType">检测中...</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>🔌 WebSocket 支持</h3>
+        <div class="info-row">
+            <span class="info-label">WebSocket API</span>
+            <span class="info-value" id="wsSupport">检测中...</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">WSS (Secure)</span>
+            <span class="info-value" id="wssSupport">检测中...</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>🌐 连接配置</h3>
+        <div class="info-row">
+            <span class="info-label">模式</span>
+            <span class="info-value">
+                <select id="modeSelect" onchange="switchMode()" style="background:#0f3460;color:#fff;border:none;padding:5px;border-radius:4px;">
+                    <option value="local">本地 WiFi</option>
+                    <option value="remote">外网 (WSS)</option>
+                </select>
+            </span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">服务器地址</span>
+            <span class="info-value" id="serverUrl">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Token</span>
+            <span class="info-value" id="token">-</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3>📊 连接状态</h3>
+        <div class="info-row">
+            <span class="info-label">WebSocket 状态</span>
+            <span class="info-value" id="wsState">未创建</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">readyState 数值</span>
+            <span class="info-value" id="wsReadyState">-</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">连接耗时</span>
+            <span class="info-value" id="connectTime">-</span>
+        </div>
+    </div>
+
+    <button class="btn btn-primary" id="testBtn" onclick="runTest()">🚀 开始连接测试</button>
+
+    <div class="section">
+        <h3>📝 调试日志</h3>
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let connectStartTime = 0;
+        let testMode = 'local';
+
+        const configs = {
+            local: {
+                url: 'ws://192.168.5.23:8085',
+                token: 'b3364638-ab1c-467d-8b67-d37286e72386'
+            },
+            remote: {
+                url: 'wss://acropetal-nonfalteringly-ruben.ngrok-free.dev',
+                token: 'b3364638-ab1c-467d-8b67-d37286e72386'
+            }
+        };
+
+        const readyStates = ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'];
+
+        function log(msg, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-${type}">${msg}</span>`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function detectDevice() {
+            const ua = navigator.userAgent;
+            document.getElementById('userAgent').textContent = ua.substring(0, 50) + '...';
+            const platform = navigator.platform || 'Unknown';
+            document.getElementById('platform').textContent = platform;
+            const isIOS = /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            if (isIOS) {
+                log('检测到 iOS 设备', 'info');
+            }
+            if (navigator.connection) {
+                const conn = navigator.connection;
+                document.getElementById('networkType').textContent = `${conn.effectiveType || '未知'} (${conn.type || '未知'})`;
+                log(`网络类型: ${conn.effectiveType}, RTT: ${conn.rtt}ms`, 'info');
+            } else {
+                document.getElementById('networkType').textContent = '不支持 API';
+            }
+        }
+
+        function detectWebSocket() {
+            const wsSupported = typeof WebSocket !== 'undefined';
+            document.getElementById('wsSupport').textContent = wsSupported ? '✅ 支持' : '❌ 不支持';
+            document.getElementById('wsSupport').className = 'info-value ' + (wsSupported ? 'yes' : 'no');
+            if (!wsSupported) {
+                log('❌ WebSocket API 不支持！', 'error');
+            } else {
+                log('✅ WebSocket API 支持', 'success');
+            }
+            document.getElementById('wssSupport').textContent = wsSupported ? '✅ 支持' : '❌ 不支持';
+            document.getElementById('wssSupport').className = 'info-value ' + (wsSupported ? 'yes' : 'no');
+        }
+
+        function switchMode() {
+            testMode = document.getElementById('modeSelect').value;
+            const config = configs[testMode];
+            document.getElementById('serverUrl').textContent = config.url.substring(0, 35) + '...';
+            document.getElementById('token').textContent = config.token.substring(0, 20) + '...';
+            log(`切换到 ${testMode === 'local' ? '本地 WiFi' : '外网'} 模式`, 'info');
+        }
+
+        function updateState(state, readyStateNum = -1) {
+            document.getElementById('wsState').textContent = state;
+            document.getElementById('wsReadyState').textContent = readyStateNum >= 0 ? `${readyStateNum} (${readyStates[readyStateNum] || 'UNKNOWN'})` : '-';
+        }
+
+        function runTest() {
+            const config = configs[testMode];
+            const btn = document.getElementById('testBtn');
+
+            btn.disabled = true;
+            document.getElementById('log').innerHTML = '';
+            log('=== 开始连接测试 ===', 'info');
+            log(`目标: ${config.url}`, 'info');
+            log(`Token: ${config.token.substring(0, 8)}...`, 'info');
+
+            detectDevice();
+            detectWebSocket();
+
+            if (typeof WebSocket === 'undefined') {
+                log('❌ 浏览器不支持 WebSocket，无法继续', 'error');
+                btn.disabled = false;
+                return;
+            }
+
+            log('尝试创建 WebSocket...', 'info');
+            connectStartTime = Date.now();
+
+            try {
+                log(`new WebSocket("${config.url}")`, 'info');
+                ws = new WebSocket(config.url);
+                updateState('CONNECTING', 0);
+
+                const events = ['open', 'message', 'error', 'close'];
+                events.forEach(eventName => {
+                    ws['on' + eventName] = (event) => {
+                        const elapsed = Date.now() - connectStartTime;
+                        document.getElementById('connectTime').textContent = elapsed + 'ms';
+
+                        log(`📡 事件: ${eventName.toUpperCase()} (${elapsed}ms)`, eventName === 'error' ? 'error' : 'info');
+
+                        if (eventName === 'open') {
+                            updateState('OPEN', 1);
+                            log('✅ WebSocket 连接成功！', 'success');
+                            log('发送认证消息...', 'info');
+                            ws.send(JSON.stringify({ type: 'auth', token: config.token }));
+                        } else if (eventName === 'message') {
+                            log('📨 收到消息: ' + event.data, 'success');
+                            try {
+                                const data = JSON.parse(event.data);
+                                log('解析后: type=' + data.type, 'info');
+                                if (data.type === 'auth_success') {
+                                    log('🎉 认证成功！连接已建立', 'success');
+                                } else if (data.type === 'auth_failed') {
+                                    log('❌ 认证失败：Token 错误', 'error');
+                                }
+                            } catch (e) {}
+                        } else if (eventName === 'error') {
+                            updateState('ERROR', ws?.readyState ?? -1);
+                            log('❌ WebSocket 错误事件触发', 'error');
+                            if (ws) {
+                                log(`当前 readyState: ${ws.readyState} (${readyStates[ws.readyState]})`, 'warn');
+                                log(`URL: ${ws.url}`, 'info');
+                            }
+                            if (testMode === 'local' && location.protocol === 'https:') {
+                                log('⚠️ HTTPS 页面连接 WS (非加密) 可能被阻止！', 'warn');
+                            }
+                            setTimeout(() => {
+                                if (ws) {
+                                    const finalState = ws.readyState;
+                                    log(`最终状态: ${finalState} (${readyStates[finalState]})`, finalState === 1 ? 'success' : 'error');
+                                }
+                                btn.disabled = false;
+                            }, 500);
+                        } else if (eventName === 'close') {
+                            updateState('CLOSED', 3);
+                            log(`连接关闭: code=${event.code}, reason=${event.reason || 'none'}`, 'warn');
+                            btn.disabled = false;
+                        }
+                    };
+                });
+
+                // 只在连接中时检查，连接成功或失败后停止
+                let checkCount = 0;
+                const maxChecks = 20; // 最多检查10秒
+                const stateCheckInterval = setInterval(() => {
+                    if (!ws) {
+                        clearInterval(stateCheckInterval);
+                        return;
+                    }
+                    updateState(readyStates[ws.readyState] || 'UNKNOWN', ws.readyState);
+                    if (ws.readyState === 1) {
+                        // 连接成功，停止检查
+                        clearInterval(stateCheckInterval);
+                        log('✅ 状态监控：连接已建立，停止检查', 'success');
+                    } else if (ws.readyState === 2 || ws.readyState === 3) {
+                        // 连接关闭或正在关闭，停止检查
+                        clearInterval(stateCheckInterval);
+                    }
+                    checkCount++;
+                    if (checkCount >= maxChecks) {
+                        clearInterval(stateCheckInterval);
+                        if (ws.readyState === 0) {
+                            log('⏱️ 连接超时', 'error');
+                        }
+                    }
+                }, 500);
+
+            } catch (err) {
+                log('❌ 创建 WebSocket 时抛出异常: ' + err.message, 'error');
+                log('堆栈: ' + (err.stack || 'none'), 'error');
+                updateState('EXCEPTION', -1);
+                btn.disabled = false;
+            }
+        }
+
+        switchMode();
+        log('调试页面已加载，点击按钮开始测试', 'info');
+        log(`当前页面协议: ${location.protocol}`, 'info');
+        log(`当前页面主机: ${location.host}`, 'info');
+    </script>
+</body>
+</html>

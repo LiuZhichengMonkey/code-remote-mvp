@@ -1,0 +1,37 @@
+{
+  "name": "code-remote-cli",
+  "version": "1.0.0",
+  "description": "CLI tool for CodeRemote - remote Claude Code control via mobile",
+  "main": "dist/index.js",
+  "bin": {
+    "code-remote": "./bin/code-remote.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "cli",
+    "remote",
+    "websocket",
+    "claude"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^12.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^11.0.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
