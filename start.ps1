@@ -1,7 +1,6 @@
 # CodeRemote 一键启动脚本 (PowerShell)
-# 需要以管理员权限运行
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $projectRoot = $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -32,66 +31,95 @@ if (-not (Test-Path "node_modules")) {
 
 # 构建 CLI
 Write-Host "[2/5] 构建 CLI..." -ForegroundColor Yellow
-npm run build | Out-Null
+npm run build 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[错误] CLI 构建失败" -ForegroundColor Red
+    exit 1
+}
+Write-Host "     构建完成" -ForegroundColor Green
 
 # 检查 ngrok
 Write-Host "[3/5] 检查 ngrok..." -ForegroundColor Yellow
-$ngrokPath = Get-Command ngrok -ErrorAction SilentlyContinue
-if (-not $ngrokPath) {
-    Write-Host "     安装 ngrok 中..." -ForegroundColor Yellow
-    winget install --id Ngrok.Ngrok --source winget -h --accept-package-agreements --accept-source-agreements | Out-Null
 
-    # 刷新环境变量
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+# 尝试多种方式找 ngrok
+$ngrokPath = $null
+$ngrokPaths = @(
+    "ngrok",
+    "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe",
+    "$env:ProgramFiles\ngrok\ngrok.exe",
+    "$env:ProgramFiles(x86)\ngrok\ngrok.exe"
+)
 
-    $ngrokPath = Get-Command ngrok -ErrorAction SilentlyContinue
-    if (-not $ngrokPath) {
-        Write-Host "[警告] ngrok 安装失败，请手动安装" -ForegroundColor Red
+foreach ($path in $ngrokPaths) {
+    if ($path -match "ngrok\.exe$") {
+        if (Test-Path $path) {
+            $ngrokPath = $path
+            break
+        }
+    } else {
+        $result = Get-Command $path -ErrorAction SilentlyContinue
+        if ($result) {
+            $ngrokPath = $result.Source
+            break
+        }
     }
 }
 
-# 检查 ngrok authtoken
-$ngrokConfig = "$env:USERPROFILE\AppData\Local\ngrok\ngrok.yml"
-if (-not (Test-Path $ngrokConfig)) {
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host "  首次使用需要配置 ngrok" -ForegroundColor Yellow
-    Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host "1. 访问 https://dashboard.ngrok.com/signup 注册免费账户" -ForegroundColor White
-    Write-Host "2. 获取 authtoken" -ForegroundColor White
-    Write-Host ""
-    $token = Read-Host "请输入 ngrok authtoken (如果没有可跳过)"
-    if ($token) {
-        ngrok config add-authtoken $token
+if (-not $ngrokPath) {
+    Write-Host "     ngrok 未安装，将跳过隧道功能" -ForegroundColor Yellow
+    Write-Host "     如需外网访问，请手动安装 ngrok" -ForegroundColor Yellow
+} else {
+    Write-Host "     ngrok 已找到: $ngrokPath" -ForegroundColor Green
 
-        # 更新 ngrok
-        Write-Host "     更新 ngrok 中..." -ForegroundColor Yellow
-        ngrok update 2>$null
-        Write-Host "     ngrok 配置完成" -ForegroundColor Green
+    # 检查 ngrok authtoken
+    $ngrokConfig = "$env:USERPROFILE\AppData\Local\ngrok\ngrok.yml"
+    if (-not (Test-Path $ngrokConfig)) {
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Yellow
+        Write-Host "  首次使用需要配置 ngrok" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Yellow
+        Write-Host "1. 访问 https://dashboard.ngrok.com/signup 注册" -ForegroundColor White
+        Write-Host "2. 获取 authtoken" -ForegroundColor White
+        Write-Host ""
+        $token = Read-Host "请输入 ngrok authtoken (直接回车跳过)"
+        if ($token) {
+            & $ngrokPath config add-authtoken $token
+            Write-Host "     ngrok 配置完成" -ForegroundColor Green
+        }
     }
 }
 
 # 启动 HTTP 服务器
 Write-Host "[4/5] 启动 HTTP 服务器 (端口 8084)..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$projectRoot\web'; npx http-server -p 8084 -c-1" -WindowStyle Normal
+$httpJob = Start-Job -ScriptBlock {
+    Set-Location $using:projectRoot\web
+    npx http-server -p 8084 -c-1
+} -Name "HTTP Server"
 
 # 等待 HTTP 服务器
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
 
 # 启动 CLI 服务器
 Write-Host "[5/5] 启动 WebSocket 服务器 (端口 8085)..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$projectRoot\cli'; npx code-remote start --port 8085" -WindowStyle Normal
+$cliJob = Start-Job -ScriptBlock {
+    Set-Location $using:projectRoot\cli
+    npx code-remote start --port 8085
+} -Name "CLI Server"
 
 # 等待 CLI 服务器
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 4
 
-# 启动 ngrok 隧道
-Write-Host ""
-Write-Host "启动 ngrok 隧道..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "ngrok http 8085" -WindowStyle Normal
+# 启动 ngrok 隧道 (如果可用)
+if ($ngrokPath) {
+    Write-Host ""
+    Write-Host "启动 ngrok 隧道..." -ForegroundColor Yellow
+    $tunnelJob = Start-Job -ScriptBlock {
+        & $using:ngrokPath http 8085
+    } -Name "ngrok Tunnel"
 
-# 等待 ngrok 启动
-Start-Sleep -Seconds 8
+    # 等待 ngrok 启动
+    Start-Sleep -Seconds 8
+}
 
 # 获取 ngrok URL
 Write-Host ""
@@ -102,22 +130,32 @@ Write-Host ""
 Write-Host "本地测试: http://localhost:8084/cr-debug.html" -ForegroundColor White
 Write-Host ""
 
-try {
-    $tunnels = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
-    $url = $tunnels.tunnels[0].public_url
+if ($ngrokPath) {
+    try {
+        $tunnels = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
+        $url = $tunnels.tunnels[0].public_url
 
-    Write-Host "外网地址: $url" -ForegroundColor Green
-    Write-Host "WebSocket: $($url -replace '^https://', 'wss://')" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Token: 启动 CLI 后显示" -ForegroundColor White
-} catch {
-    Write-Host "ngrok 隧道可能还在启动中..." -ForegroundColor Yellow
+        Write-Host "外网地址: $url" -ForegroundColor Green
+        $wsUrl = $url -replace '^https://', 'wss://'
+        Write-Host "WebSocket: $wsUrl" -ForegroundColor Green
+        Write-Host ""
+    } catch {
+        Write-Host "ngrok 隧道启动中，请稍候..." -ForegroundColor Yellow
+    }
 }
 
-Write-Host ""
-Read-Host "按回车打开浏览器测试"
-Start-Process "http://localhost:8084/cr-debug.html"
-
+Write-Host "Token: 请查看 CLI 服务器输出" -ForegroundColor White
 Write-Host ""
 Write-Host "服务已在后台运行" -ForegroundColor Cyan
-Write-Host "关闭所有 PowerShell 窗口即可停止服务" -ForegroundColor Cyan
+Write-Host "运行 Stop-Job 可停止服务" -ForegroundColor Cyan
+Write-Host ""
+
+# 打开浏览器
+Start-Sleep -Seconds 2
+Start-Process "http://localhost:8084/cr-debug.html"
+
+# 保持脚本运行
+Write-Host "按 Ctrl+C 退出或关闭此窗口" -ForegroundColor Yellow
+while ($true) {
+    Start-Sleep -Seconds 10
+}
