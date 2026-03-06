@@ -93,6 +93,7 @@
             x('正在连接...','received');
             try{
                 w=new WebSocket(u);
+                w.binaryType = 'arraybuffer';
                 w.onopen=()=>{
                     x('连接成功，验证...','received');
                     w.send(JSON.stringify({type:'auth',token:t}))
@@ -114,6 +115,10 @@
                             S('','认证失败');
                             document.getElementById('cb').disabled=!1;
                             x('Token错误','received')
+                        }else if(d.type==='image_saved'){
+                            x(`✅ 图片已保存: ${d.path}`,'received')
+                        }else if(d.type==='image_error'){
+                            x(`❌ 图片错误 [${d.code}]: ${d.error}`,'received')
                         }else if(d.content)x(d.content,'received')
                     }catch(n){
                         x(e.data,'received')
@@ -156,6 +161,46 @@
             i.value=''
         }
         document.getElementById('mi').addEventListener('keypress',e=>{if(e.key==='Enter')e()});
+
+        // 图片上传功能
+        document.getElementById('cb').insertAdjacentHTML('afterend', `
+          <input type="file" id="imageInput" accept="image/*" style="display:none">
+          <button class="b b-primary" onclick="document.getElementById('imageInput').click()" style="margin-top:10px">
+            📷 上传图片
+          </button>
+        `);
+
+        document.getElementById('imageInput').addEventListener('change', async (e) => {
+          const file = e.target.files[0];
+          if (!file || !w || w.readyState !== 1) {
+            x('❌ 请先连接服务器', 'received');
+            e.target.value = '';
+            return;
+          }
+
+          x(`📷 开始上传: ${file.name} (${(file.size/1024).toFixed(1)} KB)`, 'sent');
+
+          try {
+            // 发送元数据
+            w.send(JSON.stringify({
+              type: 'image_meta',
+              fileName: file.name,
+              mimeType: file.type,
+              size: file.size,
+              timestamp: Date.now()
+            }));
+
+            // 发送二进制数据
+            const arrayBuffer = await file.arrayBuffer();
+            w.send(arrayBuffer);
+
+            x('图片数据已发送', 'sent');
+          } catch (err) {
+            x(`❌ 上传失败: ${err.message}`, 'sent');
+          }
+
+          e.target.value = '';
+        });
     </script>
 </body>
 </html>

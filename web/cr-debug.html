@@ -206,6 +206,7 @@
             try {
                 log(`new WebSocket("${config.url}")`, 'info');
                 ws = new WebSocket(config.url);
+                ws.binaryType = 'arraybuffer';
                 updateState('CONNECTING', 0);
 
                 const events = ['open', 'message', 'error', 'close'];
@@ -230,6 +231,10 @@
                                     log('🎉 认证成功！连接已建立', 'success');
                                 } else if (data.type === 'auth_failed') {
                                     log('❌ 认证失败：Token 错误', 'error');
+                                } else if (data.type === 'image_saved') {
+                                    log(`✅ 图片已保存: ${data.path}`, 'success');
+                                } else if (data.type === 'image_error') {
+                                    log(`❌ 图片错误 [${data.code}]: ${data.error}`, 'error');
                                 }
                             } catch (e) {}
                         } else if (eventName === 'error') {
@@ -295,6 +300,46 @@
         log('调试页面已加载，点击按钮开始测试', 'info');
         log(`当前页面协议: ${location.protocol}`, 'info');
         log(`当前页面主机: ${location.host}`, 'info');
+
+        // 图片上传功能
+        document.getElementById('testBtn').insertAdjacentHTML('afterend', `
+          <input type="file" id="imageInput" accept="image/*" style="display:none">
+          <button class="btn btn-primary" onclick="document.getElementById('imageInput').click()" style="margin-top:10px">
+            📷 上传图片
+          </button>
+        `);
+
+        document.getElementById('imageInput').addEventListener('change', async (e) => {
+          const file = e.target.files[0];
+          if (!file || !ws || ws.readyState !== 1) {
+            log('❌ 请先连接服务器', 'error');
+            e.target.value = '';
+            return;
+          }
+
+          log(`📷 开始上传: ${file.name} (${(file.size/1024).toFixed(1)} KB)`, 'info');
+
+          try {
+            // 发送元数据
+            ws.send(JSON.stringify({
+              type: 'image_meta',
+              fileName: file.name,
+              mimeType: file.type,
+              size: file.size,
+              timestamp: Date.now()
+            }));
+
+            // 发送二进制数据
+            const arrayBuffer = await file.arrayBuffer();
+            ws.send(arrayBuffer);
+
+            log('图片数据已发送', 'info');
+          } catch (err) {
+            log(`❌ 上传失败: ${err.message}`, 'error');
+          }
+
+          e.target.value = '';
+        });
     </script>
 </body>
 </html>
