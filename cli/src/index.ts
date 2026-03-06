@@ -7,6 +7,16 @@ import { MessageHandler } from './handler.js';
 import { AuthManager } from './auth.js';
 import { TunnelManager } from './tunnel.js';
 
+// Export ImageHandler and related types
+export { ImageHandler } from './imageHandler.js';
+export { ImageConfig } from './types/image.js';
+export type {
+  ImageMeta,
+  ImageTransferState,
+  ImageSuccessResponse,
+  ImageErrorResponse
+} from './types/image.js';
+
 // Store server instance for cleanup
 let server: CodeRemoteServer | null = null;
 let tunnelManager: any = null;
