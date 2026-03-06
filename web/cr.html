@@ -48,12 +48,18 @@
     <div class="ms" id="ms">
         <div style="text-align:center;color:#64748b;padding:30px;">点击连接开始使用</div>
     </div>
+    <div class="m" style="text-align:center">
+        <h3 style="font-size:14px;color:#94a3b8;margin-bottom:10px">📷 接收的图片</h3>
+        <div id="imageContainer" style="background:#0f3460;border-radius:8px;padding:15px;">
+            <div style="color:#64748b;font-size:12px">等待接收图片...</div>
+        </div>
+    </div>
     <div class="ia">
         <input id="mi" placeholder="输入消息..." disabled>
         <button id="mb" onclick="e()" disabled>发送</button>
     </div>
     <script>
-        let w=null,I=!1,M='l';
+        let w=null,I=!1,M='l',P=null,J=null;
         const C={
             l:{u:'ws://192.168.5.23:8082',i:'本地WiFi - 同一网络'},
             r:{u:'wss://there-levitra-cabinet-syndicate.trycloudflare.com',i:'外网 - 任何地方'}
@@ -99,8 +105,27 @@
                     w.send(JSON.stringify({type:'auth',token:t}))
                 };
                 w.onmessage=e=>{
+                    const data=e.data;
+                    // 处理 ArrayBuffer (图片数据)
+                    if(data instanceof ArrayBuffer){
+                        if(!P){
+                            x('⚠️ 收到图片数据但没有元数据','error');
+                            return
+                        }
+                        if(P){
+                            if(J){URL.revokeObjectURL(J)}
+                            const blob=new Blob([data],{type:P.mimeType}),url=URL.createObjectURL(blob),container=document.getElementById('imageContainer');
+                            J=url;
+                            container.innerHTML=`<img src="${url}" style="max-width:100%;border-radius:8px;margin-bottom:10px"><div style="color:#10b981;font-size:12px"></div>`;
+                            container.querySelector('div').textContent=`${P.fileName} (${(P.size/1024).toFixed(1)} KB)`;
+                            x(`📷 接收图片: ${P.fileName}`,'received');
+                            P=null
+                        }
+                        return
+                    }
+                    // 处理 JSON 消息
                     try{
-                        const d=JSON.parse(e.data);
+                        const d=JSON.parse(data);
                         if(d.type==='auth_success'){
                             I=!0;
                             S('connected','已连接');
@@ -119,9 +144,12 @@
                             x(`✅ 图片已保存: ${d.path}`,'received')
                         }else if(d.type==='image_error'){
                             x(`❌ 图片错误 [${d.code}]: ${d.error}`,'received')
+                        }else if(d.type==='image_meta'){
+                            P=d;
+                            x(`准备接收图片: ${d.fileName}`,'received')
                         }else if(d.content)x(d.content,'received')
                     }catch(n){
-                        x(e.data,'received')
+                        x(data,'received')
                     }
                 };
                 w.onerror=()=>{

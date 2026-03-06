@@ -109,10 +109,18 @@
         <div class="log" id="log"></div>
     </div>
 
+    <div class="section" style="margin-top:15px">
+        <h3>📷 接收的图片</h3>
+        <div id="imageContainer" style="background:#16213e;border-radius:8px;padding:15px;text-align:center;">
+            <div style="color:#64748b;">等待接收图片...</div>
+        </div>
+    </div>
+
     <script>
         let ws = null;
         let connectStartTime = 0;
         let testMode = 'local';
+        let pendingImageMeta = null;
 
         const configs = {
             local: {
@@ -223,18 +231,42 @@
                             log('发送认证消息...', 'info');
                             ws.send(JSON.stringify({ type: 'auth', token: config.token }));
                         } else if (eventName === 'message') {
-                            log('📨 收到消息: ' + event.data, 'success');
+                            const data = event.data;
+
+                            // 处理 ArrayBuffer (图片数据)
+                            if (data instanceof ArrayBuffer) {
+                                if (pendingImageMeta) {
+                                    const blob = new Blob([data], { type: pendingImageMeta.mimeType });
+                                    const url = URL.createObjectURL(blob);
+
+                                    const container = document.getElementById('imageContainer');
+                                    container.innerHTML = `
+                                        <img src="${url}" style="max-width:100%;border-radius:8px;margin-bottom:10px">
+                                        <div style="color:#10b981;font-size:12px;">${pendingImageMeta.fileName} (${(pendingImageMeta.size/1024).toFixed(1)} KB)</div>
+                                    `;
+
+                                    log(`📷 接收图片: ${pendingImageMeta.fileName}`, 'success');
+                                    pendingImageMeta = null;
+                                }
+                                return;
+                            }
+
+                            // 处理 JSON 消息
+                            log('📨 收到消息: ' + data, 'success');
                             try {
-                                const data = JSON.parse(event.data);
-                                log('解析后: type=' + data.type, 'info');
-                                if (data.type === 'auth_success') {
+                                const msg = JSON.parse(data);
+                                log('解析后: type=' + msg.type, 'info');
+                                if (msg.type === 'auth_success') {
                                     log('🎉 认证成功！连接已建立', 'success');
-                                } else if (data.type === 'auth_failed') {
+                                } else if (msg.type === 'auth_failed') {
                                     log('❌ 认证失败：Token 错误', 'error');
-                                } else if (data.type === 'image_saved') {
-                                    log(`✅ 图片已保存: ${data.path}`, 'success');
-                                } else if (data.type === 'image_error') {
-                                    log(`❌ 图片错误 [${data.code}]: ${data.error}`, 'error');
+                                } else if (msg.type === 'image_saved') {
+                                    log(`✅ 图片已保存: ${msg.path}`, 'success');
+                                } else if (msg.type === 'image_error') {
+                                    log(`❌ 图片错误 [${msg.code}]: ${msg.error}`, 'error');
+                                } else if (msg.type === 'image_meta') {
+                                    pendingImageMeta = msg;
+                                    log(`准备接收图片: ${msg.fileName}`, 'info');
                                 }
                             } catch (e) {}
                         } else if (eventName === 'error') {
