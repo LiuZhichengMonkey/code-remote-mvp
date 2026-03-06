@@ -11,6 +11,8 @@
 - ✅ Token-based authentication
 - ✅ Debug web interface for testing
 - ✅ Simple message echo handler
+- ✅ Image transfer (bidirectional, up to 10MB, PNG/JPG/GIF/WebP)
+- ✅ Image saved to E:/CodeRemote/Images/ on server
 
 ### Tested Platforms
 - **iOS Safari**: WebSocket works with WSS (secure WebSocket)
@@ -42,7 +44,7 @@ Happy (https://github.com/slopus/happy) is a production-ready mobile client for 
 | 文本消息 | ✅ | ✅ | 两者都有 |
 | Token 认证 | ✅ | ✅ E2E 加密 | Happy 更强 |
 | 外网访问 | ⚠️ 手动 ngrok | ✅ 自动 | 需改进 |
-| **图片传输** | ❌ | ❌ | **两者都没有** |
+| **图片传输** | ✅ WebSocket 二进制帧 | ❌ | CodeRemote 领先 |
 | 推送通知 | ❌ | ✅ | 需添加 |
 | Claude Code 集成 | ❌ | ✅ 完整 | 核心差距 |
 | 多会话支持 | ❌ | ✅ | 需添加 |
@@ -111,7 +113,7 @@ To implement image transfer, you would need:
 ## Roadmap & Improvements (Priority)
 
 ### P0 - Critical (Must Have)
-1. **Image Transfer Support** - 用户最需要的功能
+1. ~~**Image Transfer Support**~~ - ✅ 已实现 (WebSocket 二进制帧)
 2. **Automated Tunnel** - 当前手动 ngrok 不够友好
 3. **Claude Code Integration** - 核心价值，直接执行 AI 命令
 
@@ -231,15 +233,38 @@ The debug page shows:
 // Message
 { type: 'message', content: 'hello' }
 
-// Image (Future)
-{
-  type: 'image',
-  content: 'base64_data',
-  mimeType: 'image/png',
-  fileName: 'screenshot.png',
-  size: 12345
-}
+// Image upload - Step 1: send metadata (JSON)
+{ type: 'image_meta', fileName: 'photo.png', mimeType: 'image/png', size: 12345, timestamp: 1234567890 }
+
+// Image upload - Step 2: send binary data (ArrayBuffer/Buffer)
+// ws.send(arrayBuffer)  <-- raw binary, no JSON wrapper
+
+// Image saved confirmation (server → client)
+{ type: 'image_saved', path: 'E:/CodeRemote/Images/image_20250306_123456.png', timestamp: 1234567890 }
+
+// Image error (server → client)
+{ type: 'image_error', error: '图片过大', code: 'TOO_LARGE', timestamp: 1234567890 }
 ```
+
+### Image Transfer Architecture
+
+```
+Client                          Server
+  |                               |
+  |-- JSON: {type:'image_meta'} ->|  (1) Send metadata
+  |                               |     fileName, mimeType, size
+  |-- Binary: ArrayBuffer ------->|  (2) Send binary image data
+  |                               |
+  |<- JSON: {type:'image_saved'} -|  (3) Confirmation with path
+  |   OR                          |
+  |<- JSON: {type:'image_error'} -|  (3) Error details
+```
+
+**Image Constraints:**
+- Max size: 10MB
+- Allowed types: PNG, JPEG, GIF, WebP
+- Save path: `E:/CodeRemote/Images/`
+- Filename format: `image_YYYYMMDD_HHMMSS.ext`
 
 ### File Structure
 
@@ -247,8 +272,11 @@ The debug page shows:
 code-remote-mvp/
 ├── cli/                    # Node.js CLI server
 │   ├── src/
-│   │   ├── index.ts        # Entry point
-│   │   ├── server.ts        # WebSocket server
+│   │   ├── index.ts        # Entry point + exports
+│   │   ├── server.ts       # WebSocket server (image transfer)
+│   │   ├── imageHandler.ts # Image validation & saving
+│   │   ├── types/
+│   │   │   └── image.ts    # Image type definitions
 │   │   ├── handler.ts      # Message handling
 │   │   ├── tunnel.ts       # Tunnel management
 │   │   └── qrcode.ts      # QR code generation
