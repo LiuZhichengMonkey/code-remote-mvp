@@ -19,6 +19,115 @@
 
 ---
 
+## CodeRemote vs Happy Comparison
+
+Happy (https://github.com/slopus/happy) is a production-ready mobile client for Claude Code & Codex. This section compares CodeRemote MVP with Happy.
+
+### Project Positioning
+
+| Aspect | CodeRemote | Happy |
+|--------|-----------|-------|
+| **定位** | MVP 原型验证 | 完整生产级产品 |
+| **成熟度** | 实验阶段 | 已发布 App Store/Google Play |
+| **代码量** | ~3000 行 | ~50000+ 行 |
+| **CLI 集成** | 独立 WebSocket 服务器 | 完整包装器，直接替换 claude/codex |
+| **App 框架** | Flutter (未完成) | Expo + React Native |
+| **后端服务器** | 无 (直连) | 独立服务器 (加密同步) |
+| **隧道方案** | 手动 ngrok | 自动内嵌 |
+
+### Feature Comparison
+
+| 功能 | CodeRemote | Happy | Status |
+|------|------------|-------|--------|
+| 文本消息 | ✅ | ✅ | 两者都有 |
+| Token 认证 | ✅ | ✅ E2E 加密 | Happy 更强 |
+| 外网访问 | ⚠️ 手动 ngrok | ✅ 自动 | 需改进 |
+| **图片传输** | ❌ | ❌ | **两者都没有** |
+| 推送通知 | ❌ | ✅ | 需添加 |
+| Claude Code 集成 | ❌ | ✅ 完整 | 核心差距 |
+| 多会话支持 | ❌ | ✅ | 需添加 |
+| 文件传输 | ❌ | ❌ | 两者都没有 |
+| 代码高亮 | ❌ | ✅ | 需添加 |
+| QR 码扫描 | ⚠️ 基础 | ✅ | 需完善 |
+| 端到端加密 | ❌ | ✅ Signal Protocol | 安全差距 |
+
+### Key Differences
+
+**Happy's Advantages:**
+1. **Deep Claude Code Integration** - 直接替换 `claude` 或 `codex` 命令
+2. **End-to-End Encryption** - 使用 Signal Protocol
+3. **Push Notifications** - iOS/Android 原生推送
+4. **Automatic Tunnel** - 内置无需手动配置
+5. **Session Management** - 本地/远程无缝切换
+6. **Production Ready** - App Store/Play Store 上架
+
+**CodeRemote's Advantages:**
+1. **Simplicity** - 易于理解和修改
+2. **Web Interface** - 可直接在浏览器测试
+3. **Open Source** - 完全透明
+4. **Lightweight** - 无需复杂依赖
+5. **Debug Tools** - cr-debug.html 诊断工具
+
+### Image Transfer Support
+
+**Current Status: Neither CodeRemote nor Happy supports image transfer.**
+
+To implement image transfer, you would need:
+
+1. **WebSocket Binary Support**
+   ```typescript
+   // Server side
+   ws.on('message', (data, isBinary) => {
+     if (isBinary) {
+       // Handle binary data
+     }
+   });
+   ```
+
+2. **Base64 Encoding** (Simple approach)
+   ```typescript
+   {
+     type: 'image',
+     content: 'base64_encoded_image_data',
+     mimeType: 'image/png',
+     fileName: 'screenshot.png',
+     size: 12345
+   }
+   ```
+
+3. **Chunked Transfer** (For large images)
+   ```typescript
+   {
+     type: 'image_chunk',
+     chunkId: 'uuid',
+     chunkIndex: 0,
+     totalChunks: 10,
+     data: '...'
+   }
+   ```
+
+---
+
+## Roadmap & Improvements (Priority)
+
+### P0 - Critical (Must Have)
+1. **Image Transfer Support** - 用户最需要的功能
+2. **Automated Tunnel** - 当前手动 ngrok 不够友好
+3. **Claude Code Integration** - 核心价值，直接执行 AI 命令
+
+### P1 - Important (Should Have)
+4. **End-to-End Encryption** - 安全考虑
+5. **Push Notifications** - 主动通知
+6. **QR Code Scanning** - 完善 Flutter App
+
+### P2 - Enhancement (Nice to Have)
+7. **File Transfer** - 除图片外的文件传输
+8. **Code Syntax Highlighting** - 代码可读性
+9. **Multi-Session Support** - 多设备同时连接
+10. **Session Persistence** - 断线重连恢复
+
+---
+
 ## External Network Access (4G/5G)
 
 ### Solution: ngrok
@@ -121,6 +230,15 @@ The debug page shows:
 
 // Message
 { type: 'message', content: 'hello' }
+
+// Image (Future)
+{
+  type: 'image',
+  content: 'base64_data',
+  mimeType: 'image/png',
+  fileName: 'screenshot.png',
+  size: 12345
+}
 ```
 
 ### File Structure
@@ -142,12 +260,15 @@ code-remote-mvp/
 │       ├── screens/        # UI screens
 │       └── widgets/        # Reusable widgets
 │
-└── web/                    # Web test interfaces
-    ├── index.html          # Main web UI
-    ├── cr.html             # Compact web UI
-    ├── mobile.html         # Mobile-optimized UI
-    ├── cr-debug.html       # Debug tool
-    └── mobile-debug.html   # Mobile debug tool
+├── web/                    # Web test interfaces
+│   ├── index.html          # Main web UI
+│   ├── cr.html             # Compact web UI
+│   ├── mobile.html         # Mobile-optimized UI
+│   ├── cr-debug.html       # Debug tool
+│   └── mobile-debug.html   # Mobile debug tool
+│
+├── start.bat               # Windows startup script
+└── start.ps1               # PowerShell startup script
 ```
 
 ---
@@ -209,17 +330,6 @@ ngrok http 8085
 2. Ensure using WSS (not WS) for external
 3. Verify token matches server
 4. Check if server is running
-
----
-
-## Future Improvements
-
-1. **Auto-reconnect**: Handle connection drops gracefully
-2. **Multi-client support**: Multiple phones connected simultaneously
-3. **Claude Code Integration**: Actually execute Claude Code commands
-4. **File Transfer**: Send/receive files
-5. **Push Notifications**: Alert when server has new messages
-6. **Voice Input**: Speech-to-text on mobile
 
 ---
 
