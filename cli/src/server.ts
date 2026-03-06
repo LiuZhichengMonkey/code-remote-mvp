@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
+import { ClaudeHandler } from './handlers/claude';
 
 export interface Client {
   id: string;
@@ -23,13 +24,16 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'ping' | 'image_meta';
+  type: 'auth' | 'message' | 'ping' | 'image_meta' | 'claude' | 'session';
   token?: string;
   content?: string;
   fileName?: string;
   mimeType?: string;
   size?: number;
   timestamp?: number;
+  action?: 'new' | 'resume' | 'list' | 'delete';
+  sessionId?: string;
+  stream?: boolean;
 }
 
 export class CodeRemoteServer {
@@ -40,6 +44,7 @@ export class CodeRemoteServer {
   private messageHandler?: (clientId: string, content: string) => void;
   private connectionHandler?: (clientId: string) => void;
   private disconnectHandler?: (clientId: string) => void;
+  private claudeHandler: ClaudeHandler;
   private imageConfig = {
     savePath: 'E:/CodeRemote/Images',
     maxSize: 10 * 1024 * 1024,
@@ -50,6 +55,7 @@ export class CodeRemoteServer {
   constructor(port: number = 8080, token?: string) {
     this.port = port;
     this.token = token || uuidv4();
+    this.claudeHandler = new ClaudeHandler();
     this.wss = new WebSocketServer({ port });
     this.setupServer();
   }
@@ -129,6 +135,14 @@ export class CodeRemoteServer {
         this.handleClientMessage(ws, message.content);
         break;
 
+      case 'claude':
+        this.handleClaudeMessage(ws, message);
+        break;
+
+      case 'session':
+        this.handleSessionAction(ws, message);
+        break;
+
       case 'image_meta':
         this.handleImageMeta(ws, message);
         break;
@@ -197,6 +211,60 @@ export class CodeRemoteServer {
 
     // Echo for MVP - in real app, this would process with Claude Code
     console.log(chalk.blue('Message:'), content);
+  }
+
+  private handleClaudeMessage(ws: WebSocket, message: ClientMessage) {
+    // Find client
+    let clientId: string | null = null;
+    for (const [id, c] of this.clients) {
+      if (c.ws === ws) {
+        clientId = id;
+        break;
+      }
+    }
+
+    if (!clientId || !this.clients.get(clientId)?.authenticated) {
+      this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    const content = message.content || '';
+    console.log(chalk.magenta('🤖'), `Claude request: ${content.substring(0, 50)}...`);
+
+    this.claudeHandler.handleClaudeMessage(
+      ws,
+      content,
+      (code, errorMsg) => {
+        ws.send(JSON.stringify({
+          type: 'claude_error',
+          error: errorMsg,
+          code,
+          timestamp: Date.now()
+        }));
+      }
+    );
+  }
+
+  private handleSessionAction(ws: WebSocket, message: ClientMessage) {
+    // Find client
+    let clientId: string | null = null;
+    for (const [id, c] of this.clients) {
+      if (c.ws === ws) {
+        clientId = id;
+        break;
+      }
+    }
+
+    if (!clientId || !this.clients.get(clientId)?.authenticated) {
+      this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    this.claudeHandler.handleSessionAction(
+      ws,
+      message.action || 'list',
+      message.sessionId
+    );
   }
 
   private handleImageMeta(ws: WebSocket, message: ClientMessage) {
