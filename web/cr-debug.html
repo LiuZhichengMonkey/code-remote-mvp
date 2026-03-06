@@ -104,6 +104,30 @@
 
     <button class="btn btn-primary" id="testBtn" onclick="runTest()">🚀 开始连接测试</button>
 
+    <div class="section" style="margin-top:15px">
+        <h3>🤖 Claude Code</h3>
+        <div class="claude-controls" style="margin-bottom:10px">
+            <select id="streamMode" style="padding:8px;border-radius:6px;background:#16213e;color:#fff;border:1px solid #0f3460">
+                <option value="realtime">实时流式</option>
+                <option value="segmented">分段推送</option>
+            </select>
+            <button class="btn" onclick="newSession()" style="margin-left:5px">新建会话</button>
+            <button class="btn" onclick="listSessions()" style="margin-left:5px">会话列表</button>
+        </div>
+        <div class="session-info" style="margin-bottom:10px;color:#94a3b8;font-size:12px">
+            当前会话: <span id="currentSession">-</span>
+        </div>
+        <div style="display:flex;gap:10px">
+            <input type="text" id="claudeInput" placeholder="输入消息给 Claude..."
+                   style="flex:1;padding:10px;border-radius:8px;background:#16213e;color:#fff;border:1px solid #0f3460"
+                   onkeypress="if(event.key==='Enter')sendClaudeMessage()">
+            <button class="btn btn-primary" onclick="sendClaudeMessage()">发送</button>
+        </div>
+        <div id="claudeOutput" style="margin-top:10px;padding:10px;background:#16213e;border-radius:8px;min-height:100px;white-space:pre-wrap;font-family:monospace;font-size:13px">
+            <span style="color:#64748b">Claude 响应将显示在这里...</span>
+        </div>
+    </div>
+
     <div class="section">
         <h3>📝 调试日志</h3>
         <div class="log" id="log"></div>
@@ -279,6 +303,29 @@
                                 } else if (msg.type === 'image_meta') {
                                     pendingImageMeta = msg;
                                     log(`准备接收图片: ${msg.fileName}`, 'info');
+                                } else if (msg.type === 'claude_start') {
+                                    log('🤖 Claude 开始响应...', 'info');
+                                    document.getElementById('claudeOutput').innerHTML = '';
+                                } else if (msg.type === 'claude_stream') {
+                                    if (msg.content) {
+                                        document.getElementById('claudeOutput').innerHTML += msg.content;
+                                    }
+                                    if (msg.done) {
+                                        log('✅ Claude 响应完成', 'success');
+                                    }
+                                } else if (msg.type === 'claude_error') {
+                                    log(`❌ Claude 错误 [${msg.code}]: ${msg.error}`, 'error');
+                                } else if (msg.type === 'claude_done') {
+                                    log('✅ Claude 响应完成', 'success');
+                                } else if (msg.type === 'session_created') {
+                                    log(`📝 新会话已创建: ${msg.session.id}`, 'success');
+                                    document.getElementById('currentSession').textContent = msg.session.title;
+                                } else if (msg.type === 'session_list') {
+                                    log(`📋 会话列表: ${msg.sessions.length} 个会话`, 'info');
+                                    console.log('Sessions:', msg.sessions);
+                                } else if (msg.type === 'session_resumed') {
+                                    log(`▶️ 已恢复会话: ${msg.session.title}`, 'success');
+                                    document.getElementById('currentSession').textContent = msg.session.title;
                                 }
                             } catch (e) {}
                         } else if (eventName === 'error') {
@@ -384,6 +431,55 @@
 
           e.target.value = '';
         });
+
+        // Claude 消息发送
+        function sendClaudeMessage() {
+            const input = document.getElementById('claudeInput');
+            const content = input.value.trim();
+            if (!content) return;
+
+            if (!ws || ws.readyState !== 1) {
+                log('❌ 请先连接服务器', 'error');
+                return;
+            }
+
+            const streamMode = document.getElementById('streamMode').value;
+            ws.send(JSON.stringify({
+                type: 'claude',
+                content,
+                stream: true,
+                timestamp: Date.now()
+            }));
+
+            log(`📤 发送给 Claude: ${content.substring(0, 50)}...`, 'info');
+            input.value = '';
+        }
+
+        // 新建会话
+        function newSession() {
+            if (!ws || ws.readyState !== 1) {
+                log('❌ 请先连接服务器', 'error');
+                return;
+            }
+            ws.send(JSON.stringify({
+                type: 'session',
+                action: 'new',
+                timestamp: Date.now()
+            }));
+        }
+
+        // 列出会话
+        function listSessions() {
+            if (!ws || ws.readyState !== 1) {
+                log('❌ 请先连接服务器', 'error');
+                return;
+            }
+            ws.send(JSON.stringify({
+                type: 'session',
+                action: 'list',
+                timestamp: Date.now()
+            }));
+        }
     </script>
 </body>
 </html>
