@@ -1,12 +1,18 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
+import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
 
 export interface Client {
   id: string;
   ws: WebSocket;
   authenticated: boolean;
   connectedAt: Date;
+  imageTransfer?: {
+    inProgress: boolean;
+    meta: import('./types/image').ImageMeta | null;
+    startTime: number;
+  } | undefined;
 }
 
 export interface ServerMessage {
@@ -17,9 +23,12 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'ping';
+  type: 'auth' | 'message' | 'ping' | 'image_meta';
   token?: string;
   content?: string;
+  fileName?: string;
+  mimeType?: string;
+  size?: number;
   timestamp?: number;
 }
 
@@ -31,6 +40,12 @@ export class CodeRemoteServer {
   private messageHandler?: (clientId: string, content: string) => void;
   private connectionHandler?: (clientId: string) => void;
   private disconnectHandler?: (clientId: string) => void;
+  private imageConfig = {
+    savePath: 'E:/CodeRemote/Images',
+    maxSize: 10 * 1024 * 1024,
+    allowedTypes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+    createDirectory: true
+  };
 
   constructor(port: number = 8080, token?: string) {
     this.port = port;
@@ -71,12 +86,16 @@ export class CodeRemoteServer {
         ws.ping();
       }, 30000);
 
-      ws.on('message', (data: Buffer) => {
-        try {
-          const message: ClientMessage = JSON.parse(data.toString());
-          this.handleMessage(ws, message, pingInterval);
-        } catch (error) {
-          this.sendError(ws, 'Invalid message format');
+      ws.on('message', (data: Buffer, isBinary: boolean) => {
+        if (isBinary) {
+          this.handleBinaryMessage(ws, data);
+        } else {
+          try {
+            const message: ClientMessage = JSON.parse(data.toString());
+            this.handleMessage(ws, message, pingInterval);
+          } catch (error) {
+            this.sendError(ws, 'Invalid message format');
+          }
         }
       });
 
@@ -100,7 +119,7 @@ export class CodeRemoteServer {
     });
   }
 
-  private handleMessage(ws: WebSocket, message: ClientMessage, pingInterval: NodeJS.Timeout) {
+  private handleMessage(ws: WebSocket, message: ClientMessage, pingInterval?: NodeJS.Timeout) {
     switch (message.type) {
       case 'auth':
         this.handleAuth(ws, message.token, pingInterval);
@@ -108,6 +127,10 @@ export class CodeRemoteServer {
 
       case 'message':
         this.handleClientMessage(ws, message.content);
+        break;
+
+      case 'image_meta':
+        this.handleImageMeta(ws, message);
         break;
 
       case 'ping':
@@ -176,6 +199,36 @@ export class CodeRemoteServer {
     console.log(chalk.blue('Message:'), content);
   }
 
+  private handleImageMeta(ws: WebSocket, message: ClientMessage) {
+    // Find client
+    let client: Client | null = null;
+    for (const [id, c] of this.clients) {
+      if (c.ws === ws) {
+        client = c;
+        break;
+      }
+    }
+
+    if (!client || !client.authenticated) {
+      this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    // Set image transfer state
+    client.imageTransfer = {
+      inProgress: true,
+      meta: {
+        fileName: message.fileName!,
+        mimeType: message.mimeType!,
+        size: message.size!,
+        timestamp: message.timestamp || Date.now()
+      },
+      startTime: Date.now()
+    };
+
+    console.log(chalk.yellow('📷'), `准备接收图片: ${message.fileName} (${(message.size! / 1024).toFixed(1)} KB)`);
+  }
+
   private handleDisconnection(ws: WebSocket) {
     let clientId: string | null = null;
     for (const [id, client] of this.clients) {
@@ -191,6 +244,72 @@ export class CodeRemoteServer {
         this.disconnectHandler(clientId);
       }
     }
+  }
+
+  private async handleBinaryMessage(ws: WebSocket, data: Buffer) {
+    // Find client
+    let client: Client | null = null;
+    let clientId: string | null = null;
+    for (const [id, c] of this.clients) {
+      if (c.ws === ws) {
+        client = c;
+        clientId = id;
+        break;
+      }
+    }
+
+    if (!client || !client.authenticated) {
+      this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    if (!client.imageTransfer?.inProgress || !client.imageTransfer?.meta) {
+      this.sendError(ws, '协议错误：未预期的二进制数据');
+      return;
+    }
+
+    try {
+      const { ImageHandler } = await import('./imageHandler');
+      const imageHandler = new ImageHandler(this.imageConfig);
+
+      const savedPath = await imageHandler.handleImage(
+        clientId!,
+        data,
+        client.imageTransfer.meta
+      );
+
+      const response: ImageSuccessResponse = {
+        type: 'image_saved',
+        path: savedPath,
+        timestamp: Date.now()
+      };
+
+      client.ws.send(JSON.stringify(response));
+      console.log(chalk.green('✓'), `图片已保存: ${savedPath}`);
+
+      // Reset transfer state
+      client.imageTransfer = undefined;
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorResponse: ImageErrorResponse = {
+        type: 'image_error',
+        error: errorMsg,
+        code: this.getErrorCode(errorMsg),
+        timestamp: Date.now()
+      };
+
+      client.ws.send(JSON.stringify(errorResponse));
+      console.log(chalk.red('✗'), `图片处理失败: ${errorMsg}`);
+
+      client.imageTransfer = undefined;
+    }
+  }
+
+  private getErrorCode(message: string): 'TOO_LARGE' | 'INVALID_TYPE' | 'TIMEOUT' | 'DISK_FULL' | 'PROTOCOL_ERROR' {
+    if (message.includes('图片过大')) return 'TOO_LARGE';
+    if (message.includes('不支持的文件类型')) return 'INVALID_TYPE';
+    if (message.includes('磁盘空间')) return 'DISK_FULL';
+    return 'PROTOCOL_ERROR';
   }
 
   private sendError(ws: WebSocket, message: string) {
@@ -274,6 +393,39 @@ export class CodeRemoteServer {
         id: c.id,
         connectedAt: c.connectedAt
       }));
+  }
+
+  async sendImageToClient(clientId: string, imagePath: string): Promise<boolean> {
+    const client = this.clients.get(clientId);
+    if (!client || !client.authenticated) {
+      return false;
+    }
+
+    try {
+      const { ImageHandler } = await import('./imageHandler');
+      const imageHandler = new ImageHandler(this.imageConfig);
+
+      const { buffer, meta } = await imageHandler.loadImage(imagePath);
+
+      // Send metadata
+      client.ws.send(JSON.stringify({
+        type: 'image_meta',
+        fileName: meta.fileName,
+        mimeType: meta.mimeType,
+        size: meta.size,
+        timestamp: Date.now()
+      }));
+
+      // Send binary data
+      client.ws.send(buffer);
+
+      console.log(chalk.yellow('📷'), `发送图片到客户端 ${clientId}: ${meta.fileName}`);
+      return true;
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(chalk.red('发送图片失败:'), errorMsg);
+      return false;
+    }
   }
 
   close() {
