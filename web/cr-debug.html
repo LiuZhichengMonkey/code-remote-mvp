@@ -121,15 +121,16 @@
         let connectStartTime = 0;
         let testMode = 'local';
         let pendingImageMeta = null;
+        let currentImageUrl = null;
 
         const configs = {
             local: {
                 url: 'ws://192.168.5.23:8085',
-                token: 'b3364638-ab1c-467d-8b67-d37286e72386'
+                token: 'test123'
             },
             remote: {
                 url: 'wss://acropetal-nonfalteringly-ruben.ngrok-free.dev',
-                token: 'b3364638-ab1c-467d-8b67-d37286e72386'
+                token: 'test123'
             }
         };
 
@@ -235,15 +236,26 @@
 
                             // 处理 ArrayBuffer (图片数据)
                             if (data instanceof ArrayBuffer) {
+                                if (!pendingImageMeta) {
+                                    log('⚠️ 收到图片数据但没有元数据', 'error');
+                                    return;
+                                }
                                 if (pendingImageMeta) {
+                                    // Revoke previous URL if exists
+                                    if (currentImageUrl) {
+                                        URL.revokeObjectURL(currentImageUrl);
+                                    }
+
                                     const blob = new Blob([data], { type: pendingImageMeta.mimeType });
                                     const url = URL.createObjectURL(blob);
+                                    currentImageUrl = url; // Track for cleanup
 
                                     const container = document.getElementById('imageContainer');
                                     container.innerHTML = `
                                         <img src="${url}" style="max-width:100%;border-radius:8px;margin-bottom:10px">
-                                        <div style="color:#10b981;font-size:12px;">${pendingImageMeta.fileName} (${(pendingImageMeta.size/1024).toFixed(1)} KB)</div>
+                                        <div style="color:#10b981;font-size:12px;"></div>
                                     `;
+                                    container.querySelector('div').textContent = `${pendingImageMeta.fileName} (${(pendingImageMeta.size/1024).toFixed(1)} KB)`;
 
                                     log(`📷 接收图片: ${pendingImageMeta.fileName}`, 'success');
                                     pendingImageMeta = null;
