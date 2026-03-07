@@ -9,8 +9,9 @@ export class ClaudeHandler {
 
   constructor(workspaceRoot?: string) {
     this.engine = new ClaudeCodeEngine();
-    this.sessionManager = new SessionManager();
+    this.sessionManager = new SessionManager(workspaceRoot);
     this.commandHandler = new CommandHandler(workspaceRoot);
+    console.log(`[ClaudeHandler] Workspace: ${workspaceRoot || process.cwd()}`);
   }
 
   async handleClaudeMessage(
@@ -46,6 +47,16 @@ export class ClaudeHandler {
       return;
     }
 
+    // 获取当前会话
+    const currentSession = this.sessionManager.getCurrent();
+    const isNewSession = !currentSession;
+
+    // 如果没有当前会话，先创建一个临时占位（会在收到 Claude CLI session ID 后更新）
+    if (!currentSession) {
+      // 先创建临时会话，但不保存到存储
+      this.sessionManager.createTemporary();
+    }
+
     // 创建用户消息
     const userMessage = createMessage('user', content);
     this.sessionManager.addMessage(userMessage);
@@ -61,8 +72,12 @@ export class ClaudeHandler {
     }));
 
     try {
+      // 获取当前会话的 Claude CLI session ID
+      const session = this.sessionManager.getCurrent();
+      const claudeSessionId = session?.claudeSessionId;
+
       // 调用 Claude
-      const response = await this.engine.sendMessage(
+      const result = await this.engine.sendMessage(
         content,
         messages,
         (chunk, done, thinking) => {
@@ -73,17 +88,40 @@ export class ClaudeHandler {
             done,
             timestamp: Date.now()
           }));
-        }
+        },
+        claudeSessionId
       );
 
+      // 如果是新会话，使用 Claude CLI 返回的 session ID
+      if (isNewSession && result.claudeSessionId) {
+        // 更新会话 ID 为 Claude CLI 的 session ID
+        this.sessionManager.updateSessionId(result.claudeSessionId);
+        console.log(`[ClaudeHandler] Updated session ID to Claude CLI session: ${result.claudeSessionId}`);
+
+        // 通知前端会话 ID 已更新
+        ws.send(JSON.stringify({
+          type: 'session_id_updated',
+          oldSessionId: session?.id,
+          newSessionId: result.claudeSessionId,
+          title: content.substring(0, 50),
+          timestamp: Date.now()
+        }));
+      } else if (result.claudeSessionId && result.claudeSessionId !== claudeSessionId) {
+        // 保存 Claude CLI session ID（用于下次恢复会话）
+        this.sessionManager.setClaudeSessionId(result.claudeSessionId);
+        console.log(`[ClaudeHandler] Saved Claude CLI session ID: ${result.claudeSessionId}`);
+      }
+
       // 保存助手响应
-      const assistantMessage = createMessage('assistant', response);
+      const assistantMessage = createMessage('assistant', result.response);
       this.sessionManager.addMessage(assistantMessage);
 
       // 发送完成信号
       ws.send(JSON.stringify({
         type: 'claude_done',
         messageId: assistantMessage.id,
+        sessionId: this.sessionManager.getCurrent()?.id,
+        claudeSessionId: result.claudeSessionId,
         timestamp: Date.now()
       }));
 
@@ -101,14 +139,16 @@ export class ClaudeHandler {
   ): void {
     switch (action) {
       case 'new':
-        const newSession = this.sessionManager.create();
+        // 创建临时会话（不保存到存储，等待第一条消息时获取 Claude CLI 的 session ID）
+        const newSession = this.sessionManager.createTemporary();
         ws.send(JSON.stringify({
           type: 'session_created',
           session: {
             id: newSession.id,
             title: newSession.title,
             createdAt: newSession.createdAt,
-            messageCount: 0
+            messageCount: 0,
+            isTemporary: true
           },
           timestamp: Date.now()
         }));
@@ -127,12 +167,18 @@ export class ClaudeHandler {
         if (sessionId) {
           const session = this.sessionManager.resume(sessionId);
           if (session) {
+            // 转换消息格式：assistant -> model
+            const messages = session.messages.map(msg => ({
+              ...msg,
+              role: msg.role === 'assistant' ? 'model' : msg.role
+            }));
             ws.send(JSON.stringify({
               type: 'session_resumed',
               session: {
                 id: session.id,
                 title: session.title,
-                messages: session.messages
+                messages,
+                createdAt: session.createdAt
               },
               timestamp: Date.now()
             }));

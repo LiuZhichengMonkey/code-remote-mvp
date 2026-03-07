@@ -38,21 +38,24 @@ export class ClaudeCodeEngine {
   async sendMessage(
     message: string,
     messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean, thinking?: string) => void
-  ): Promise<string> {
+    onChunk: (content: string, done: boolean, thinking?: string) => void,
+    claudeSessionId?: string
+  ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
     if (useCLI) {
-      return this.callClaudeCLI(message, onChunk);
+      return this.callClaudeCLI(message, onChunk, claudeSessionId);
     } else {
-      return this.callAnthropicAPI(messages, onChunk);
+      const response = await this.callAnthropicAPI(messages, onChunk);
+      return { response, claudeSessionId };
     }
   }
 
   private async callClaudeCLI(
     prompt: string,
-    onChunk: (content: string, done: boolean, thinking?: string) => void
-  ): Promise<string> {
+    onChunk: (content: string, done: boolean, thinking?: string) => void,
+    claudeSessionId?: string
+  ): Promise<{ response: string; claudeSessionId?: string }> {
     return new Promise((resolve, reject) => {
       // 设置环境变量
       const env = {
@@ -63,14 +66,22 @@ export class ClaudeCodeEngine {
 
       console.log('[Claude CLI] Starting stream...');
       console.log('[Claude CLI] Prompt:', prompt.substring(0, 50) + '...');
+      console.log('[Claude CLI] Resume session:', claudeSessionId || 'new session');
 
       const args = [
         '--print',
         '--verbose',
         '--output-format', 'stream-json',
         '--include-partial-messages',
-        prompt
       ];
+
+      // 添加 --resume 参数恢复会话
+      if (claudeSessionId) {
+        args.push('--resume', claudeSessionId);
+      }
+
+      args.push(prompt);
+
       console.log('[Claude CLI] Args:', args.join(' '));
 
       // 使用 stream-json 格式获取实时流式输出
@@ -84,6 +95,7 @@ export class ClaudeCodeEngine {
       let fullResponse = '';
       let fullThinking = '';
       let stderr = '';
+      let responseSessionId = claudeSessionId;
 
       proc.stdout.on('data', (data) => {
         const chunk = data.toString();
@@ -167,6 +179,15 @@ export class ClaudeCodeEngine {
                 reject(new Error(json.result || 'Unknown error'));
                 return;
               }
+              // 提取 session ID
+              if (json.session_id) {
+                responseSessionId = json.session_id;
+                console.log('[Claude CLI] Session ID:', responseSessionId);
+              }
+            }
+            // 从其他响应中提取 session ID
+            if (json.sessionId && !responseSessionId) {
+              responseSessionId = json.sessionId;
             }
           } catch (e) {
             // 如果不是 JSON，忽略
@@ -209,7 +230,10 @@ export class ClaudeCodeEngine {
           onChunk(fullResponse, true);
         }
 
-        resolve(fullResponse);
+        resolve({
+          response: fullResponse,
+          claudeSessionId: responseSessionId
+        });
       });
     });
   }

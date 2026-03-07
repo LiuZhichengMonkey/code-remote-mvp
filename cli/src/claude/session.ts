@@ -5,9 +5,10 @@ export class SessionManager {
   private storage: SessionStorage;
   private currentSession: ClaudeSession | null = null;
   private sessions: Map<string, ClaudeSession> = new Map();
+  private isTemporarySession: boolean = false;
 
-  constructor() {
-    this.storage = new SessionStorage();
+  constructor(workspaceRoot?: string) {
+    this.storage = new SessionStorage(workspaceRoot);
     this.loadAllSessions();
   }
 
@@ -22,9 +23,42 @@ export class SessionManager {
     const sessionTitle = title || 'New Chat';
     const session = createSession(sessionTitle);
     this.sessions.set(session.id, session);
-    this.storage.save(session);
+    // 不保存到存储 - Claude CLI 会自己管理会话文件
     this.currentSession = session;
+    this.isTemporarySession = true; // 标记为临时，等待 Claude CLI session ID
     return session;
+  }
+
+  // 创建临时会话（不保存到存储，等待 Claude CLI session ID）
+  createTemporary(): ClaudeSession {
+    const session = createSession('New Chat');
+    this.currentSession = session;
+    this.isTemporarySession = true;
+    return session;
+  }
+
+  // 更新会话 ID（当 Claude CLI 返回 session ID 时使用）
+  updateSessionId(newSessionId: string): void {
+    if (!this.currentSession) return;
+
+    const oldId = this.currentSession.id;
+
+    // 从存储加载 Claude CLI 创建的会话
+    const claudeSession = this.storage.load(newSessionId);
+    if (claudeSession) {
+      // 使用 Claude CLI 的会话替换临时会话
+      this.currentSession = claudeSession;
+      this.sessions.delete(oldId);
+      this.sessions.set(newSessionId, claudeSession);
+      console.log(`[SessionManager] Loaded Claude CLI session: ${newSessionId}`);
+    } else {
+      // 如果加载失败，只更新 ID
+      this.currentSession.id = newSessionId;
+      this.currentSession.claudeSessionId = newSessionId;
+      this.sessions.delete(oldId);
+      this.sessions.set(newSessionId, this.currentSession);
+    }
+    this.isTemporarySession = false;
   }
 
   resume(sessionId: string): ClaudeSession | null {
@@ -54,9 +88,8 @@ export class SessionManager {
 
   addMessage(message: ClaudeMessage): void {
     if (!this.currentSession) {
-      // 自动创建新会话
-      const title = message.content.substring(0, 50);
-      this.create(title);
+      // 自动创建临时会话
+      this.createTemporary();
     }
     if (this.currentSession) {
       this.currentSession.messages.push(message);
@@ -65,7 +98,7 @@ export class SessionManager {
       if (this.currentSession.messages.length === 1 && message.role === 'user') {
         this.currentSession.title = message.content.substring(0, 50);
       }
-      this.storage.save(this.currentSession);
+      // 不保存到存储 - Claude CLI 会自己管理会话文件
     }
   }
 
@@ -105,7 +138,7 @@ export class SessionManager {
   setClaudeSessionId(claudeSessionId: string): void {
     if (this.currentSession) {
       this.currentSession.claudeSessionId = claudeSessionId;
-      this.storage.save(this.currentSession);
+      // 不保存到存储 - Claude CLI 会自己管理会话文件
     }
   }
 }

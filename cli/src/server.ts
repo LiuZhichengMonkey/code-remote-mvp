@@ -45,6 +45,7 @@ export class CodeRemoteServer {
   private connectionHandler?: (clientId: string) => void;
   private disconnectHandler?: (clientId: string) => void;
   private claudeHandler: ClaudeHandler;
+  private workspaceRoot: string;
   private imageConfig = {
     savePath: 'E:/CodeRemote/Uploads',
     maxSize: 50 * 1024 * 1024, // 50MB
@@ -52,10 +53,11 @@ export class CodeRemoteServer {
     createDirectory: true
   };
 
-  constructor(port: number = 8080, token?: string) {
+  constructor(port: number = 8080, token?: string, workspaceRoot?: string) {
     this.port = port;
     this.token = token || uuidv4();
-    this.claudeHandler = new ClaudeHandler();
+    this.workspaceRoot = workspaceRoot || process.cwd();
+    this.claudeHandler = new ClaudeHandler(this.workspaceRoot);
     this.wss = new WebSocketServer({ port });
     this.setupServer();
   }

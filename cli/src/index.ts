@@ -46,6 +46,7 @@ program
   .description('Start the CodeRemote server')
   .option('-p, --port <number>', 'Port to listen on', '8080')
   .option('-t, --token <token>', 'Custom auth token')
+  .option('-w, --workspace <path>', 'Workspace root directory')
   .option('--tunnel <type>', 'Enable tunnel (cloudflare, ngrok, frp)', 'cloudflare')
   .option('--host <host>', 'Custom tunnel host URL')
   .option('--no-tunnel', 'Disable tunneling')
@@ -62,12 +63,13 @@ program
 
     const port = parseInt(options.port, 10);
     const verbose = options.verbose;
+    const workspace = options.workspace || process.cwd();
 
     // Create auth manager
     const auth = new AuthManager(options.token);
 
-    // Create server
-    server = new CodeRemoteServer(port, auth.getToken());
+    // Create server with workspace
+    server = new CodeRemoteServer(port, auth.getToken(), workspace);
 
     // Create message handler
     const messageHandler = new MessageHandler();
