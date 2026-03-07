@@ -65,10 +65,11 @@ export class ClaudeHandler {
       const response = await this.engine.sendMessage(
         content,
         messages,
-        (chunk, done) => {
+        (chunk, done, thinking) => {
           ws.send(JSON.stringify({
             type: 'claude_stream',
             content: chunk,
+            thinking: thinking,
             done,
             timestamp: Date.now()
           }));

@@ -171,6 +171,11 @@
                    onkeypress="if(event.key==='Enter')sendClaudeMessage()">
             <button class="btn btn-primary" onclick="sendClaudeMessage()">发送</button>
         </div>
+        <!-- 思考过程面板 -->
+        <div id="thinkingPanel" style="margin-top:10px;padding:10px;background:#0d1117;border-radius:8px;border-left:3px solid #8b5cf6;display:none">
+            <div style="color:#8b5cf6;font-weight:500;margin-bottom:5px">🧠 思考中...</div>
+            <div id="thinkingContent" style="font-size:12px;white-space:pre-wrap;opacity:0.8;max-height:200px;overflow-y:auto"></div>
+        </div>
         <div id="claudeOutput" style="margin-top:10px;padding:10px;background:#16213e;border-radius:8px;min-height:100px;white-space:pre-wrap;font-family:monospace;font-size:13px">
             <span style="color:#64748b">Claude 响应将显示在这里...</span>
         </div>
@@ -232,6 +237,84 @@
         let testMode = 'local';
         let pendingImageMeta = null;
         let currentImageUrl = null;
+        let notificationEnabled = false;
+        let pageVisible = true;
+
+        // 页面可见性监听
+        document.addEventListener('visibilitychange', () => {
+            pageVisible = !document.hidden;
+        });
+
+        // 请求通知权限
+        async function requestNotificationPermission() {
+            if (!('Notification' in window)) {
+                log('⚠️ 浏览器不支持通知', 'warn');
+                return false;
+            }
+
+            if (Notification.permission === 'granted') {
+                notificationEnabled = true;
+                log('✅ 通知权限已开启', 'success');
+                return true;
+            }
+
+            if (Notification.permission === 'denied') {
+                log('❌ 通知权限被拒绝', 'error');
+                return false;
+            }
+
+            const permission = await Notification.requestPermission();
+            if (permission === 'granted') {
+                notificationEnabled = true;
+                log('✅ 通知权限已开启', 'success');
+                return true;
+            } else {
+                log('❌ 通知权限被拒绝', 'error');
+                return false;
+            }
+        }
+
+        // 发送通知
+        function sendNotification(title, options = {}) {
+            if (!notificationEnabled) {
+                log('⚠️ 通知未开启', 'warn');
+                return null;
+            }
+
+            // 页面可见时也发送通知（用于测试）
+            // if (pageVisible && !options.force) return null;
+
+            try {
+                const notification = new Notification(title, {
+                    icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>',
+                    badge: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🤖</text></svg>',
+                    ...options
+                });
+
+                notification.onclick = () => {
+                    window.focus();
+                    notification.close();
+                };
+
+                log(`🔔 已发送通知: ${title}`, 'success');
+                return notification;
+            } catch (e) {
+                log(`❌ 发送通知失败: ${e.message}`, 'error');
+                return null;
+            }
+        }
+
+        // 测试通知
+        function testNotification() {
+            if (!notificationEnabled) {
+                log('❌ 请先开启通知权限', 'error');
+                return;
+            }
+            sendNotification('🧪 测试通知', {
+                body: '这是一条测试通知，如果你看到这个，说明通知功能正常！',
+                tag: 'test-notification'
+            });
+        }
 
         const configs = {
             local: {
@@ -391,8 +474,31 @@
                                     log(`准备接收图片: ${msg.fileName}`, 'info');
                                 } else if (msg.type === 'claude_start') {
                                     log('🤖 Claude 开始响应...', 'info');
+                                    // 初始化缓冲区
+                                    window._claudeBuffer = '';
+                                    window._thinkingBuffer = '';
                                     document.getElementById('claudeOutput').innerHTML = '<span style="color:#64748b">正在思考...</span>';
+                                    // 隐藏思考面板
+                                    const thinkingPanel = document.getElementById('thinkingPanel');
+                                    if (thinkingPanel) thinkingPanel.style.display = 'none';
                                 } else if (msg.type === 'claude_stream') {
+                                    // 处理 thinking 内容
+                                    if (msg.thinking) {
+                                        if (!window._thinkingBuffer) window._thinkingBuffer = '';
+                                        window._thinkingBuffer += msg.thinking;
+
+                                        // 显示思考面板
+                                        const thinkingPanel = document.getElementById('thinkingPanel');
+                                        const thinkingContent = document.getElementById('thinkingContent');
+                                        if (thinkingPanel && thinkingContent) {
+                                            thinkingPanel.style.display = 'block';
+                                            thinkingContent.innerHTML = escapeHtml(window._thinkingBuffer);
+                                            thinkingContent.scrollTop = thinkingContent.scrollHeight;
+                                        }
+                                        log('🧠 Claude 思考中...', 'info');
+                                    }
+
+                                    // 处理响应内容
                                     if (msg.content) {
                                         // 累积原始内容
                                         if (!window._claudeBuffer) window._claudeBuffer = '';
@@ -411,12 +517,40 @@
                                     if (msg.done) {
                                         log('✅ Claude 响应完成', 'success');
                                         window._claudeBuffer = '';
+                                        // 思考完成后折叠面板
+                                        const thinkingPanel = document.getElementById('thinkingPanel');
+                                        if (thinkingPanel && window._thinkingBuffer) {
+                                            thinkingPanel.innerHTML = `
+                                                <details>
+                                                    <summary style="cursor:pointer;color:#f59e0b;font-weight:500;padding:5px">
+                                                        🧠 思考过程 (${(window._thinkingBuffer.length / 1000).toFixed(1)}KB)
+                                                    </summary>
+                                                    <div style="padding:10px;font-size:12px;white-space:pre-wrap;opacity:0.8">${escapeHtml(window._thinkingBuffer)}</div>
+                                                </details>
+                                            `;
+                                        }
+                                        window._thinkingBuffer = '';
                                     }
                                 } else if (msg.type === 'claude_error') {
                                     log(`❌ Claude 错误 [${msg.code}]: ${msg.error}`, 'error');
+                                    sendNotification('❌ Claude 错误', {
+                                        body: msg.error.substring(0, 100),
+                                        tag: 'claude-error'
+                                    });
                                 } else if (msg.type === 'claude_done') {
                                     log('✅ Claude 响应完成', 'success');
                                     window._claudeBuffer = '';
+                                    sendNotification('✅ Claude 响应完成', {
+                                        body: '点击查看回复',
+                                        tag: 'claude-done'
+                                    });
+                                } else if (msg.type === 'claude_permission') {
+                                    log('⚠️ Claude 需要权限: ' + msg.message, 'warn');
+                                    sendNotification('⚠️ Claude 需要确认', {
+                                        body: msg.message || 'Claude 正在等待您的确认',
+                                        tag: 'claude-permission',
+                                        requireInteraction: true
+                                    });
                                 } else if (msg.type === 'command_result') {
                                     log(`📋 命令结果: ${msg.command}`, msg.success ? 'success' : 'error');
                                     handleCommandResult(msg);
@@ -502,6 +636,12 @@
           <input type="file" id="imageInput" style="display:none">
           <button class="btn btn-primary" onclick="document.getElementById('imageInput').click()" style="margin-top:10px">
             📁 上传文件
+          </button>
+          <button class="btn" onclick="requestNotificationPermission()" style="margin-top:10px;background:linear-gradient(135deg, #8b5cf6, #7c3aed)">
+            🔔 开启通知
+          </button>
+          <button class="btn" onclick="testNotification()" style="margin-top:10px;background:linear-gradient(135deg, #f59e0b, #d97706)">
+            🧪 测试通知
           </button>
         `);
 

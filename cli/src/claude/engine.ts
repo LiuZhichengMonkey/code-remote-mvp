@@ -38,7 +38,7 @@ export class ClaudeCodeEngine {
   async sendMessage(
     message: string,
     messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean) => void
+    onChunk: (content: string, done: boolean, thinking?: string) => void
   ): Promise<string> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
@@ -51,7 +51,7 @@ export class ClaudeCodeEngine {
 
   private async callClaudeCLI(
     prompt: string,
-    onChunk: (content: string, done: boolean) => void
+    onChunk: (content: string, done: boolean, thinking?: string) => void
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       // 设置环境变量
@@ -82,6 +82,7 @@ export class ClaudeCodeEngine {
       });
 
       let fullResponse = '';
+      let fullThinking = '';
       let stderr = '';
 
       proc.stdout.on('data', (data) => {
@@ -108,7 +109,19 @@ export class ClaudeCodeEngine {
             if (json.type === 'stream_event' && json.event?.type === 'content_block_delta') {
               const delta = json.event.delta;
               console.log('[Claude CLI] Delta type:', delta?.type, '| text:', delta?.text?.substring(0, 20));
-              if (delta?.type === 'text_delta' && delta.text) {
+
+              // 处理 thinking 内容
+              if (delta?.type === 'thinking_delta' && delta.thinking) {
+                const thinkingText = delta.thinking;
+                console.log('[Claude CLI] Thinking:', thinkingText.substring(0, 50));
+                fullThinking += thinkingText;
+                // 发送 thinking 更新
+                if (this.config.streamMode === 'realtime') {
+                  onChunk('', false, thinkingText);
+                }
+              }
+              // 处理文本内容
+              else if (delta?.type === 'text_delta' && delta.text) {
                 const text = delta.text;
                 console.log('[Claude CLI] Stream text:', text);
                 fullResponse += text;
@@ -121,6 +134,14 @@ export class ClaudeCodeEngine {
             // 处理完整的 assistant 消息 (作为备用)
             else if (json.type === 'assistant' && json.message?.content) {
               for (const block of json.message.content) {
+                // 处理 thinking block
+                if (block.type === 'thinking' && block.thinking) {
+                  fullThinking += block.thinking;
+                  if (this.config.streamMode === 'realtime') {
+                    onChunk('', false, block.thinking);
+                  }
+                }
+                // 处理 text block
                 if (block.type === 'text' && block.text) {
                   const text = block.text;
                   // 检查文本是否包含 API 错误
@@ -195,7 +216,7 @@ export class ClaudeCodeEngine {
 
   private async callAnthropicAPI(
     messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean) => void
+    onChunk: (content: string, done: boolean, thinking?: string) => void
   ): Promise<string> {
     if (!this.config.apiKey) {
       throw new Error('API Key not configured. Set ANTHROPIC_API_KEY environment variable or configure in config.');
@@ -211,11 +232,34 @@ export class ClaudeCodeEngine {
       }));
 
       let fullResponse = '';
+      let fullThinking = '';
 
       const stream = await client.messages.stream({
         model: 'claude-sonnet-4-6-20250514',
         max_tokens: 4096,
+        // 启用 extended thinking
+        thinking: {
+          type: 'enabled',
+          budget_tokens: 10000
+        },
         messages: formattedMessages
+      });
+
+      // 监听 thinking 事件
+      stream.on('contentBlockStart', (event: any) => {
+        if (event.content_block?.type === 'thinking') {
+          console.log('[Claude API] Thinking block started');
+        }
+      });
+
+      stream.on('contentBlockDelta', (event: any) => {
+        if (event.delta?.type === 'thinking_delta') {
+          const thinking = event.delta.thinking || '';
+          fullThinking += thinking;
+          if (this.config.streamMode === 'realtime') {
+            onChunk('', false, thinking);
+          }
+        }
       });
 
       stream.on('text', (text: string) => {
@@ -228,7 +272,7 @@ export class ClaudeCodeEngine {
       await stream.finalMessage();
 
       if (this.config.streamMode === 'segmented') {
-        onChunk(fullResponse, true);
+        onChunk(fullResponse, true, fullThinking);
       } else {
         onChunk('', true);
       }

@@ -1,30 +1,60 @@
 @echo off
 chcp 65001 >nul
+title CodeRemote Launcher
+
 echo.
 echo ========================================
-echo     CodeRemote 一键启动
+echo     CodeRemote Quick Start
 echo ========================================
 echo.
 
 cd /d %~dp0
 
-echo [1/2] 启动 WebSocket 服务器 (端口 8085)...
+:: Check Node.js
+where node >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Node.js not found, please install Node.js first
+    pause
+    exit /b 1
+)
+
+:: Check dist folder
+if not exist "%~dp0cli\dist\index.js" (
+    echo [ERROR] cli\dist\index.js not found
+    echo Please run: cd cli && npm run build
+    pause
+    exit /b 1
+)
+
+:: Kill existing processes on ports
+echo [1/4] Cleaning up ports...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8085.*LISTENING"') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3000.*LISTENING"') do (
+    taskkill /PID %%a /F >nul 2>&1
+)
+
+echo [2/4] Starting WebSocket server (port 8085)...
 start "CodeRemote-WS" cmd /c "cd /d %~dp0cli && node dist/index.js start -p 8085 -t test123 --no-tunnel"
 
-timeout /t 2 >nul
+echo [3/4] Waiting 2 seconds...
+ping 127.0.0.1 -n 3 >nul
 
-echo [2/2] 启动 HTTP 服务器 (端口 3000)...
+echo [4/4] Starting HTTP server (port 3000)...
 start "CodeRemote-HTTP" cmd /c "cd /d %~dp0web && npx serve -p 3000"
 
 echo.
-echo 服务启动完成！
+echo ========================================
+echo   Services started!
+echo ========================================
 echo.
-echo 访问地址:
-echo   http://localhost:3000/cr-debug.html
-echo   http://192.168.5.23:3000/cr-debug.html
+echo   URL: http://localhost:3000/cr-debug.html
+echo   Token: test123
 echo.
-echo Token: test123
+echo   Press any key to open browser...
+echo   (Closing this window will NOT stop services)
 echo.
-echo 按任意键打开浏览器...
 pause >nul
+
 start http://localhost:3000/cr-debug.html
