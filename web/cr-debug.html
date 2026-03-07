@@ -62,6 +62,20 @@
         .file-item.dir { color: #60a5fa; }
         .file-item.file { color: #94a3b8; }
         .file-size { color: #64748b; font-size: 0.9em; }
+
+        /* 文件浏览器增强样式 */
+        .file-browser-item { display: flex; align-items: center; padding: 8px 10px; background: #16213e; border-radius: 6px; margin-bottom: 4px; cursor: pointer; transition: all 0.2s; }
+        .file-browser-item:hover { background: #1e3a5f; transform: translateX(3px); }
+        .file-browser-item.selected { background: #0f3460; border-left: 3px solid #f59e0b; }
+        .file-browser-item .icon { margin-right: 10px; font-size: 16px; }
+        .file-browser-item .name { flex: 1; font-size: 13px; }
+        .file-browser-item .size { color: #64748b; font-size: 11px; margin-right: 10px; }
+        .file-browser-item .modified { color: #64748b; font-size: 10px; }
+        .file-browser-item.folder .name { color: #60a5fa; font-weight: 500; }
+        .file-browser-item.file .name { color: #e2e8f0; }
+        .breadcrumb-item { color: #60a5fa; cursor: pointer; }
+        .breadcrumb-item:hover { text-decoration: underline; }
+        .breadcrumb-separator { color: #64748b; margin: 0 5px; }
     </style>
 </head>
 <body>
@@ -164,15 +178,39 @@
 
     <!-- 文件浏览器 -->
     <div class="section" id="fileBrowser" style="display:none">
-        <h3>📁 文件浏览器 <button onclick="closeFileBrowser()" style="float:right;background:none;border:none;color:#94a3b8;cursor:pointer">✕</button></h3>
-        <div style="margin-bottom:10px;display:flex;gap:10px">
-            <input type="text" id="filePath" placeholder="路径" value="."
-                   style="flex:1;padding:8px;border-radius:6px;background:#0f3460;color:#fff;border:1px solid #0f3460">
-            <button class="btn" onclick="navigateTo()" style="width:auto;padding:8px 15px">前往</button>
-            <button class="btn" onclick="searchFiles()" style="width:auto;padding:8px 15px">🔍 搜索</button>
+        <h3>📁 文件浏览器 <button onclick="closeFileBrowser()" style="float:right;background:none;border:none;color:#94a3b8;cursor:pointer;font-size:18px">✕</button></h3>
+
+        <!-- 面包屑导航 -->
+        <div id="breadcrumb" style="margin-bottom:10px;padding:8px;background:#0f3460;border-radius:6px;font-size:12px;overflow-x:auto;white-space:nowrap">
+            <span style="color:#f59e0b;cursor:pointer" onclick="listDirectory('.')">🏠 根目录</span>
         </div>
-        <div id="fileList" style="background:#0f3460;border-radius:8px;padding:10px;max-height:300px;overflow-y:auto">
-            <div style="color:#64748b">点击 "文件" 按钮浏览项目文件</div>
+
+        <!-- 工具栏 -->
+        <div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap">
+            <input type="text" id="filePath" placeholder="输入路径..."
+                   style="flex:1;min-width:150px;padding:8px;border-radius:6px;background:#0f3460;color:#fff;border:1px solid #0f3460;font-size:12px">
+            <button class="btn" onclick="navigateTo()" style="width:auto;padding:8px 12px;font-size:12px">前往</button>
+            <button class="btn" onclick="goUpDir()" style="width:auto;padding:8px 12px;font-size:12px">⬆️ 上级</button>
+            <button class="btn" onclick="refreshDir()" style="width:auto;padding:8px 12px;font-size:12px">🔄 刷新</button>
+            <button class="btn" onclick="searchFiles()" style="width:auto;padding:8px 12px;font-size:12px">🔍 搜索</button>
+        </div>
+
+        <!-- 文件列表和预览面板 -->
+        <div style="display:flex;gap:10px">
+            <!-- 文件列表 -->
+            <div id="fileList" style="flex:1;background:#0f3460;border-radius:8px;padding:10px;min-height:200px;max-height:400px;overflow-y:auto">
+                <div style="color:#64748b;text-align:center;padding:20px">点击 "文件" 按钮浏览项目文件</div>
+            </div>
+
+            <!-- 文件预览面板 -->
+            <div id="filePreview" style="flex:1;background:#0f3460;border-radius:8px;padding:10px;min-height:200px;max-height:400px;overflow-y:auto;display:none">
+                <div style="color:#64748b;text-align:center;padding:20px">选择文件查看内容</div>
+            </div>
+        </div>
+
+        <!-- 状态栏 -->
+        <div id="fileStatus" style="margin-top:10px;padding:8px;background:#16213e;border-radius:6px;font-size:11px;color:#64748b">
+            就绪
         </div>
     </div>
 
@@ -552,9 +590,13 @@
         // 处理命令结果
         function handleCommandResult(msg) {
             const output = document.getElementById('claudeOutput');
+            const fileBrowserVisible = document.getElementById('fileBrowser').style.display !== 'none';
 
             if (!msg.success) {
                 output.innerHTML = `<div class="command-result command-error">❌ ${msg.error}</div>`;
+                if (fileBrowserVisible) {
+                    document.getElementById('fileStatus').textContent = '错误: ' + msg.error;
+                }
                 return;
             }
 
@@ -563,9 +605,14 @@
             switch (msg.command) {
                 case 'read':
                     const fileData = msg.data;
+
+                    // 如果文件浏览器可见，在预览面板显示
+                    if (fileBrowserVisible) {
+                        renderFilePreview(fileData);
+                    }
+
                     html += `<h3>📄 ${fileData.path}</h3>`;
                     html += `<div style="color:#64748b;font-size:12px;margin-bottom:10px">大小: ${fileData.size} bytes | 修改: ${new Date(fileData.modified).toLocaleString()}</div>`;
-                    // 判断文件类型进行高亮
                     const ext = fileData.path.split('.').pop().toLowerCase();
                     const langMap = { ts: 'typescript', js: 'javascript', py: 'python', json: 'json', md: 'markdown', html: 'html', css: 'css' };
                     const lang = langMap[ext] || 'plaintext';
@@ -574,6 +621,13 @@
 
                 case 'ls':
                     const lsData = msg.data;
+
+                    // 如果文件浏览器可见，使用增强渲染
+                    if (fileBrowserVisible) {
+                        updateBreadcrumb(lsData.path);
+                        renderFileList(lsData.items);
+                    }
+
                     html += `<h3>📁 ${lsData.path}</h3>`;
                     html += `<div class="file-list">`;
                     lsData.items.sort((a, b) => {
@@ -588,6 +642,23 @@
                     break;
 
                 case 'glob':
+                    if (fileBrowserVisible) {
+                        const globList = document.getElementById('fileList');
+                        let globHtml = '';
+                        msg.data.forEach(file => {
+                            const fileName = file.split('/').pop();
+                            globHtml += `
+                                <div class="file-browser-item file" onclick="previewFile('${file}')">
+                                    <span class="icon">📄</span>
+                                    <span class="name">${escapeHtml(fileName)}</span>
+                                    <span class="size" style="font-size:10px;color:#64748b">${escapeHtml(file)}</span>
+                                </div>
+                            `;
+                        });
+                        globList.innerHTML = globHtml || '<div style="color:#64748b;text-align:center;padding:20px">无匹配文件</div>';
+                        document.getElementById('fileStatus').textContent = `找到 ${msg.data.length} 个文件`;
+                    }
+
                     html += `<h3>🔍 搜索结果 (${msg.data.length} 个文件)</h3>`;
                     html += `<div class="file-list">`;
                     msg.data.forEach(file => {
@@ -634,9 +705,12 @@
 
         // 文件浏览器功能
         let currentPath = '.';
+        let currentFiles = [];
+        let selectedFile = null;
 
         function browseFiles() {
             document.getElementById('fileBrowser').style.display = 'block';
+            document.getElementById('filePreview').style.display = 'none';
             listDirectory('.');
         }
 
@@ -651,6 +725,9 @@
             }
             currentPath = path;
             document.getElementById('filePath').value = path;
+            document.getElementById('fileStatus').textContent = '加载中...';
+            document.getElementById('filePreview').style.display = 'none';
+
             ws.send(JSON.stringify({
                 type: 'claude',
                 content: `/ls ${path}`,
@@ -659,18 +736,19 @@
         }
 
         function navigateTo() {
-            const path = document.getElementById('filePath').value;
-            listDirectory(path);
+            const path = document.getElementById('filePath').value.trim();
+            if (path) listDirectory(path);
         }
 
-        function readFile(path) {
-            if (!ws || ws.readyState !== 1) return;
-            ws.send(JSON.stringify({
-                type: 'claude',
-                content: `/read ${path}`,
-                timestamp: Date.now()
-            }));
-            closeFileBrowser();
+        function goUpDir() {
+            if (currentPath === '.' || currentPath === '') return;
+            const parts = currentPath.split('/');
+            parts.pop();
+            listDirectory(parts.join('/') || '.');
+        }
+
+        function refreshDir() {
+            listDirectory(currentPath);
         }
 
         function searchFiles() {
@@ -678,11 +756,168 @@
             if (!pattern) return;
 
             if (!ws || ws.readyState !== 1) return;
+            document.getElementById('fileStatus').textContent = `搜索: ${pattern}`;
             ws.send(JSON.stringify({
                 type: 'claude',
                 content: `/glob ${pattern}`,
                 timestamp: Date.now()
             }));
+        }
+
+        // 更新面包屑导航
+        function updateBreadcrumb(path) {
+            const breadcrumb = document.getElementById('breadcrumb');
+            let html = '<span class="breadcrumb-item" onclick="listDirectory(\'.\')">🏠 根目录</span>';
+
+            if (path && path !== '.') {
+                const parts = path.split('/').filter(p => p);
+                let accum = '';
+                parts.forEach((part, i) => {
+                    accum += (accum ? '/' : '') + part;
+                    const targetPath = accum;
+                    html += `<span class="breadcrumb-separator">/</span>`;
+                    html += `<span class="breadcrumb-item" onclick="listDirectory('${targetPath}')">${part}</span>`;
+                });
+            }
+
+            breadcrumb.innerHTML = html;
+        }
+
+        // 渲染文件列表
+        function renderFileList(items) {
+            const fileList = document.getElementById('fileList');
+            currentFiles = items;
+
+            if (!items || items.length === 0) {
+                fileList.innerHTML = '<div style="color:#64748b;text-align:center;padding:20px">空目录</div>';
+                document.getElementById('fileStatus').textContent = '空目录';
+                return;
+            }
+
+            // 排序：文件夹优先，然后按名称排序
+            items.sort((a, b) => {
+                if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            });
+
+            let html = '';
+            items.forEach((item, index) => {
+                const icon = item.type === 'dir' ? '📁' : getFileIcon(item.name);
+                const size = item.type === 'file' ? formatSize(item.size) : '<文件夹>';
+                const modified = item.modified ? new Date(item.modified).toLocaleDateString() : '';
+
+                html += `
+                    <div class="file-browser-item ${item.type}"
+                         onclick="selectFile(${index})"
+                         ondblclick="openItem(${index})">
+                        <span class="icon">${icon}</span>
+                        <span class="name">${escapeHtml(item.name)}</span>
+                        <span class="size">${size}</span>
+                        <span class="modified">${modified}</span>
+                    </div>
+                `;
+            });
+
+            fileList.innerHTML = html;
+            document.getElementById('fileStatus').textContent = `${items.length} 个项目`;
+        }
+
+        // 获取文件图标
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                'ts': '📘', 'tsx': '📘', 'js': '📙', 'jsx': '📙',
+                'json': '📋', 'md': '📝', 'txt': '📄',
+                'html': '🌐', 'css': '🎨', 'scss': '🎨',
+                'py': '🐍', 'go': '🐹', 'rs': '🦀',
+                'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'svg': '🖼️',
+                'zip': '📦', 'tar': '📦', 'gz': '📦',
+                'pdf': '📕', 'doc': '📘', 'docx': '📘'
+            };
+            return icons[ext] || '📄';
+        }
+
+        // 选择文件
+        function selectFile(index) {
+            // 移除之前的选中状态
+            document.querySelectorAll('.file-browser-item').forEach(el => el.classList.remove('selected'));
+            document.querySelectorAll('.file-browser-item')[index]?.classList.add('selected');
+
+            selectedFile = currentFiles[index];
+            const item = selectedFile;
+
+            document.getElementById('fileStatus').textContent =
+                `${item.type === 'dir' ? '📁' : '📄'} ${item.name}${item.type === 'file' ? ' | ' + formatSize(item.size) : ''}`;
+        }
+
+        // 双击打开
+        function openItem(index) {
+            const item = currentFiles[index];
+            if (item.type === 'dir') {
+                const newPath = currentPath === '.' ? item.name : `${currentPath}/${item.name}`;
+                listDirectory(newPath);
+            } else {
+                // 打开文件预览
+                previewFile(currentPath === '.' ? item.name : `${currentPath}/${item.name}`);
+            }
+        }
+
+        // 预览文件
+        function previewFile(path) {
+            if (!ws || ws.readyState !== 1) return;
+
+            const preview = document.getElementById('filePreview');
+            preview.style.display = 'block';
+            preview.innerHTML = '<div style="color:#64748b;text-align:center;padding:20px">加载中...</div>';
+
+            ws.send(JSON.stringify({
+                type: 'claude',
+                content: `/read ${path}`,
+                timestamp: Date.now()
+            }));
+        }
+
+        // 渲染文件预览
+        function renderFilePreview(data) {
+            const preview = document.getElementById('filePreview');
+            preview.style.display = 'block';
+
+            const ext = data.path.split('.').pop().toLowerCase();
+            const langMap = {
+                ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+                py: 'python', go: 'go', rs: 'rust', java: 'java',
+                json: 'json', html: 'html', css: 'css', scss: 'scss',
+                md: 'markdown', yaml: 'yaml', yml: 'yaml', xml: 'xml',
+                sh: 'bash', bat: 'batch'
+            };
+            const lang = langMap[ext] || 'plaintext';
+
+            let content = `
+                <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #16213e">
+                    <div style="font-weight:600;color:#f59e0b;margin-bottom:5px">📄 ${data.path}</div>
+                    <div style="font-size:11px;color:#64748b">
+                        大小: ${formatSize(data.size)} |
+                        修改: ${new Date(data.modified).toLocaleString()}
+                    </div>
+                </div>
+            `;
+
+            // 检查是否是图片
+            if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) {
+                content += `<div style="text-align:center;padding:20px;color:#64748b">图片文件 - 请使用完整路径访问</div>`;
+            } else if (data.size > 100000) {
+                content += `<div style="color:#f59e0b;padding:10px">⚠️ 文件较大 (${formatSize(data.size)})，显示前 100KB</div>`;
+                content += `<pre style="margin:0;overflow-x:auto;font-size:11px"><code class="language-${lang}">${escapeHtml(data.content.substring(0, 100000))}</code></pre>`;
+            } else {
+                content += `<pre style="margin:0;overflow-x:auto;font-size:11px;max-height:300px"><code class="language-${lang}">${escapeHtml(data.content)}</code></pre>`;
+            }
+
+            preview.innerHTML = content;
+
+            // 高亮代码
+            preview.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
         }
 
         // 更新命令结果处理以支持文件浏览器
