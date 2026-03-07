@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CodeRemote Debug</title>
+    <!-- Markdown 和代码高亮 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, sans-serif; background: #1a1a2e; min-height: 100vh; color: #fff; padding: 15px; }
@@ -29,6 +33,35 @@
         .btn { width: 100%; padding: 14px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
         .btn-primary { background: linear-gradient(135deg, #10b981, #059669); color: white; }
         .btn:disabled { opacity: 0.5; }
+
+        /* Markdown 渲染样式 */
+        #claudeOutput { line-height: 1.6; }
+        #claudeOutput h1, #claudeOutput h2, #claudeOutput h3 { color: #f59e0b; margin: 15px 0 10px 0; }
+        #claudeOutput h1 { font-size: 1.5em; border-bottom: 1px solid #0f3460; padding-bottom: 8px; }
+        #claudeOutput h2 { font-size: 1.3em; }
+        #claudeOutput h3 { font-size: 1.1em; }
+        #claudeOutput p { margin: 10px 0; }
+        #claudeOutput ul, #claudeOutput ol { margin: 10px 0; padding-left: 25px; }
+        #claudeOutput li { margin: 5px 0; }
+        #claudeOutput code { background: #0f3460; padding: 2px 6px; border-radius: 4px; font-family: 'Fira Code', monospace; font-size: 0.9em; }
+        #claudeOutput pre { background: #0d1117; border-radius: 8px; padding: 15px; overflow-x: auto; margin: 10px 0; border: 1px solid #0f3460; }
+        #claudeOutput pre code { background: transparent; padding: 0; font-size: 0.85em; line-height: 1.5; }
+        #claudeOutput blockquote { border-left: 3px solid #f59e0b; padding-left: 15px; margin: 10px 0; color: #94a3b8; }
+        #claudeOutput table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+        #claudeOutput th, #claudeOutput td { border: 1px solid #0f3460; padding: 8px 12px; text-align: left; }
+        #claudeOutput th { background: #0f3460; color: #f59e0b; }
+        #claudeOutput a { color: #60a5fa; text-decoration: none; }
+        #claudeOutput a:hover { text-decoration: underline; }
+        #claudeOutput hr { border: none; border-top: 1px solid #0f3460; margin: 15px 0; }
+
+        /* 命令结果样式 */
+        .command-result { background: #0f3460; border-radius: 8px; padding: 12px; margin: 10px 0; border-left: 3px solid #10b981; }
+        .command-error { border-left-color: #ef4444; }
+        .file-list { display: grid; gap: 5px; }
+        .file-item { display: flex; justify-content: space-between; padding: 5px 10px; background: #16213e; border-radius: 4px; }
+        .file-item.dir { color: #60a5fa; }
+        .file-item.file { color: #94a3b8; }
+        .file-size { color: #64748b; font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -113,18 +146,33 @@
             </select>
             <button class="btn" onclick="newSession()" style="margin-left:5px">新建会话</button>
             <button class="btn" onclick="listSessions()" style="margin-left:5px">会话列表</button>
+            <button class="btn" onclick="browseFiles()" style="margin-left:5px">📁 文件</button>
         </div>
         <div class="session-info" style="margin-bottom:10px;color:#94a3b8;font-size:12px">
             当前会话: <span id="currentSession">-</span>
         </div>
         <div style="display:flex;gap:10px">
-            <input type="text" id="claudeInput" placeholder="输入消息给 Claude..."
+            <input type="text" id="claudeInput" placeholder="输入消息给 Claude... (支持 /read, /ls, /glob 等命令)"
                    style="flex:1;padding:10px;border-radius:8px;background:#16213e;color:#fff;border:1px solid #0f3460"
                    onkeypress="if(event.key==='Enter')sendClaudeMessage()">
             <button class="btn btn-primary" onclick="sendClaudeMessage()">发送</button>
         </div>
         <div id="claudeOutput" style="margin-top:10px;padding:10px;background:#16213e;border-radius:8px;min-height:100px;white-space:pre-wrap;font-family:monospace;font-size:13px">
             <span style="color:#64748b">Claude 响应将显示在这里...</span>
+        </div>
+    </div>
+
+    <!-- 文件浏览器 -->
+    <div class="section" id="fileBrowser" style="display:none">
+        <h3>📁 文件浏览器 <button onclick="closeFileBrowser()" style="float:right;background:none;border:none;color:#94a3b8;cursor:pointer">✕</button></h3>
+        <div style="margin-bottom:10px;display:flex;gap:10px">
+            <input type="text" id="filePath" placeholder="路径" value="."
+                   style="flex:1;padding:8px;border-radius:6px;background:#0f3460;color:#fff;border:1px solid #0f3460">
+            <button class="btn" onclick="navigateTo()" style="width:auto;padding:8px 15px">前往</button>
+            <button class="btn" onclick="searchFiles()" style="width:auto;padding:8px 15px">🔍 搜索</button>
+        </div>
+        <div id="fileList" style="background:#0f3460;border-radius:8px;padding:10px;max-height:300px;overflow-y:auto">
+            <div style="color:#64748b">点击 "文件" 按钮浏览项目文件</div>
         </div>
     </div>
 
@@ -305,18 +353,37 @@
                                     log(`准备接收图片: ${msg.fileName}`, 'info');
                                 } else if (msg.type === 'claude_start') {
                                     log('🤖 Claude 开始响应...', 'info');
-                                    document.getElementById('claudeOutput').innerHTML = '';
+                                    document.getElementById('claudeOutput').innerHTML = '<span style="color:#64748b">正在思考...</span>';
                                 } else if (msg.type === 'claude_stream') {
                                     if (msg.content) {
-                                        document.getElementById('claudeOutput').innerHTML += msg.content;
+                                        // 累积原始内容
+                                        if (!window._claudeBuffer) window._claudeBuffer = '';
+                                        window._claudeBuffer += msg.content;
+
+                                        // 实时渲染 Markdown
+                                        const output = document.getElementById('claudeOutput');
+                                        output.innerHTML = marked.parse(window._claudeBuffer);
+                                        // 高亮代码块
+                                        output.querySelectorAll('pre code').forEach(block => {
+                                            hljs.highlightElement(block);
+                                        });
+                                        // 滚动到底部
+                                        output.scrollTop = output.scrollHeight;
                                     }
                                     if (msg.done) {
                                         log('✅ Claude 响应完成', 'success');
+                                        window._claudeBuffer = '';
                                     }
                                 } else if (msg.type === 'claude_error') {
                                     log(`❌ Claude 错误 [${msg.code}]: ${msg.error}`, 'error');
                                 } else if (msg.type === 'claude_done') {
                                     log('✅ Claude 响应完成', 'success');
+                                    window._claudeBuffer = '';
+                                } else if (msg.type === 'command_result') {
+                                    log(`📋 命令结果: ${msg.command}`, msg.success ? 'success' : 'error');
+                                    handleCommandResult(msg);
+                                } else if (msg.type === 'command_error') {
+                                    log(`❌ 命令错误: ${msg.content}`, 'error');
                                 } else if (msg.type === 'session_created') {
                                     log(`📝 新会话已创建: ${msg.session.id}`, 'success');
                                     document.getElementById('currentSession').textContent = msg.session.title;
@@ -394,9 +461,9 @@
 
         // 图片上传功能
         document.getElementById('testBtn').insertAdjacentHTML('afterend', `
-          <input type="file" id="imageInput" accept="image/*" style="display:none">
+          <input type="file" id="imageInput" style="display:none">
           <button class="btn btn-primary" onclick="document.getElementById('imageInput').click()" style="margin-top:10px">
-            📷 上传图片
+            📁 上传文件
           </button>
         `);
 
@@ -408,7 +475,8 @@
             return;
           }
 
-          log(`📷 开始上传: ${file.name} (${(file.size/1024).toFixed(1)} KB)`, 'info');
+          log(`📁 开始上传: ${file.name} (${(file.size/1024).toFixed(1)} KB)`, 'info');
+          log(`   MIME类型: ${file.type || '(未知)'}`, 'info');
 
           try {
             // 发送元数据
@@ -480,6 +548,147 @@
                 timestamp: Date.now()
             }));
         }
+
+        // 处理命令结果
+        function handleCommandResult(msg) {
+            const output = document.getElementById('claudeOutput');
+
+            if (!msg.success) {
+                output.innerHTML = `<div class="command-result command-error">❌ ${msg.error}</div>`;
+                return;
+            }
+
+            let html = `<div class="command-result">`;
+
+            switch (msg.command) {
+                case 'read':
+                    const fileData = msg.data;
+                    html += `<h3>📄 ${fileData.path}</h3>`;
+                    html += `<div style="color:#64748b;font-size:12px;margin-bottom:10px">大小: ${fileData.size} bytes | 修改: ${new Date(fileData.modified).toLocaleString()}</div>`;
+                    // 判断文件类型进行高亮
+                    const ext = fileData.path.split('.').pop().toLowerCase();
+                    const langMap = { ts: 'typescript', js: 'javascript', py: 'python', json: 'json', md: 'markdown', html: 'html', css: 'css' };
+                    const lang = langMap[ext] || 'plaintext';
+                    html += `<pre><code class="language-${lang}">${escapeHtml(fileData.content)}</code></pre>`;
+                    break;
+
+                case 'ls':
+                    const lsData = msg.data;
+                    html += `<h3>📁 ${lsData.path}</h3>`;
+                    html += `<div class="file-list">`;
+                    lsData.items.sort((a, b) => {
+                        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+                        return a.name.localeCompare(b.name);
+                    }).forEach(item => {
+                        const icon = item.type === 'dir' ? '📁' : '📄';
+                        const size = item.type === 'file' ? formatSize(item.size) : '';
+                        html += `<div class="file-item ${item.type}">${icon} ${item.name} <span class="file-size">${size}</span></div>`;
+                    });
+                    html += `</div>`;
+                    break;
+
+                case 'glob':
+                    html += `<h3>🔍 搜索结果 (${msg.data.length} 个文件)</h3>`;
+                    html += `<div class="file-list">`;
+                    msg.data.forEach(file => {
+                        html += `<div class="file-item file">📄 ${file}</div>`;
+                    });
+                    html += `</div>`;
+                    break;
+
+                case 'grep':
+                    html += `<h3>🔍 搜索结果 (${msg.data.length} 个匹配)</h3>`;
+                    html += `<pre style="max-height:300px;overflow-y:auto">`;
+                    msg.data.forEach(r => {
+                        html += `<div style="margin:5px 0"><span style="color:#60a5fa">${r.file}:${r.line}</span>\n${escapeHtml(r.content)}</div>`;
+                    });
+                    html += `</pre>`;
+                    break;
+
+                case 'help':
+                    html += marked.parse(msg.data);
+                    break;
+
+                default:
+                    html += `<pre>${JSON.stringify(msg.data, null, 2)}</pre>`;
+            }
+
+            html += `</div>`;
+            output.innerHTML = html;
+
+            // 高亮代码块
+            output.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+        }
+
+        function escapeHtml(text) {
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+        }
+
+        // 文件浏览器功能
+        let currentPath = '.';
+
+        function browseFiles() {
+            document.getElementById('fileBrowser').style.display = 'block';
+            listDirectory('.');
+        }
+
+        function closeFileBrowser() {
+            document.getElementById('fileBrowser').style.display = 'none';
+        }
+
+        function listDirectory(path) {
+            if (!ws || ws.readyState !== 1) {
+                log('❌ 请先连接服务器', 'error');
+                return;
+            }
+            currentPath = path;
+            document.getElementById('filePath').value = path;
+            ws.send(JSON.stringify({
+                type: 'claude',
+                content: `/ls ${path}`,
+                timestamp: Date.now()
+            }));
+        }
+
+        function navigateTo() {
+            const path = document.getElementById('filePath').value;
+            listDirectory(path);
+        }
+
+        function readFile(path) {
+            if (!ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+                type: 'claude',
+                content: `/read ${path}`,
+                timestamp: Date.now()
+            }));
+            closeFileBrowser();
+        }
+
+        function searchFiles() {
+            const pattern = prompt('输入搜索模式 (如 **/*.ts):');
+            if (!pattern) return;
+
+            if (!ws || ws.readyState !== 1) return;
+            ws.send(JSON.stringify({
+                type: 'claude',
+                content: `/glob ${pattern}`,
+                timestamp: Date.now()
+            }));
+        }
+
+        // 更新命令结果处理以支持文件浏览器
+        window.addEventListener('message', function(event) {
+            // 处理文件浏览器更新
+        });
     </script>
 </body>
 </html>

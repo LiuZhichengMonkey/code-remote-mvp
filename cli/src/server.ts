@@ -46,9 +46,9 @@ export class CodeRemoteServer {
   private disconnectHandler?: (clientId: string) => void;
   private claudeHandler: ClaudeHandler;
   private imageConfig = {
-    savePath: 'E:/CodeRemote/Images',
-    maxSize: 10 * 1024 * 1024,
-    allowedTypes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+    savePath: 'E:/CodeRemote/Uploads',
+    maxSize: 50 * 1024 * 1024, // 50MB
+    allowedTypes: ['*'], // 允许所有文件类型
     createDirectory: true
   };
 
@@ -294,7 +294,8 @@ export class CodeRemoteServer {
       startTime: Date.now()
     };
 
-    console.log(chalk.yellow('📷'), `准备接收图片: ${message.fileName} (${(message.size! / 1024).toFixed(1)} KB)`);
+    console.log(chalk.yellow('📁'), `准备接收文件: ${message.fileName} (${(message.size! / 1024).toFixed(1)} KB)`);
+    console.log(chalk.gray('   MIME类型:'), message.mimeType);
   }
 
   private handleDisconnection(ws: WebSocket) {
@@ -353,7 +354,7 @@ export class CodeRemoteServer {
       };
 
       client.ws.send(JSON.stringify(response));
-      console.log(chalk.green('✓'), `图片已保存: ${savedPath}`);
+      console.log(chalk.green('✓'), `文件已保存: ${savedPath}`);
 
       // Reset transfer state
       client.imageTransfer = undefined;

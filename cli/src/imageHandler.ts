@@ -20,16 +20,25 @@ export class ImageHandler {
   async handleImage(clientId: string, buffer: Buffer, meta: ImageMeta): Promise<string> {
     // 验证文件大小
     if (meta.size > this.maxSize) {
-      throw new Error(`图片过大 (${meta.size} 字节)，最大支持 ${this.maxSize} 字节`);
+      throw new Error(`文件过大 (${meta.size} 字节)，最大支持 ${this.maxSize} 字节`);
     }
 
-    // 验证文件类型
-    if (!this.allowedTypes.includes(meta.mimeType)) {
-      throw new Error(`不支持的文件类型: ${meta.mimeType}`);
-    }
+    // 如果 allowedTypes 为空或包含 '*'，则允许所有类型
+    if (this.allowedTypes.length > 0 && !this.allowedTypes.includes('*')) {
+      // 验证文件类型（支持通配符如 image/*, text/*）
+      const isAllowed = this.allowedTypes.some(allowed => {
+        if (allowed === '*') return true;
+        if (allowed.endsWith('/*')) {
+          const category = allowed.slice(0, -2);
+          return meta.mimeType.startsWith(category + '/');
+        }
+        return allowed === meta.mimeType;
+      });
 
-    // 验证魔数（文件头）- 暂时跳过，因为浏览器已通过 accept 验证类型
-    // this.validateImageHeader(buffer, meta.mimeType);
+      if (!isAllowed) {
+        throw new Error(`不支持的文件类型: ${meta.mimeType}`);
+      }
+    }
 
     // 生成文件名
     const fileName = this.generateFileName(meta.fileName);
@@ -41,7 +50,7 @@ export class ImageHandler {
       return filePath;
     } catch (error: any) {
       if (error.code === 'ENOSPC') {
-        throw new Error('磁盘空间不足，请清理 E 盘空间');
+        throw new Error('磁盘空间不足，请清理磁盘空间');
       }
       throw error;
     }
@@ -70,8 +79,10 @@ export class ImageHandler {
 
   generateFileName(originalName: string): string {
     const ext = path.extname(originalName);
+    const baseName = path.basename(originalName, ext);
     const timestamp = this.getTimestamp();
-    return `image_${timestamp}${ext}`;
+    // 保留原始文件名，添加时间戳避免冲突
+    return `${baseName}_${timestamp}${ext}`;
   }
 
   private validateImageHeader(buffer: Buffer, mimeType: string): void {

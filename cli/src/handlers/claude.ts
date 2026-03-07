@@ -1,13 +1,16 @@
 import { WebSocket } from 'ws';
 import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage } from '../claude';
+import { CommandHandler } from './commands';
 
 export class ClaudeHandler {
   private engine: ClaudeCodeEngine;
   private sessionManager: SessionManager;
+  private commandHandler: CommandHandler;
 
-  constructor() {
+  constructor(workspaceRoot?: string) {
     this.engine = new ClaudeCodeEngine();
     this.sessionManager = new SessionManager();
+    this.commandHandler = new CommandHandler(workspaceRoot);
   }
 
   async handleClaudeMessage(
@@ -15,12 +18,29 @@ export class ClaudeHandler {
     content: string,
     sendError: (code: string, message: string) => void
   ): Promise<void> {
-    // 检查是否是 /raw 前缀
-    if (content.startsWith('/raw ')) {
-      // 作为普通消息处理，不走 Claude
+    // 检查是否是斜杠命令
+    if (content.startsWith('/')) {
+      const parsed = this.commandHandler.parseCommand(content);
+
+      if (parsed) {
+        // 执行命令
+        const result = await this.commandHandler.execute(parsed.type, parsed.args);
+
+        ws.send(JSON.stringify({
+          type: 'command_result',
+          command: parsed.type,
+          success: result.success,
+          data: result.data,
+          error: result.error,
+          timestamp: Date.now()
+        }));
+        return;
+      }
+
+      // 未知的斜杠命令
       ws.send(JSON.stringify({
-        type: 'raw_message',
-        content: content.substring(5),
+        type: 'command_error',
+        content: `Unknown command: ${content.split(' ')[0]}. Type /help for available commands.`,
         timestamp: Date.now()
       }));
       return;
