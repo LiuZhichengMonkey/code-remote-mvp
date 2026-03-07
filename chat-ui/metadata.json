@@ -1,0 +1,7 @@
+{
+  "name": "Safari AI Chat",
+  "description": "A high-quality, Safari-optimized immersive AI chat interface with dark mode and streaming responses.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
