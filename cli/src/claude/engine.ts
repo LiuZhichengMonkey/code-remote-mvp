@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
 import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG } from './types';
 
 export class ClaudeCodeEngine {
@@ -14,20 +14,24 @@ export class ClaudeCodeEngine {
 
     return new Promise((resolve) => {
       const proc = spawn('claude', ['--version'], { shell: true });
-      proc.on('close', (code) => {
-        this.cliAvailable = code === 0;
-        resolve(code === 0);
-      });
-      proc.on('error', () => {
-        this.cliAvailable = false;
-        resolve(false);
-      });
+
       // 超时处理
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         proc.kill();
         this.cliAvailable = false;
         resolve(false);
       }, 5000);
+
+      proc.on('close', (code) => {
+        clearTimeout(timeout);
+        this.cliAvailable = code === 0;
+        resolve(code === 0);
+      });
+      proc.on('error', () => {
+        clearTimeout(timeout);
+        this.cliAvailable = false;
+        resolve(false);
+      });
     });
   }
 
@@ -50,47 +54,141 @@ export class ClaudeCodeEngine {
     onChunk: (content: string, done: boolean) => void
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      // 使用 --print 和 --output-format stream-json
-      const proc = spawn('claude', ['--print', prompt], {
+      // 设置环境变量
+      const env = {
+        ...process.env,
+        CLAUDECODE: '',
+        CLAUDE_CODE: ''
+      };
+
+      console.log('[Claude CLI] Starting stream...');
+      console.log('[Claude CLI] Prompt:', prompt.substring(0, 50) + '...');
+
+      const args = [
+        '--print',
+        '--verbose',
+        '--output-format', 'stream-json',
+        '--include-partial-messages',
+        prompt
+      ];
+      console.log('[Claude CLI] Args:', args.join(' '));
+
+      // 使用 stream-json 格式获取实时流式输出
+      const proc = spawn('claude', args, {
+        cwd: 'E:/code-remote-mvp',
+        env,
         shell: true,
-        cwd: process.cwd(),
-        env: { ...process.env, ANTHROPIC_DISABLE_STREAMING: '0' }
+        stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let fullResponse = '';
-      let buffer = '';
+      let stderr = '';
 
       proc.stdout.on('data', (data) => {
-        const text = data.toString();
-        buffer += text;
+        const chunk = data.toString();
+        console.log('[Claude CLI] stdout chunk:', chunk.length, 'bytes');
 
-        // 实时模式：直接推送
-        if (this.config.streamMode === 'realtime') {
-          onChunk(text, false);
+        // 解析 stream-json 格式 - 每行是一个 JSON 对象
+        const lines = chunk.split('\n').filter((line: string) => line.trim());
+        for (const line of lines) {
+          try {
+            const json = JSON.parse(line);
+            console.log('[Claude CLI] JSON type:', json.type, '| event type:', json.event?.type);
+
+            // 检查是否是错误响应
+            if (json.type === 'error' || json.is_error) {
+              const errorMsg = json.error?.message || json.message || 'Unknown error';
+              console.error('[Claude CLI] API Error:', errorMsg);
+              reject(new Error(`Claude API error: ${errorMsg}`));
+              proc.kill();
+              return;
+            }
+
+            // 处理流式事件 (使用 --include-partial-messages 时)
+            if (json.type === 'stream_event' && json.event?.type === 'content_block_delta') {
+              const delta = json.event.delta;
+              console.log('[Claude CLI] Delta type:', delta?.type, '| text:', delta?.text?.substring(0, 20));
+              if (delta?.type === 'text_delta' && delta.text) {
+                const text = delta.text;
+                console.log('[Claude CLI] Stream text:', text);
+                fullResponse += text;
+                // 实时发送到客户端
+                if (this.config.streamMode === 'realtime') {
+                  onChunk(text, false);
+                }
+              }
+            }
+            // 处理完整的 assistant 消息 (作为备用)
+            else if (json.type === 'assistant' && json.message?.content) {
+              for (const block of json.message.content) {
+                if (block.type === 'text' && block.text) {
+                  const text = block.text;
+                  // 检查文本是否包含 API 错误
+                  if (text.includes('API Error:') || text.includes('429')) {
+                    console.error('[Claude CLI] API Error in text:', text.substring(0, 100));
+                    reject(new Error(text));
+                    proc.kill();
+                    return;
+                  }
+                  // 只有在没有收到流式事件时才使用完整消息
+                  if (!fullResponse) {
+                    fullResponse = text;
+                    if (this.config.streamMode === 'realtime') {
+                      onChunk(text, false);
+                    }
+                  }
+                }
+              }
+            }
+            // result 类型包含最终结果
+            else if (json.type === 'result') {
+              if (json.is_error) {
+                reject(new Error(json.result || 'Unknown error'));
+                return;
+              }
+            }
+          } catch (e) {
+            // 如果不是 JSON，忽略
+          }
         }
-        fullResponse += text;
       });
 
       proc.stderr.on('data', (data) => {
-        console.error('[Claude CLI stderr]', data.toString());
+        const chunk = data.toString();
+        stderr += chunk;
+        console.log('[Claude CLI] stderr:', chunk.substring(0, 100));
+      });
+
+      // 设置 2 分钟超时
+      const timeout = setTimeout(() => {
+        console.error('[Claude CLI] TIMEOUT');
+        proc.kill();
+        reject(new Error('Claude CLI timeout (120s)'));
+      }, 120000);
+
+      proc.on('error', (err) => {
+        clearTimeout(timeout);
+        console.error('[Claude CLI] Process error:', err.message);
+        reject(new Error(`Claude CLI error: ${err.message}`));
       });
 
       proc.on('close', (code) => {
-        if (code === 0) {
-          // 分段模式：完整推送
-          if (this.config.streamMode === 'segmented') {
-            onChunk(fullResponse, true);
-          } else {
-            onChunk('', true);
-          }
-          resolve(fullResponse);
-        } else {
-          reject(new Error(`Claude CLI exited with code ${code}`));
-        }
-      });
+        clearTimeout(timeout);
+        console.log('[Claude CLI] Closed, code:', code, 'response length:', fullResponse.length);
 
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to start Claude CLI: ${err.message}`));
+        if (code !== 0 && !fullResponse) {
+          reject(new Error(`Claude CLI exited with code ${code}: ${stderr}`));
+          return;
+        }
+
+        // 发送完成信号
+        if (this.config.streamMode === 'realtime') {
+          onChunk('', true);
+        } else {
+          onChunk(fullResponse, true);
+        }
+
+        resolve(fullResponse);
       });
     });
   }
