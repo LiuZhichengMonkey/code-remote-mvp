@@ -15,6 +15,7 @@ export interface ClaudeSession {
   updatedAt: number;
   messages: ClaudeMessage[];
   claudeSessionId?: string;
+  cwd?: string;  // 工作目录
 }
 
 export interface ClaudeConfig {
@@ -31,6 +32,22 @@ export interface ClaudeStreamChunk {
   done: boolean;
   messageId?: string;
   timestamp: number;
+}
+
+// 工具使用事件
+export interface ToolUseEvent {
+  type: 'tool_use';
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+}
+
+// 工具结果事件
+export interface ToolResultEvent {
+  type: 'tool_result';
+  toolUseId: string;
+  result?: string;
+  isError?: boolean;
 }
 
 export interface ClaudeError {

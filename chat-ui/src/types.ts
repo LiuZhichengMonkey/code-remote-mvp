@@ -5,6 +5,16 @@ export interface ChatOption {
   category?: string;
 }
 
+// 工具使用记录
+export interface ToolUse {
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+  result?: string;
+  isError?: boolean;
+  timestamp: number;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'model';
@@ -14,6 +24,7 @@ export interface Message {
   attachments?: Attachment[];
   options?: ChatOption[];
   thinking?: string;
+  tools?: ToolUse[];  // 工具使用记录
 }
 
 export interface Attachment {

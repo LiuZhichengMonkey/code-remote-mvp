@@ -124,6 +124,12 @@ interface WSMessage {
   success?: boolean;
   sessionId?: string;
   projectId?: string;
+  // 工具事件
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+  result?: string;
+  isError?: boolean;
   session?: {
     id: string;
     title: string;
@@ -314,8 +320,9 @@ const ChatBubble = React.memo(({
   const letterOptions: ChatOption[] = [];
   const tempContent = displayContent;
 
-  // Pattern for letter options (A. B. C.) or number options (1. 2. 3.)
-  const optionPattern = /^([A-Z]|[0-9]+)[\.\)、]\s*(.+?)$/;
+  // Pattern for letter options only (A. B. C.)
+  // Number lists (1. 2. 3.) are treated as steps and displayed normally
+  const optionPattern = /^[A-Z][\.\)、]\s+(.+)$/;
 
   if (!isStreaming) {
     const lines = tempContent.split('\n');
@@ -335,8 +342,8 @@ const ChatBubble = React.memo(({
         const match = line.match(optionPattern);
         if (match) {
           letterOptions.push({
-            label: match[1], // A, B, C or 1, 2, 3
-            description: match[2].trim()
+            label: line.charAt(0), // A, B, C
+            description: match[1].trim()
           });
         }
         optionsEndIndex = i;
@@ -452,6 +459,27 @@ const ChatBubble = React.memo(({
                   </motion.div>
                 )}
               </AnimatePresence>
+            </div>
+          )}
+
+          {/* Tool Use Section */}
+          {!isUser && message.tools && message.tools.length > 0 && (
+            <div className="mb-3 space-y-2">
+              {message.tools.map((tool, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg text-xs"
+                >
+                  <span className="text-blue-400">🔧</span>
+                  <span className="text-blue-300 font-medium">{tool.toolName}</span>
+                  {tool.toolInput && (
+                    <span className="text-white/40 truncate max-w-[200px]">
+                      {typeof tool.toolInput === 'object' ? JSON.stringify(tool.toolInput).substring(0, 50) : String(tool.toolInput).substring(0, 50)}
+                      ...
+                    </span>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -1049,6 +1077,37 @@ export default function App() {
         } else if (msg.type === 'claude_start') {
           // Claude is starting to respond
           console.log('Claude started responding');
+        } else if (msg.type === 'claude_tool') {
+          // Handle tool use events
+          console.log('Tool use:', msg.toolName);
+          setSessions(prev => {
+            const targetSessionId = activeSessionId || prev[0]?.id;
+            if (!targetSessionId) return prev;
+
+            return prev.map(s => {
+              if (s.id !== targetSessionId) return s;
+              const messages = s.messages;
+              const lastMsg = messages[messages.length - 1];
+
+              if (lastMsg && lastMsg.role === 'model') {
+                const toolEvent = {
+                  toolName: msg.toolName,
+                  toolInput: msg.toolInput,
+                  toolUseId: msg.toolUseId,
+                  timestamp: Date.now()
+                };
+                const existingTools = lastMsg.tools || [];
+                return {
+                  ...s,
+                  messages: [...messages.slice(0, -1), {
+                    ...lastMsg,
+                    tools: [...existingTools, toolEvent]
+                  }]
+                };
+              }
+              return s;
+            });
+          });
         } else if (msg.type === 'claude_stream') {
           console.log('Stream chunk, activeSessionId:', activeSessionId);
           setSessions(prev => {
@@ -1233,6 +1292,8 @@ export default function App() {
             });
             setCurrentSessionId(newSession.id);
             currentSessionIdRef.current = newSession.id;
+            // Clear projectId when creating new session (always in current project)
+            setCurrentProjectId(null);
 
             // If there's a pending message, send it now
             if (pendingMessageRef.current) {
@@ -1254,7 +1315,17 @@ export default function App() {
               messages: msg.session.messages || [],
               createdAt: msg.session.createdAt || Date.now()
             };
-            // Update the appropriate session list
+
+            // Always update sessions (for message stream handling)
+            setSessions(prev => {
+              const exists = prev.find(s => s.id === resumedSession.id);
+              if (exists) {
+                return prev.map(s => s.id === resumedSession.id ? resumedSession : s);
+              }
+              return [resumedSession, ...prev];
+            });
+
+            // Also update projectSessions if projectId exists
             if (msg.projectId) {
               setProjectSessions(prev => {
                 const projectSessionList = prev[msg.projectId!] || [];
@@ -1272,13 +1343,8 @@ export default function App() {
               });
               setCurrentProjectId(msg.projectId);
             } else {
-              setSessions(prev => {
-                const exists = prev.find(s => s.id === resumedSession.id);
-                if (exists) {
-                  return prev.map(s => s.id === resumedSession.id ? resumedSession : s);
-                }
-                return [resumedSession, ...prev];
-              });
+              // Clear projectId when resuming current project session
+              setCurrentProjectId(null);
             }
             setCurrentSessionId(resumedSession.id);
             currentSessionIdRef.current = resumedSession.id;
@@ -1341,6 +1407,14 @@ export default function App() {
     }
     setIsConnected(false);
   }, []);
+
+  // Auto-connect on mount if URL and token are available
+  useEffect(() => {
+    if (serverUrl && token && !isConnected && !isConnecting) {
+      console.log('Auto-connecting with saved settings...');
+      connect();
+    }
+  }, []); // Only run once on mount
 
   // Auto-scroll to bottom
   const scrollToBottom = () => {
@@ -1435,6 +1509,12 @@ export default function App() {
 
   // Send message
   const handleSend = async (text: string, attachments: Attachment[]) => {
+    console.log('[handleSend] called with text:', text?.substring(0, 30));
+    console.log('[handleSend] currentSessionIdRef.current:', currentSessionIdRef.current);
+    console.log('[handleSend] currentProjectId:', currentProjectId);
+    console.log('[handleSend] sessions.length:', sessions.length);
+    console.log('[handleSend] sessions[0]?.id:', sessions[0]?.id);
+
     if (!text.trim() && attachments.length === 0) return;
 
     // Use wsRef for latest connection
@@ -1472,6 +1552,8 @@ export default function App() {
       status: 'sending'
     };
 
+    // Always update both sessions and projectSessions to ensure UI shows the message
+    // Update sessions
     setSessions(prev => {
       const sessionExists = prev.find(s => s.id === sessionId);
       if (sessionExists) {
@@ -1487,17 +1569,50 @@ export default function App() {
         createdAt: Date.now()
       }, ...prev];
     });
+
+    // Also update projectSessions if projectId exists
+    if (currentProjectId) {
+      setProjectSessions(prev => {
+        const projectList = prev[currentProjectId] || [];
+        const sessionExists = projectList.find(s => s.id === sessionId);
+        if (sessionExists) {
+          return {
+            ...prev,
+            [currentProjectId]: projectList.map(s =>
+              s.id === sessionId ? { ...s, messages: [...s.messages, userMessage, aiMessage] } : s
+            )
+          };
+        }
+        // Create new session in project
+        return {
+          ...prev,
+          [currentProjectId]: [{
+            id: sessionId,
+            title: text.substring(0, 30),
+            messages: [userMessage, aiMessage],
+            createdAt: Date.now()
+          }, ...projectList]
+        };
+      });
+    }
     setIsGenerating(true);
 
-    console.log('Sending message to WebSocket, sessionId:', sessionId);
+    console.log('Sending message to WebSocket, sessionId:', sessionId, 'projectId:', currentProjectId);
 
-    // Send to WebSocket
-    activeWs.send(JSON.stringify({
+    // Send to WebSocket with session info
+    const message: any = {
       type: 'claude',
       content: text,
       stream: true,
+      sessionId,
       timestamp: Date.now()
-    }));
+    };
+    console.log('[handleSend] Final message:', JSON.stringify(message));
+    // Include projectId for cross-project sessions
+    if (currentProjectId) {
+      message.projectId = currentProjectId;
+    }
+    activeWs.send(JSON.stringify(message));
   };
 
   const handleStop = () => {
@@ -1658,10 +1773,15 @@ export default function App() {
                                     resumeSession(session.id, project.id);
                                     setIsSidebarOpen(false);
                                   }}
-                                  className="flex-1 text-left truncate text-xs"
+                                  className="flex-1 text-left text-xs"
                                 >
-                                  <FileText size={12} className="inline mr-1 opacity-50" />
-                                  {session.title}
+                                  <div className="truncate">
+                                    <FileText size={12} className="inline mr-1 opacity-50" />
+                                    {session.title}
+                                  </div>
+                                  <div className="text-white/30 text-[10px] font-mono truncate mt-0.5">
+                                    {session.id.substring(0, 8)}...
+                                  </div>
                                 </button>
                                 <button
                                   onClick={(e) => {
@@ -1728,17 +1848,19 @@ export default function App() {
             </div>
           </div>
         ) : (
-          messages.map((msg) => (
-            <ChatBubble
-              key={msg.id}
-              message={msg}
-              isStreaming={msg.status === 'sending'}
-              onCopy={copyToClipboard}
-              onRegenerate={() => {
-                const idx = messages.findIndex(m => m.id === msg.id);
-                if (idx > 0) {
-                  const prevUserMsg = messages[idx - 1];
-                  if (prevUserMsg.role === 'user') {
+          messages
+            .filter((msg) => msg.content && msg.content.trim() !== '') // 过滤空消息
+            .map((msg) => (
+              <ChatBubble
+                key={msg.id}
+                message={msg}
+                isStreaming={msg.status === 'sending'}
+                onCopy={copyToClipboard}
+                onRegenerate={() => {
+                  const idx = messages.findIndex(m => m.id === msg.id);
+                  if (idx > 0) {
+                    const prevUserMsg = messages[idx - 1];
+                    if (prevUserMsg.role === 'user') {
                     handleSend(prevUserMsg.content, prevUserMsg.attachments || []);
                   }
                 }

@@ -59,6 +59,7 @@ interface ClaudeCLIMessage {
   uuid?: string;
   parentUuid?: string | null;
   timestamp: string;
+  cwd?: string;
   message?: {
     role: 'user' | 'assistant';
     content: string | Array<{type: string; text?: string; thinking?: string}>;
@@ -104,16 +105,29 @@ export class SessionStorage {
       const messageMap = new Map<string, ClaudeMessage>();
       let createdAt = Date.now();
       let updatedAt = Date.now();
+      let cwd = '';
+      let claudeSessionId = '';
 
       for (const line of lines) {
         if (!line.trim()) continue;
 
         try {
-          const entry: ClaudeCLIMessage = JSON.parse(line);
+          const entry: any = JSON.parse(line);
 
-          // 获取 session ID
+          // 获取 session ID (CodeRemote 内部)
           if (entry.sessionId && !sessionId) {
             sessionId = entry.sessionId;
+          }
+
+          // 获取 Claude CLI 的 session_id (用于恢复会话)
+          // 注意：实际字段是 sessionId（驼峰）而不是 session_id（下划线）
+          if (entry.sessionId && !claudeSessionId) {
+            claudeSessionId = entry.sessionId;
+          }
+
+          // 获取工作目录
+          if (entry.cwd && !cwd) {
+            cwd = entry.cwd;
           }
 
           // 获取时间戳
@@ -132,7 +146,7 @@ export class SessionStorage {
               role: 'user',
               content: typeof entry.message.content === 'string'
                 ? entry.message.content
-                : entry.message.content.map(c => c.text || '').join(''),
+                : (entry.message.content as Array<{text?: string}>).map((c: {text?: string}) => c.text || '').join(''),
               timestamp: entryTime
             };
             messageMap.set(msg.id, msg);
@@ -160,6 +174,11 @@ export class SessionStorage {
                   thinking += block.thinking;
                 }
               }
+            }
+
+            // 跳过空消息（没有内容的助手消息）
+            if (!content && !thinking) {
+              continue;
             }
 
             const msg: ClaudeMessage = {
@@ -191,7 +210,8 @@ export class SessionStorage {
         createdAt,
         updatedAt,
         messages,
-        claudeSessionId: sessionId
+        claudeSessionId: claudeSessionId || undefined,
+        cwd: cwd || undefined
       };
     } catch (error) {
       console.error(`Failed to parse session ${filePath}:`, error);
@@ -305,7 +325,7 @@ export class SessionStorage {
     const sessions = files.map(f => {
       const filePath = path.join(this.projectDir, f);
       return this.parseSessionFile(filePath);
-    }).filter((s): s is ClaudeSession => s !== null);
+    }).filter((s): s is ClaudeSession => s !== null && s.messages.length > 0);
 
     // 按更新时间倒序排列
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -461,12 +481,15 @@ export class SessionStorage {
           }
         }
 
-        sessions.push({
-          id: sessionId,
-          title,
-          createdAt,
-          messageCount
-        });
+        // Only include sessions with at least one message
+        if (messageCount > 0) {
+          sessions.push({
+            id: sessionId,
+            title,
+            createdAt,
+            messageCount
+          });
+        }
       } catch (err) {
         console.error(`Error reading session ${file}:`, err);
       }

@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage } from '../claude';
+import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent } from '../claude';
 import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
 
@@ -18,7 +18,9 @@ export class ClaudeHandler {
   async handleClaudeMessage(
     ws: WebSocket,
     content: string,
-    sendError: (code: string, message: string) => void
+    sendError: (code: string, message: string) => void,
+    sessionId?: string,
+    projectId?: string
   ): Promise<void> {
     // 检查是否是斜杠命令
     if (content.startsWith('/')) {
@@ -48,12 +50,31 @@ export class ClaudeHandler {
       return;
     }
 
+    // 如果前端传入了 sessionId 和 projectId，先恢复指定项目的会话
+    if (sessionId && projectId) {
+      console.log(`[ClaudeHandler] Resuming cross-project session: ${sessionId} from project ${projectId}`);
+      const crossProjectSession = SessionStorage.loadSessionFromProject(projectId, sessionId);
+      if (crossProjectSession) {
+        // 使用 SessionStorage 的静态方法加载会话后，设置到 sessionManager
+        this.sessionManager.setSessionFromCrossProject(crossProjectSession);
+      } else {
+        console.log(`[ClaudeHandler] Session ${sessionId} not found in project ${projectId}`);
+      }
+    } else if (sessionId) {
+      // 如果只传入了 sessionId，恢复当前项目的会话
+      console.log(`[ClaudeHandler] Resuming session: ${sessionId}, projectId: ${projectId || 'none'}`);
+      this.sessionManager.resume(sessionId);
+    }
+
     // 获取当前会话
     const currentSession = this.sessionManager.getCurrent();
     const isNewSession = !currentSession;
 
+    console.log(`[ClaudeHandler] Current session:`, currentSession?.id, 'messages:', currentSession?.messages?.length, 'cwd:', currentSession?.cwd);
+
     // 如果没有当前会话，先创建一个临时占位（会在收到 Claude CLI session ID 后更新）
     if (!currentSession) {
+      console.log(`[ClaudeHandler] No current session, creating temporary...`);
       // 先创建临时会话，但不保存到存储
       this.sessionManager.createTemporary();
     }
@@ -73,24 +94,44 @@ export class ClaudeHandler {
     }));
 
     try {
-      // 获取当前会话的 Claude CLI session ID
+      // 获取当前会话的 Claude CLI session ID 和工作目录
       const session = this.sessionManager.getCurrent();
       const claudeSessionId = session?.claudeSessionId;
+      const cwd = session?.cwd;
 
       // 调用 Claude
       const result = await this.engine.sendMessage(
         content,
         messages,
-        (chunk, done, thinking) => {
-          ws.send(JSON.stringify({
-            type: 'claude_stream',
-            content: chunk,
-            thinking: thinking,
-            done,
-            timestamp: Date.now()
-          }));
+        (chunk, done, thinking, toolEvent) => {
+          if (toolEvent) {
+            // 发送工具事件
+            const toolData: any = {
+              type: 'claude_tool',
+              timestamp: Date.now()
+            };
+            if ('toolName' in toolEvent) {
+              toolData.toolName = toolEvent.toolName;
+              toolData.toolInput = toolEvent.toolInput;
+              toolData.toolUseId = toolEvent.toolUseId;
+            } else if ('toolUseId' in toolEvent) {
+              toolData.toolUseId = toolEvent.toolUseId;
+              toolData.result = toolEvent.result;
+              toolData.isError = toolEvent.isError;
+            }
+            ws.send(JSON.stringify(toolData));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'claude_stream',
+              content: chunk,
+              thinking: thinking,
+              done,
+              timestamp: Date.now()
+            }));
+          }
         },
-        claudeSessionId
+        claudeSessionId,
+        cwd
       );
 
       // 如果是新会话，使用 Claude CLI 返回的 session ID
@@ -194,6 +235,10 @@ export class ClaudeHandler {
           if (projectId) {
             // 从指定项目恢复会话
             session = SessionStorage.loadSessionFromProject(projectId, sessionId);
+            if (session) {
+              // 设置到 sessionManager 以便后续消息处理
+              this.sessionManager.setSessionFromCrossProject(session);
+            }
           } else {
             // 从当前项目恢复会话
             session = this.sessionManager.resume(sessionId);

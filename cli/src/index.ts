@@ -2,6 +2,8 @@
 
 import { program } from 'commander';
 import chalk from 'chalk';
+import { join } from 'path';
+import { existsSync } from 'fs';
 import { CodeRemoteServer } from './server.js';
 import { MessageHandler } from './handler.js';
 import { AuthManager } from './auth.js';
@@ -65,11 +67,23 @@ program
     const verbose = options.verbose;
     const workspace = options.workspace || process.cwd();
 
+    // Static files path (chat-ui dist) - go up one level from cli/
+    const staticPath = join(process.cwd(), '..', 'chat-ui', 'dist');
+    const staticPathExists = existsSync(staticPath);
+    if (staticPathExists) {
+      console.log(chalk.gray('   Static files:'), staticPath);
+    }
+
     // Create auth manager
     const auth = new AuthManager(options.token);
 
-    // Create server with workspace
-    server = new CodeRemoteServer(port, auth.getToken(), workspace);
+    // Create server with workspace and static files
+    server = new CodeRemoteServer(
+      port,
+      auth.getToken(),
+      workspace,
+      staticPathExists ? staticPath : undefined
+    );
 
     // Create message handler
     const messageHandler = new MessageHandler();

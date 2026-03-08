@@ -141,4 +141,12 @@ export class SessionManager {
       // 不保存到存储 - Claude CLI 会自己管理会话文件
     }
   }
+
+  // 设置跨项目会话（从其他项目恢复会话时使用）
+  setSessionFromCrossProject(session: ClaudeSession): void {
+    this.currentSession = session;
+    this.sessions.set(session.id, session);
+    this.isTemporarySession = false;
+    console.log(`[SessionManager] Set cross-project session: ${session.id}, claudeSessionId: ${session.claudeSessionId}`);
+  }
 }

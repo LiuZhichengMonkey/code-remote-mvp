@@ -1,5 +1,5 @@
 import { spawn, exec } from 'child_process';
-import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG } from './types';
+import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG, ToolUseEvent, ToolResultEvent } from './types';
 
 export class ClaudeCodeEngine {
   private config: ClaudeConfig;
@@ -38,13 +38,14 @@ export class ClaudeCodeEngine {
   async sendMessage(
     message: string,
     messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean, thinking?: string) => void,
-    claudeSessionId?: string
+    onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
+    claudeSessionId?: string,
+    cwd?: string
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
     if (useCLI) {
-      return this.callClaudeCLI(message, onChunk, claudeSessionId);
+      return this.callClaudeCLI(message, onChunk, claudeSessionId, cwd);
     } else {
       const response = await this.callAnthropicAPI(messages, onChunk);
       return { response, claudeSessionId };
@@ -53,20 +54,30 @@ export class ClaudeCodeEngine {
 
   private async callClaudeCLI(
     prompt: string,
-    onChunk: (content: string, done: boolean, thinking?: string) => void,
-    claudeSessionId?: string
+    onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
+    claudeSessionId?: string,
+    cwd?: string
   ): Promise<{ response: string; claudeSessionId?: string }> {
     return new Promise((resolve, reject) => {
-      // 设置环境变量
-      const env = {
-        ...process.env,
-        CLAUDECODE: '',
-        CLAUDE_CODE: ''
-      };
+      // 删除嵌套会话检测的环境变量
+      const env = { ...process.env };
+      delete env.CLAUDECODE;
+      delete env.CLAUDE_CODE;
+      delete env.CLAUDE_CODE_SKIP_NESTED_CHECK;
+
+      // 使用会话的原始工作目录，如果没有则使用默认目录
+      // 注意：Claude CLI 会在 .claude/projects/<project>/ 目录下查找会话文件
+      let cliCwd = cwd || 'E:/code-remote-mvp';
+
+      // 如果 cwd 是 E:\code-remote-mvp\cli，需要转换为项目根目录
+      if (cliCwd.endsWith('\\cli') || cliCwd.endsWith('/cli')) {
+        cliCwd = cliCwd.replace(/[\\/]cli$/, '');
+      }
 
       console.log('[Claude CLI] Starting stream...');
       console.log('[Claude CLI] Prompt:', prompt.substring(0, 50) + '...');
       console.log('[Claude CLI] Resume session:', claudeSessionId || 'new session');
+      console.log('[Claude CLI] CWD:', cliCwd);
 
       const args = [
         '--print',
@@ -86,7 +97,7 @@ export class ClaudeCodeEngine {
 
       // 使用 stream-json 格式获取实时流式输出
       const proc = spawn('claude', args, {
-        cwd: 'E:/code-remote-mvp',
+        cwd: cliCwd,
         env,
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
@@ -140,6 +151,26 @@ export class ClaudeCodeEngine {
                 // 实时发送到客户端
                 if (this.config.streamMode === 'realtime') {
                   onChunk(text, false);
+                }
+              }
+              // 处理工具输入 (input_json_delta)
+              else if (delta?.type === 'input_json_delta' && delta.partial_json) {
+                console.log('[Claude CLI] Tool input partial:', delta.partial_json.substring(0, 50));
+              }
+            }
+            // 处理内容块开始事件 (包含 tool_use)
+            else if (json.type === 'stream_event' && json.event?.type === 'content_block_start') {
+              const contentBlock = json.event.content_block;
+              if (contentBlock?.type === 'tool_use') {
+                const toolEvent: ToolUseEvent = {
+                  type: 'tool_use',
+                  toolName: contentBlock.name || 'unknown',
+                  toolInput: contentBlock.input,
+                  toolUseId: contentBlock.id
+                };
+                console.log('[Claude CLI] Tool use:', toolEvent.toolName);
+                if (this.config.streamMode === 'realtime') {
+                  onChunk('', false, undefined, toolEvent);
                 }
               }
             }
@@ -201,12 +232,12 @@ export class ClaudeCodeEngine {
         console.log('[Claude CLI] stderr:', chunk.substring(0, 100));
       });
 
-      // 设置 2 分钟超时
+      // 设置 5 分钟超时
       const timeout = setTimeout(() => {
         console.error('[Claude CLI] TIMEOUT');
         proc.kill();
-        reject(new Error('Claude CLI timeout (120s)'));
-      }, 120000);
+        reject(new Error('Claude CLI timeout (300s)'));
+      }, 300000);
 
       proc.on('error', (err) => {
         clearTimeout(timeout);

@@ -87,6 +87,23 @@ flutter run -d chrome
    - Enter the server URL and token from the CLI
    - Or scan the QR code (coming soon)
 
+## Debug Log
+
+### 2026-03-08 - Session Not Saving Bug
+
+**Issue**: Sessions created via CodeRemote were not persisting - closing and reopening the page would lose all conversation history.
+
+**Root Cause**: In `cli/src/claude/storage.ts`, the code was looking for `entry.session_id` (underscore format) when parsing Claude CLI session files, but the actual field name is `sessionId` (camelCase).
+
+**Solution**: Changed the field lookup from `entry.session_id` to `entry.sessionId`.
+
+**Files Changed**:
+- `cli/src/claude/storage.ts` - Fixed field name, added cwd parsing
+- `cli/src/claude/engine.ts` - Added working directory handling for Claude CLI
+- `cli/src/handlers/claude.ts` - Added project list, cross-project session handling
+
+---
+
 ## Tunneling (Optional but Recommended)
 
 To access your CLI from anywhere, set up a tunnel:

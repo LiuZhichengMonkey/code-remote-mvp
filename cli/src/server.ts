@@ -1,4 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, IncomingMessage, ServerResponse } from 'http';
+import { existsSync } from 'fs';
+import { extname, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
@@ -39,6 +42,7 @@ export interface ClientMessage {
 
 export class CodeRemoteServer {
   private wss: WebSocketServer;
+  private httpServer: ReturnType<typeof createServer>;
   private clients: Map<string, Client> = new Map();
   private token: string;
   private port: number;
@@ -47,6 +51,7 @@ export class CodeRemoteServer {
   private disconnectHandler?: (clientId: string) => void;
   private claudeHandler: ClaudeHandler;
   private workspaceRoot: string;
+  private staticPath?: string;
   private imageConfig = {
     savePath: 'E:/CodeRemote/Uploads',
     maxSize: 50 * 1024 * 1024, // 50MB
@@ -54,23 +59,68 @@ export class CodeRemoteServer {
     createDirectory: true
   };
 
-  constructor(port: number = 8080, token?: string, workspaceRoot?: string) {
+  constructor(port: number = 8080, token?: string, workspaceRoot?: string, staticPath?: string) {
     this.port = port;
     this.token = token || uuidv4();
     this.workspaceRoot = workspaceRoot || process.cwd();
+    this.staticPath = staticPath;
     this.claudeHandler = new ClaudeHandler(this.workspaceRoot);
-    this.wss = new WebSocketServer({ port });
+
+    // Create HTTP server for static files and WebSocket
+    this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
+    this.wss = new WebSocketServer({ server: this.httpServer });
     this.setupServer();
   }
 
+  private handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
+    // Health check endpoint
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', clients: this.clients.size }));
+      return;
+    }
+
+    // Serve static files if staticPath is configured
+    if (this.staticPath && req.url) {
+      let filePath = req.url === '/' ? '/index.html' : req.url;
+      const fullPath = join(this.staticPath, filePath);
+
+      if (existsSync(fullPath)) {
+        const ext = extname(fullPath);
+        const mimeTypes: Record<string, string> = {
+          '.html': 'text/html',
+          '.js': 'application/javascript',
+          '.css': 'text/css',
+          '.json': 'application/json',
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon'
+        };
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': contentType });
+        const { createReadStream } = require('fs');
+        createReadStream(fullPath).pipe(res);
+        return;
+      }
+    }
+
+    // 404 for other requests
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
+
   private setupServer() {
-    this.wss.on('listening', () => {
-      const address = this.wss.address() as any;
+    this.httpServer.listen(this.port, () => {
       console.log(chalk.green('✓'), chalk.bold('CodeRemote Server Started'));
       console.log(chalk.gray('─'.repeat(50)));
-      console.log(`  Port:      ${chalk.cyan(address.port)}`);
+      console.log(`  Port:      ${chalk.cyan(this.port)}`);
       console.log(`  Token:     ${chalk.yellow(this.token)}`);
-      console.log(`  WebSocket: ${chalk.cyan(`ws://localhost:${address.port}`)}`);
+      console.log(`  WebSocket: ${chalk.cyan(`ws://localhost:${this.port}`)}`);
+      if (this.staticPath) {
+        console.log(`  HTTP:      ${chalk.cyan(`http://localhost:${this.port}`)}`);
+        console.log(`  Static:    ${chalk.gray(this.staticPath)}`);
+      }
       console.log(chalk.gray('─'.repeat(50)));
     });
 
@@ -135,7 +185,8 @@ export class CodeRemoteServer {
         break;
 
       case 'message':
-        this.handleClientMessage(ws, message.content);
+        // Treat as claude message for chat-ui compatibility
+        this.handleClaudeMessage(ws, message);
         break;
 
       case 'claude':
@@ -232,19 +283,30 @@ export class CodeRemoteServer {
     }
 
     const content = message.content || '';
-    console.log(chalk.magenta('🤖'), `Claude request: ${content.substring(0, 50)}...`);
+    const sessionId = message.sessionId;
+    const projectId = message.projectId;
+
+    // Debug logging
+    console.log(chalk.magenta('🤖'), `Claude request received:`);
+    console.log(chalk.gray('   Content:'), content.substring(0, 100));
+    console.log(chalk.gray('   SessionId:'), sessionId);
+    console.log(chalk.gray('   ProjectId:'), projectId || '(none)');
+    console.log(chalk.gray('   ClientId:'), clientId);
 
     this.claudeHandler.handleClaudeMessage(
       ws,
       content,
       (code, errorMsg) => {
+        console.log(chalk.red('✗'), `Claude error: ${errorMsg}`);
         ws.send(JSON.stringify({
           type: 'claude_error',
           error: errorMsg,
           code,
           timestamp: Date.now()
         }));
-      }
+      },
+      sessionId,
+      projectId
     );
   }
 
@@ -512,8 +574,11 @@ export class CodeRemoteServer {
     }
     this.clients.clear();
 
-    // Close server
+    // Close WebSocket server
     this.wss.close();
+
+    // Close HTTP server
+    this.httpServer.close();
     console.log(chalk.yellow('→'), 'Server closed');
   }
 }
