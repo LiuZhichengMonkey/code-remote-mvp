@@ -2,7 +2,7 @@
 
 > Technical documentation for agents and developers extending CodeRemote functionality
 
-## Current Status (2025-03-06)
+## Current Status (2025-03-08)
 
 ### Working Features
 - ✅ Local WiFi WebSocket connection (ws://192.168.x.x:port)
@@ -13,11 +13,164 @@
 - ✅ Simple message echo handler
 - ✅ Image transfer (bidirectional, up to 10MB, PNG/JPG/GIF/WebP)
 - ✅ Image saved to E:/CodeRemote/Images/ on server
+- ✅ **Multi-Project History** - View and restore sessions from all projects
 
 ### Tested Platforms
 - **iOS Safari**: WebSocket works with WSS (secure WebSocket)
 - **Android Chrome**: Should work (not explicitly tested yet)
 - **Windows/macOS Browser**: Works
+
+---
+
+## Multi-Project History Feature
+
+### Overview
+
+The History sidebar now supports viewing sessions from **all projects**, not just the current working directory. Users can expand/collapse projects and restore sessions from any project.
+
+### Architecture
+
+```
+~/.claude/projects/
+├── E--code-remote-mvp/          # Project 1
+│   ├── session-abc123.jsonl
+│   └── session-def456.jsonl
+├── C--Users-TheCheng/           # Project 2
+│   └── session-xyz789.jsonl
+└── E--work-project/             # Project 3
+    └── ...
+```
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/claude/storage.ts` | Added `listAllProjects()`, `listSessionsByProject()`, `loadSessionFromProject()`, `deleteSessionFromProject()` static methods |
+| `cli/src/claude/storage.ts` | Added `ProjectInfo` interface and `claudeDirToPath()` function |
+| `cli/src/handlers/claude.ts` | Added `list_projects`, `list_by_project` action support; `resume`/`delete` now support `projectId` parameter |
+| `cli/src/server.ts` | Updated `ClientMessage` interface with `projectId` field and new action types |
+| `chat-ui/src/App.tsx` | Implemented hierarchical History sidebar with project expand/collapse |
+| `start.bat` | Updated to serve `chat-ui/dist` instead of `web/` directory |
+
+### WebSocket Protocol Extensions
+
+```typescript
+// Get all projects
+// Request
+{ type: 'session', action: 'list_projects' }
+
+// Response
+{
+  type: 'project_list',
+  projects: [
+    { id: 'E--code-remote-mvp', displayName: 'E:/code-remote-mvp', sessionCount: 5, lastActivity: 1709900000000 }
+  ]
+}
+
+// Get sessions for a specific project
+// Request
+{ type: 'session', action: 'list_by_project', projectId: 'E--code-remote-mvp' }
+
+// Response
+{
+  type: 'session_list',
+  projectId: 'E--code-remote-mvp',
+  sessions: [
+    { id: 'session-abc', title: 'Hello', createdAt: 1709900000000, messageCount: 10 }
+  ]
+}
+
+// Resume session from any project
+{ type: 'session', action: 'resume', sessionId: 'session-abc', projectId: 'E--code-remote-mvp' }
+
+// Delete session from any project
+{ type: 'session', action: 'delete', sessionId: 'session-abc', projectId: 'E--code-remote-mvp' }
+```
+
+### Path Conversion Functions
+
+```typescript
+// Convert path to Claude directory name
+// E:/code-remote-mvp -> E--code-remote-mvp
+function pathToClaudeDir(projectPath: string): string {
+  const normalized = projectPath.replace(/\\/g, '/');
+  const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
+  if (driveMatch) {
+    const drive = driveMatch[1].toUpperCase();
+    const pathPart = driveMatch[2].replace(/\//g, '-');
+    return `${drive}--${pathPart}`;
+  }
+  // Unix path handling...
+}
+
+// Convert Claude directory name back to readable path
+// E--code-remote-mvp -> E:/code-remote-mvp
+function claudeDirToPath(dirName: string): string {
+  const driveMatch = dirName.match(/^([A-Z])--(.*)$/);
+  if (driveMatch) {
+    const drive = driveMatch[1];
+    const pathPart = driveMatch[2].replace(/-/g, '/');
+    return `${drive}:/${pathPart}`;
+  }
+  return '/' + dirName.replace(/-/g, '/');
+}
+```
+
+### Frontend State Management
+
+```typescript
+// Multi-project History state in App.tsx
+const [projects, setProjects] = useState<ProjectInfo[]>([]);
+const [projectSessions, setProjectSessions] = useState<Record<string, ChatSession[]>>({});
+const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
+const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set());
+const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+```
+
+### UI Design
+
+```
+┌─────────────────────────┐
+│ History            [X]  │
+├─────────────────────────┤
+│ 📁 E:/code-remote-mvp 2 ▼│
+│   ├── 你好              │
+│   └── 测试功能   [🗑]   │
+│                         │
+│ 📁 C:/Users/TheCheng 5 ▶│
+│                         │
+│ 📁 E:/work 3         ▶  │
+├─────────────────────────┤
+│    [+] New Chat         │
+└─────────────────────────┘
+```
+
+### Debugging Multi-Project History
+
+1. **Check projects directory**:
+   ```bash
+   ls ~/.claude/projects/
+   ```
+
+2. **Test WebSocket directly**:
+   ```bash
+   cd cli && node -e "
+   const WebSocket = require('ws');
+   const ws = new WebSocket('ws://localhost:8085');
+   ws.on('open', () => ws.send(JSON.stringify({type:'auth',token:'test123'})));
+   ws.on('message', (d) => { console.log(d.toString()); ws.send(JSON.stringify({type:'session',action:'list_projects'})); });
+   "
+   ```
+
+3. **Check frontend console**: Look for `project_list` and `session_list` messages
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| No projects shown | Ensure `~/.claude/projects/` has project directories with `.jsonl` files |
+| Sessions not loading | Check `listSessionsByProject()` is reading `.jsonl` files correctly |
+| Cross-project restore fails | Verify `loadSessionFromProject()` uses correct project directory |
 
 ---
 
@@ -47,7 +200,8 @@ Happy (https://github.com/slopus/happy) is a production-ready mobile client for 
 | **图片传输** | ✅ WebSocket 二进制帧 | ❌ | CodeRemote 领先 |
 | 推送通知 | ❌ | ✅ | 需添加 |
 | Claude Code 集成 | ❌ | ✅ 完整 | 核心差距 |
-| 多会话支持 | ❌ | ✅ | 需添加 |
+| **多会话支持** | ✅ | ✅ | 已实现 |
+| **跨项目历史** | ✅ | ❌ | CodeRemote 领先 |
 | 文件传输 | ❌ | ❌ | 两者都没有 |
 | 代码高亮 | ❌ | ✅ | 需添加 |
 | QR 码扫描 | ⚠️ 基础 | ✅ | 需完善 |
@@ -125,7 +279,7 @@ To implement image transfer, you would need:
 ### P2 - Enhancement (Nice to Have)
 7. **File Transfer** - 除图片外的文件传输
 8. **Code Syntax Highlighting** - 代码可读性
-9. **Multi-Session Support** - 多设备同时连接
+9. ~~**Multi-Session Support**~~ - ✅ 已实现（含跨项目历史）
 10. **Session Persistence** - 断线重连恢复
 
 ---
@@ -214,6 +368,7 @@ The debug page shows:
 
 | Port | Service | Description |
 |------|---------|-------------|
+| 3000 | HTTP | Chat UI (React frontend) |
 | 8084 | HTTP | Web interface (HTML files) |
 | 8085 | WebSocket | CLI server (ws://) |
 | 4040 | ngrok API | Tunnel management |
@@ -275,6 +430,14 @@ code-remote-mvp/
 │   │   ├── index.ts        # Entry point + exports
 │   │   ├── server.ts       # WebSocket server (image transfer)
 │   │   ├── imageHandler.ts # Image validation & saving
+│   │   ├── claude/         # Claude integration
+│   │   │   ├── storage.ts  # Session storage (multi-project support)
+│   │   │   ├── session.ts  # Session management
+│   │   │   ├── engine.ts   # Claude CLI integration
+│   │   │   └── types.ts    # Type definitions
+│   │   ├── handlers/
+│   │   │   ├── claude.ts   # Claude message & session handlers
+│   │   │   └── commands.ts # Slash command handlers
 │   │   ├── types/
 │   │   │   └── image.ts    # Image type definitions
 │   │   ├── handler.ts      # Message handling
@@ -282,13 +445,20 @@ code-remote-mvp/
 │   │   └── qrcode.ts      # QR code generation
 │   └── dist/               # Compiled JS
 │
-├── app/                    # Flutter mobile app
+├── chat-ui/                # React chat interface (primary UI)
+│   ├── src/
+│   │   ├── App.tsx         # Main app with History sidebar
+│   │   ├── types.ts        # TypeScript interfaces
+│   │   └── utils.ts        # Utility functions
+│   └── dist/               # Production build
+│
+├── app/                    # Flutter mobile app (in progress)
 │   └── lib/
 │       ├── services/       # WebSocket service
 │       ├── screens/        # UI screens
 │       └── widgets/        # Reusable widgets
 │
-├── web/                    # Web test interfaces
+├── web/                    # Legacy web test interfaces
 │   ├── index.html          # Main web UI
 │   ├── cr.html             # Compact web UI
 │   ├── mobile.html         # Mobile-optimized UI

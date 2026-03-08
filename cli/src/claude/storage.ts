@@ -7,6 +7,14 @@ import { ClaudeSession, ClaudeMessage, SessionInfo } from './types';
 const CLAUDE_CLI_DIR = path.join(os.homedir(), '.claude');
 const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_CLI_DIR, 'projects');
 
+// 项目信息接口
+export interface ProjectInfo {
+  id: string;           // 目录名: "E--code-remote-mvp"
+  displayName: string;  // 可读路径: "E:/code-remote-mvp"
+  sessionCount: number;
+  lastActivity: number;
+}
+
 // 项目路径转 Claude CLI 目录名格式 (E:\code-remote-mvp -> E--code-remote-mvp)
 function pathToClaudeDir(projectPath: string): string {
   // 处理 Windows 路径: E:\code-remote-mvp -> E--code-remote-mvp
@@ -17,8 +25,8 @@ function pathToClaudeDir(projectPath: string): string {
   const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
   if (driveMatch) {
     const drive = driveMatch[1].toUpperCase();
-    const path = driveMatch[2].replace(/\//g, '-');
-    return `${drive}--${path}`;
+    const pathPart = driveMatch[2].replace(/\//g, '-');
+    return `${drive}--${pathPart}`;
   }
 
   // 匹配 Unix 路径 (/home/user/path)
@@ -28,6 +36,20 @@ function pathToClaudeDir(projectPath: string): string {
 
   // 其他格式：直接替换
   return normalized.replace(/[:/]/g, '-');
+}
+
+// Claude CLI 目录名转可读路径 (E--code-remote-mvp -> E:/code-remote-mvp)
+function claudeDirToPath(dirName: string): string {
+  // 检测驱动器字母 (如 E-- 或 C--)
+  const driveMatch = dirName.match(/^([A-Z])--(.*)$/);
+  if (driveMatch) {
+    const drive = driveMatch[1];
+    const pathPart = driveMatch[2].replace(/-/g, '/');
+    return `${drive}:/${pathPart}`;
+  }
+
+  // Unix 路径
+  return '/' + dirName.replace(/-/g, '/');
 }
 
 // Claude CLI 消息格式
@@ -334,5 +356,145 @@ export class SessionStorage {
     }
 
     return deleted;
+  }
+
+  // ===== Static methods for multi-project support =====
+
+  /**
+   * 列出所有项目
+   */
+  static listAllProjects(): ProjectInfo[] {
+    if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) {
+      return [];
+    }
+
+    const projects: ProjectInfo[] = [];
+    const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const projectId = entry.name;
+      const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
+
+      try {
+        const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+        let lastActivity = 0;
+
+        for (const file of files) {
+          const filePath = path.join(projectDir, file);
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs > lastActivity) {
+            lastActivity = stat.mtimeMs;
+          }
+        }
+
+        projects.push({
+          id: projectId,
+          displayName: claudeDirToPath(projectId),
+          sessionCount: files.length,
+          lastActivity
+        });
+      } catch (err) {
+        console.error(`Error reading project ${projectId}:`, err);
+      }
+    }
+
+    // 按最后活动时间排序（最新的在前）
+    return projects.sort((a, b) => b.lastActivity - a.lastActivity);
+  }
+
+  /**
+   * 列出指定项目的会话信息
+   */
+  static listSessionsByProject(projectId: string): SessionInfo[] {
+    const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
+
+    if (!fs.existsSync(projectDir)) {
+      return [];
+    }
+
+    const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+    const sessions: SessionInfo[] = [];
+
+    for (const file of files) {
+      const filePath = path.join(projectDir, file);
+      const sessionId = file.replace('.jsonl', '');
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const lines = content.trim().split('\n');
+        let title = 'New Chat';
+        let createdAt = Date.now();
+        let messageCount = 0;
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const entry = JSON.parse(line);
+
+            if (entry.timestamp) {
+              const entryTime = new Date(entry.timestamp).getTime();
+              if (entryTime < createdAt) {
+                createdAt = entryTime;
+              }
+            }
+
+            if (entry.type === 'user' && entry.message) {
+              messageCount++;
+              if (messageCount === 1 && entry.message.content) {
+                title = typeof entry.message.content === 'string'
+                  ? entry.message.content.substring(0, 50)
+                  : 'New Chat';
+              }
+            }
+
+            if (entry.type === 'assistant') {
+              messageCount++;
+            }
+
+            if (entry.type === 'summary' && entry.summary) {
+              title = entry.summary;
+            }
+          } catch {
+            // 忽略解析错误
+          }
+        }
+
+        sessions.push({
+          id: sessionId,
+          title,
+          createdAt,
+          messageCount
+        });
+      } catch (err) {
+        console.error(`Error reading session ${file}:`, err);
+      }
+    }
+
+    // 按创建时间排序（最新的在前）
+    return sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * 加载指定项目的会话内容
+   */
+  static loadSessionFromProject(projectId: string, sessionId: string): ClaudeSession | null {
+    const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
+    const storage = new SessionStorage(claudeDirToPath(projectId));
+    storage.projectDir = projectDir;
+    return storage.load(sessionId);
+  }
+
+  /**
+   * 删除指定项目的会话
+   */
+  static deleteSessionFromProject(projectId: string, sessionId: string): boolean {
+    const filePath = path.join(CLAUDE_PROJECTS_DIR, projectId, `${sessionId}.jsonl`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      return true;
+    }
+    return false;
   }
 }

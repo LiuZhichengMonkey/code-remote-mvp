@@ -42,14 +42,14 @@ echo [3/4] Waiting 2 seconds...
 ping 127.0.0.1 -n 3 >nul
 
 echo [4/4] Starting HTTP server (port 3000)...
-start "CodeRemote-HTTP" cmd /c "cd /d %~dp0web && npx serve -p 3000"
+start "CodeRemote-HTTP" cmd /c "cd /d %~dp0chat-ui\dist && npx serve -p 3000"
 
 echo.
 echo ========================================
 echo   Services started!
 echo ========================================
 echo.
-echo   URL: http://localhost:3000/cr-debug.html
+echo   URL: http://localhost:3000
 echo   Token: test123
 echo.
 echo   Press any key to open browser...
@@ -57,4 +57,4 @@ echo   (Closing this window will NOT stop services)
 echo.
 pause >nul
 
-start http://localhost:3000/cr-debug.html
+start http://localhost:3000

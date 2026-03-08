@@ -31,8 +31,9 @@ export interface ClientMessage {
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete';
+  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project';
   sessionId?: string;
+  projectId?: string;
   stream?: boolean;
 }
 
@@ -264,8 +265,9 @@ export class CodeRemoteServer {
 
     this.claudeHandler.handleSessionAction(
       ws,
-      message.action || 'list',
-      message.sessionId
+      (message.action || 'list') as any,
+      message.sessionId,
+      message.projectId
     );
   }
 

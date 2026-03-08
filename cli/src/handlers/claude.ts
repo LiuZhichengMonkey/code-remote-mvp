@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage } from '../claude';
 import { CommandHandler } from './commands';
+import { SessionStorage, ProjectInfo } from '../claude/storage';
 
 export class ClaudeHandler {
   private engine: ClaudeCodeEngine;
@@ -134,8 +135,9 @@ export class ClaudeHandler {
 
   handleSessionAction(
     ws: WebSocket,
-    action: 'new' | 'resume' | 'list' | 'delete',
-    sessionId?: string
+    action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project',
+    sessionId?: string,
+    projectId?: string
   ): void {
     switch (action) {
       case 'new':
@@ -163,9 +165,40 @@ export class ClaudeHandler {
         }));
         break;
 
+      case 'list_projects':
+        // 列出所有项目
+        const projects = SessionStorage.listAllProjects();
+        ws.send(JSON.stringify({
+          type: 'project_list',
+          projects,
+          timestamp: Date.now()
+        }));
+        break;
+
+      case 'list_by_project':
+        // 列出指定项目的会话
+        if (projectId) {
+          const projectSessions = SessionStorage.listSessionsByProject(projectId);
+          ws.send(JSON.stringify({
+            type: 'session_list',
+            projectId,
+            sessions: projectSessions,
+            timestamp: Date.now()
+          }));
+        }
+        break;
+
       case 'resume':
         if (sessionId) {
-          const session = this.sessionManager.resume(sessionId);
+          let session;
+          if (projectId) {
+            // 从指定项目恢复会话
+            session = SessionStorage.loadSessionFromProject(projectId, sessionId);
+          } else {
+            // 从当前项目恢复会话
+            session = this.sessionManager.resume(sessionId);
+          }
+
           if (session) {
             // 转换消息格式：assistant -> model
             const messages = session.messages.map(msg => ({
@@ -174,9 +207,11 @@ export class ClaudeHandler {
             }));
             ws.send(JSON.stringify({
               type: 'session_resumed',
+              projectId: projectId,
               session: {
                 id: session.id,
                 title: session.title,
+                summary: session.title, // 添加 summary 字段
                 messages,
                 createdAt: session.createdAt
               },
@@ -194,10 +229,18 @@ export class ClaudeHandler {
 
       case 'delete':
         if (sessionId) {
-          const deleted = this.sessionManager.delete(sessionId);
+          let deleted;
+          if (projectId) {
+            // 从指定项目删除会话
+            deleted = SessionStorage.deleteSessionFromProject(projectId, sessionId);
+          } else {
+            // 从当前项目删除会话
+            deleted = this.sessionManager.delete(sessionId);
+          }
           ws.send(JSON.stringify({
             type: 'session_deleted',
             sessionId,
+            projectId,
             success: deleted,
             timestamp: Date.now()
           }));

@@ -105,6 +105,13 @@ const CodeBlock = ({ code, language }: { code: string; language: string }) => {
 };
 
 // --- WebSocket Connection Types ---
+interface ProjectInfo {
+  id: string;
+  displayName: string;
+  sessionCount: number;
+  lastActivity: number;
+}
+
 interface WSMessage {
   type: string;
   content?: string;
@@ -116,6 +123,7 @@ interface WSMessage {
   command?: string;
   success?: boolean;
   sessionId?: string;
+  projectId?: string;
   session?: {
     id: string;
     title: string;
@@ -129,6 +137,7 @@ interface WSMessage {
     createdAt: number;
     messageCount: number;
   }>;
+  projects?: ProjectInfo[];
 }
 
 // --- Connection Panel ---
@@ -938,6 +947,13 @@ export default function App() {
   const currentSession = sessions.find(s => s.id === currentSessionId);
   const messages = currentSession?.messages || [];
 
+  // Multi-project History state
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [projectSessions, setProjectSessions] = useState<Record<string, ChatSession[]>>({});
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
+  const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set());
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+
   // Handle keyboard for mobile - scroll to bottom when input is focused
   const handleInputFocus = useCallback(() => {
     if (messages.length > 0) {
@@ -982,8 +998,8 @@ export default function App() {
           setIsConnecting(false);
           setShowSettings(false); // Auto-close settings panel on success
           console.log('Auth successful');
-          // Request session list from server
-          newWs.send(JSON.stringify({ type: 'session', action: 'list' }));
+          // Request project list from server
+          newWs.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
         } else if (msg.type === 'auth_failed') {
           setIsConnected(false);
           setIsConnecting(false);
@@ -1095,10 +1111,42 @@ export default function App() {
             });
           });
           setIsGenerating(false);
+        } else if (msg.type === 'project_list') {
+          // Handle project list from server
+          console.log('Received project list:', msg.projects);
+          if (msg.projects) {
+            setProjects(msg.projects);
+            setLoadingProjects(new Set());
+          }
         } else if (msg.type === 'session_list') {
           // Handle session list from server
-          console.log('Received session list:', msg.sessions);
-          if (msg.sessions && msg.sessions.length > 0) {
+          console.log('Received session list:', msg.sessions, 'projectId:', msg.projectId);
+          if (msg.projectId) {
+            // Sessions for a specific project
+            setLoadingProjects(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(msg.projectId!);
+              return newSet;
+            });
+            if (msg.sessions && msg.sessions.length > 0) {
+              const serverSessions: ChatSession[] = msg.sessions.map(s => ({
+                id: s.id,
+                title: s.summary || s.title || 'Untitled',
+                messages: [],
+                createdAt: s.createdAt || Date.now()
+              }));
+              setProjectSessions(prev => ({
+                ...prev,
+                [msg.projectId!]: serverSessions
+              }));
+            } else {
+              setProjectSessions(prev => ({
+                ...prev,
+                [msg.projectId!]: []
+              }));
+            }
+          } else if (msg.sessions && msg.sessions.length > 0) {
+            // Legacy: current project sessions (no projectId)
             const serverSessions: ChatSession[] = msg.sessions.map(s => ({
               id: s.id,
               title: s.title,
@@ -1157,21 +1205,40 @@ export default function App() {
           }
         } else if (msg.type === 'session_resumed') {
           // Handle session resumed with messages
-          console.log('Session resumed:', msg.session);
+          console.log('Session resumed:', msg.session, 'projectId:', msg.projectId);
           if (msg.session) {
             const resumedSession: ChatSession = {
               id: msg.session.id,
-              title: msg.session.title,
+              title: msg.session.summary || msg.session.title || 'Untitled',
               messages: msg.session.messages || [],
               createdAt: msg.session.createdAt || Date.now()
             };
-            setSessions(prev => {
-              const exists = prev.find(s => s.id === resumedSession.id);
-              if (exists) {
-                return prev.map(s => s.id === resumedSession.id ? resumedSession : s);
-              }
-              return [resumedSession, ...prev];
-            });
+            // Update the appropriate session list
+            if (msg.projectId) {
+              setProjectSessions(prev => {
+                const projectSessionList = prev[msg.projectId!] || [];
+                const exists = projectSessionList.find(s => s.id === resumedSession.id);
+                if (exists) {
+                  return {
+                    ...prev,
+                    [msg.projectId!]: projectSessionList.map(s => s.id === resumedSession.id ? resumedSession : s)
+                  };
+                }
+                return {
+                  ...prev,
+                  [msg.projectId!]: [resumedSession, ...projectSessionList]
+                };
+              });
+              setCurrentProjectId(msg.projectId);
+            } else {
+              setSessions(prev => {
+                const exists = prev.find(s => s.id === resumedSession.id);
+                if (exists) {
+                  return prev.map(s => s.id === resumedSession.id ? resumedSession : s);
+                }
+                return [resumedSession, ...prev];
+              });
+            }
             setCurrentSessionId(resumedSession.id);
             currentSessionIdRef.current = resumedSession.id;
             // Scroll to bottom after loading messages
@@ -1255,14 +1322,40 @@ export default function App() {
     }
   };
 
-  // Resume existing session
-  const resumeSession = (sessionId: string) => {
+  // Resume existing session (supports cross-project)
+  const resumeSession = (sessionId: string, projectId?: string) => {
     if (wsRef.current && isConnected) {
-      wsRef.current.send(JSON.stringify({ type: 'session', action: 'resume', sessionId }));
+      const msg: any = { type: 'session', action: 'resume', sessionId };
+      if (projectId) {
+        msg.projectId = projectId;
+      }
+      wsRef.current.send(JSON.stringify(msg));
     }
   };
 
-  // Refresh session list from server
+  // Delete session (supports cross-project)
+  const deleteSessionById = (sessionId: string, projectId?: string) => {
+    if (wsRef.current && isConnected) {
+      const msg: any = { type: 'session', action: 'delete', sessionId };
+      if (projectId) {
+        msg.projectId = projectId;
+      }
+      wsRef.current.send(JSON.stringify(msg));
+      // Remove from local state
+      if (projectId) {
+        setProjectSessions(prev => ({
+          ...prev,
+          [projectId]: (prev[projectId] || []).filter(s => s.id !== sessionId)
+        }));
+        // Update project session count
+        setProjects(prev => prev.map(p =>
+          p.id === projectId ? { ...p, sessionCount: Math.max(0, p.sessionCount - 1) } : p
+        ));
+      }
+    }
+  };
+
+  // Refresh session list from server (legacy)
   const refreshSessions = () => {
     if (wsRef.current && isConnected) {
       isRefreshingRef.current = true;
@@ -1270,19 +1363,32 @@ export default function App() {
     }
   };
 
-  // Delete a session
-  const deleteSession = (sessionId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent triggering resume
+  // Load all projects
+  const loadProjects = () => {
     if (wsRef.current && isConnected) {
-      wsRef.current.send(JSON.stringify({ type: 'session', action: 'delete', sessionId }));
-      // If deleting current session, clear it
-      if (currentSessionId === sessionId) {
-        setCurrentSessionId(null);
-        currentSessionIdRef.current = null;
-      }
+      wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
     }
   };
 
+  // Toggle project expansion and load sessions if needed
+  const toggleProject = (projectId: string) => {
+    setExpandedProjects(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(projectId)) {
+        newSet.delete(projectId);
+        return newSet;
+      }
+      newSet.add(projectId);
+      // Load sessions for this project if not loaded
+      if (!projectSessions[projectId] && wsRef.current && isConnected) {
+        setLoadingProjects(prev => new Set(prev).add(projectId));
+        wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_by_project', projectId }));
+      }
+      return newSet;
+    });
+  };
+
+  // Delete a session
   // Store pending message when waiting for session creation
   const pendingMessageRef = useRef<{ text: string; attachments: Attachment[] } | null>(null);
 
@@ -1444,9 +1550,9 @@ export default function App() {
                 <h2 className="text-xl font-semibold">History</h2>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={refreshSessions}
+                    onClick={loadProjects}
                     className="text-white/40 hover:text-white transition-colors"
-                    title="Refresh sessions"
+                    title="Refresh projects"
                   >
                     <RefreshCw size={18} />
                   </button>
@@ -1457,37 +1563,85 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-y-auto px-4 space-y-2 no-scrollbar">
-                {sessions.length === 0 ? (
+                {projects.length === 0 ? (
                   <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white/60">
-                    No recent chats
+                    {isConnected ? 'No projects found' : 'Connect to view history'}
                   </div>
                 ) : (
-                  sessions.map(session => (
-                    <div
-                      key={session.id}
-                      className={cn(
-                        "flex items-center gap-2 p-3 rounded-xl transition-colors text-sm",
-                        currentSessionId === session.id
-                          ? "bg-accent text-white"
-                          : "bg-white/5 text-white/60 hover:bg-white/10"
+                  projects.map(project => (
+                    <div key={project.id} className="space-y-1">
+                      {/* Project Header */}
+                      <button
+                        onClick={() => toggleProject(project.id)}
+                        className={cn(
+                          "w-full flex items-center gap-2 p-3 rounded-xl transition-colors text-sm",
+                          expandedProjects.has(project.id)
+                            ? "bg-white/10 text-white"
+                            : "bg-white/5 text-white/60 hover:bg-white/10"
+                        )}
+                      >
+                        <Folder size={16} className="text-accent shrink-0" />
+                        <span className="flex-1 text-left truncate" title={project.displayName}>
+                          {project.displayName}
+                        </span>
+                        <span className="text-xs text-white/40 bg-white/10 px-2 py-0.5 rounded-full">
+                          {project.sessionCount}
+                        </span>
+                        {expandedProjects.has(project.id) ? (
+                          <ChevronUp size={14} className="text-white/40" />
+                        ) : (
+                          <ChevronDown size={14} className="text-white/40" />
+                        )}
+                      </button>
+
+                      {/* Project Sessions */}
+                      {expandedProjects.has(project.id) && (
+                        <div className="pl-4 space-y-1">
+                          {loadingProjects.has(project.id) ? (
+                            <div className="p-3 text-sm text-white/40 text-center">
+                              Loading...
+                            </div>
+                          ) : (
+                            (projectSessions[project.id] || []).map(session => (
+                              <div
+                                key={session.id}
+                                className={cn(
+                                  "flex items-center gap-2 p-2 rounded-lg transition-colors text-sm",
+                                  currentSessionId === session.id && currentProjectId === project.id
+                                    ? "bg-accent/30 text-white"
+                                    : "bg-white/5 text-white/60 hover:bg-white/10"
+                                )}
+                              >
+                                <button
+                                  onClick={() => {
+                                    resumeSession(session.id, project.id);
+                                    setIsSidebarOpen(false);
+                                  }}
+                                  className="flex-1 text-left truncate text-xs"
+                                >
+                                  <FileText size={12} className="inline mr-1 opacity-50" />
+                                  {session.title}
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteSessionById(session.id, project.id);
+                                  }}
+                                  className="text-white/30 hover:text-red-400 transition-all p-1 touch-manipulation"
+                                  title="Delete session"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            ))
+                          )}
+                          {projectSessions[project.id]?.length === 0 && !loadingProjects.has(project.id) && (
+                            <div className="p-2 text-xs text-white/40 text-center">
+                              No sessions
+                            </div>
+                          )}
+                        </div>
                       )}
-                    >
-                      <button
-                        onClick={() => {
-                          resumeSession(session.id);
-                          setIsSidebarOpen(false);
-                        }}
-                        className="flex-1 text-left truncate"
-                      >
-                        {session.title}
-                      </button>
-                      <button
-                        onClick={(e) => deleteSession(session.id, e)}
-                        className="text-white/40 hover:text-red-400 transition-all p-2 -mr-1 touch-manipulation"
-                        title="Delete session"
-                      >
-                        <Trash2 size={18} />
-                      </button>
                     </div>
                   ))
                 )}
