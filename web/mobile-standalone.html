@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>CodeRemote</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f1a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 连接界面 */
+    #connect-screen {
+      padding: 20px;
+      padding-top: env(safe-area-inset-top, 20px);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      padding-top: 40px;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+
+    .header p {
+      color: #888;
+      font-size: 14px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: #aaa;
+      font-size: 14px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 14px 16px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 12px;
+      color: #fff;
+      font-size: 16px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+
+    .form-group input::placeholder {
+      color: #666;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #666;
+      margin-top: 8px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 16px;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff;
+    }
+
+    .btn-primary:active {
+      transform: scale(0.98);
+      opacity: 0.9;
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .status {
+      text-align: center;
+      padding: 12px;
+      margin-top: 20px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+
+    .status.error {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+    }
+
+    .status.success {
+      background: rgba(34, 197, 94, 0.2);
+      color: #4ade80;
+    }
+
+    .status.info {
+      background: rgba(59, 130, 246, 0.2);
+      color: #60a5fa;
+    }
+
+    /* 聊天界面 */
+    #chat-screen {
+      display: none;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      padding-top: max(12px, env(safe-area-inset-top));
+      background: #1a1a2e;
+      border-bottom: 1px solid #333;
+    }
+
+    .chat-header .title {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .chat-header .status-dot {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #888;
+    }
+
+    .chat-header .status-dot .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4ade80;
+    }
+
+    .chat-header .status-dot .dot.disconnected {
+      background: #f87171;
+    }
+
+    .chat-header .btn-icon {
+      background: none;
+      border: none;
+      color: #888;
+      font-size: 20px;
+      padding: 8px;
+      cursor: pointer;
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      font-size: 15px;
+      line-height: 1.5;
+      word-wrap: break-word;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message.server {
+      align-self: flex-start;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      border-bottom-left-radius: 4px;
+    }
+
+    .message.system {
+      align-self: center;
+      background: transparent;
+      color: #888;
+      font-size: 12px;
+      padding: 4px 12px;
+    }
+
+    .input-area {
+      padding: 12px 16px;
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      background: #1a1a2e;
+      border-top: 1px solid #333;
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    .input-area textarea {
+      flex: 1;
+      padding: 12px 16px;
+      background: #0f0f1a;
+      border: 1px solid #333;
+      border-radius: 20px;
+      color: #fff;
+      font-size: 16px;
+      resize: none;
+      max-height: 120px;
+      line-height: 1.4;
+    }
+
+    .input-area textarea:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+
+    .input-area .btn-send {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border: none;
+      color: #fff;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .input-area .btn-send:disabled {
+      opacity: 0.5;
+    }
+
+    /* 快捷服务器列表 */
+    .saved-servers {
+      margin-top: 30px;
+    }
+
+    .saved-servers h3 {
+      font-size: 14px;
+      color: #888;
+      margin-bottom: 12px;
+    }
+
+    .server-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: #1a1a2e;
+      border-radius: 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+    }
+
+    .server-item:active {
+      background: #252540;
+    }
+
+    .server-item .server-info {
+      flex: 1;
+    }
+
+    .server-item .server-name {
+      font-size: 14px;
+      color: #fff;
+    }
+
+    .server-item .server-url {
+      font-size: 12px;
+      color: #888;
+      margin-top: 2px;
+    }
+
+    .server-item .btn-delete {
+      background: none;
+      border: none;
+      color: #666;
+      font-size: 18px;
+      padding: 8px;
+      cursor: pointer;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 20px;
+      color: #666;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 连接界面 -->
+  <div id="connect-screen">
+    <div class="header">
+      <h1>CodeRemote</h1>
+      <p>远程连接 Claude Code</p>
+    </div>
+
+    <div class="form-group">
+      <label>WebSocket 地址</label>
+      <input type="url" id="ws-url" placeholder="wss://xxx.ngrok-free.dev" autocapitalize="off" autocorrect="off">
+      <p class="hint">输入 ngrok 或其他隧道提供的 wss:// 地址</p>
+    </div>
+
+    <div class="form-group">
+      <label>Token</label>
+      <input type="text" id="token" placeholder="输入连接令牌" autocapitalize="off" autocorrect="off">
+    </div>
+
+    <button class="btn btn-primary" id="btn-connect" onclick="connect()">连接</button>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <!-- 保存的服务器列表 -->
+    <div class="saved-servers">
+      <h3>保存的服务器</h3>
+      <div id="server-list"></div>
+    </div>
+  </div>
+
+  <!-- 聊天界面 -->
+  <div id="chat-screen">
+    <div class="chat-header">
+      <div>
+        <div class="title">CodeRemote</div>
+        <div class="status-dot">
+          <span class="dot" id="status-dot"></span>
+          <span id="connection-status">已连接</span>
+        </div>
+      </div>
+      <button class="btn-icon" onclick="disconnect()">⚙️</button>
+    </div>
+
+    <div class="messages" id="messages"></div>
+
+    <div class="input-area">
+      <textarea id="message-input" placeholder="输入消息..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+      <button class="btn-send" id="btn-send" onclick="sendMessage()">➤</button>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let isAuthenticated = false;
+    let currentServer = null;
+
+    // 初始化
+    document.addEventListener('DOMContentLoaded', () => {
+      loadSavedServers();
+
+      // 自动调整 textarea 高度
+      const textarea = document.getElementById('message-input');
+      textarea.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+      });
+    });
+
+    // 显示状态消息
+    function showStatus(message, type = 'info') {
+      const status = document.getElementById('status');
+      status.textContent = message;
+      status.className = `status ${type}`;
+      status.style.display = 'block';
+    }
+
+    // 连接服务器
+    function connect() {
+      const url = document.getElementById('ws-url').value.trim();
+      const token = document.getElementById('token').value.trim();
+
+      if (!url) {
+        showStatus('请输入 WebSocket 地址', 'error');
+        return;
+      }
+
+      if (!token) {
+        showStatus('请输入 Token', 'error');
+        return;
+      }
+
+      // 验证 URL 格式
+      if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
+        showStatus('地址必须以 ws:// 或 wss:// 开头', 'error');
+        return;
+      }
+
+      showStatus('正在连接...', 'info');
+      document.getElementById('btn-connect').disabled = true;
+
+      try {
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          console.log('WebSocket 已连接');
+          showStatus('已连接，正在认证...', 'info');
+
+          // 发送认证
+          ws.send(JSON.stringify({
+            type: 'auth',
+            token: token
+          }));
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleMessage(data);
+          } catch (e) {
+            console.error('解析消息失败:', e);
+          }
+        };
+
+        ws.onerror = (error) => {
+          console.error('WebSocket 错误:', error);
+          showStatus('连接错误', 'error');
+          document.getElementById('btn-connect').disabled = false;
+        };
+
+        ws.onclose = (event) => {
+          console.log('WebSocket 已关闭:', event.code, event.reason);
+          if (!isAuthenticated) {
+            showStatus(`连接关闭 (${event.code})`, 'error');
+            document.getElementById('btn-connect').disabled = false;
+          }
+        };
+
+      } catch (e) {
+        showStatus('连接失败: ' + e.message, 'error');
+        document.getElementById('btn-connect').disabled = false;
+      }
+    }
+
+    // 处理服务器消息
+    function handleMessage(data) {
+      console.log('收到消息:', data);
+
+      switch (data.type) {
+        case 'auth_success':
+          isAuthenticated = true;
+          currentServer = {
+            url: document.getElementById('ws-url').value.trim(),
+            token: document.getElementById('token').value.trim()
+          };
+          saveServer(currentServer);
+          showChatScreen();
+          break;
+
+        case 'auth_failed':
+          showStatus('认证失败: ' + (data.error || 'Token 无效'), 'error');
+          ws.close();
+          document.getElementById('btn-connect').disabled = false;
+          break;
+
+        case 'message':
+          addMessage(data.content, 'server');
+          break;
+
+        case 'claude_response':
+          if (data.content) {
+            addMessage(data.content, 'server');
+          }
+          break;
+
+        case 'claude_stream':
+          // 流式响应处理
+          updateLastMessage(data.content);
+          break;
+
+        case 'claude_done':
+          // 响应完成
+          break;
+
+        case 'error':
+          addMessage('错误: ' + data.error, 'server');
+          break;
+
+        default:
+          console.log('未知消息类型:', data.type);
+      }
+    }
+
+    // 显示聊天界面
+    function showChatScreen() {
+      document.getElementById('connect-screen').style.display = 'none';
+      document.getElementById('chat-screen').style.display = 'flex';
+      document.getElementById('messages').innerHTML = '';
+      addMessage('已连接到服务器', 'system');
+    }
+
+    // 添加消息
+    function addMessage(content, type) {
+      const messages = document.getElementById('messages');
+      const msg = document.createElement('div');
+      msg.className = `message ${type}`;
+      msg.textContent = content;
+      messages.appendChild(msg);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // 更新最后一条消息（用于流式响应）
+    function updateLastMessage(content) {
+      const messages = document.getElementById('messages');
+      const lastMsg = messages.lastElementChild;
+      if (lastMsg && lastMsg.classList.contains('server')) {
+        lastMsg.textContent += content;
+      } else {
+        addMessage(content, 'server');
+      }
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    // 发送消息
+    function sendMessage() {
+      const input = document.getElementById('message-input');
+      const content = input.value.trim();
+
+      if (!content || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      ws.send(JSON.stringify({
+        type: 'message',
+        content: content
+      }));
+
+      addMessage(content, 'user');
+      input.value = '';
+      input.style.height = 'auto';
+    }
+
+    // 键盘事件
+    function handleKeyDown(event) {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    }
+
+    // 断开连接
+    function disconnect() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      isAuthenticated = false;
+      document.getElementById('chat-screen').style.display = 'none';
+      document.getElementById('connect-screen').style.display = 'flex';
+      document.getElementById('btn-connect').disabled = false;
+      showStatus('已断开连接', 'info');
+    }
+
+    // 保存服务器
+    function saveServer(server) {
+      let servers = JSON.parse(localStorage.getItem('coderemote_servers') || '[]');
+
+      // 检查是否已存在
+      const exists = servers.findIndex(s => s.url === server.url);
+      if (exists >= 0) {
+        servers[exists] = server;
+      } else {
+        servers.unshift(server);
+      }
+
+      // 最多保存 10 个
+      servers = servers.slice(0, 10);
+      localStorage.setItem('coderemote_servers', JSON.stringify(servers));
+      loadSavedServers();
+    }
+
+    // 加载保存的服务器
+    function loadSavedServers() {
+      const servers = JSON.parse(localStorage.getItem('coderemote_servers') || '[]');
+      const list = document.getElementById('server-list');
+
+      if (servers.length === 0) {
+        list.innerHTML = '<div class="empty-state">暂无保存的服务器</div>';
+        return;
+      }
+
+      list.innerHTML = servers.map((s, i) => `
+        <div class="server-item" onclick="useServer(${i})">
+          <div class="server-info">
+            <div class="server-name">${s.url.replace('wss://', '').replace('ws://', '').split('/')[0]}</div>
+            <div class="server-url">${s.token.substring(0, 3)}***</div>
+          </div>
+          <button class="btn-delete" onclick="event.stopPropagation(); deleteServer(${i})">🗑️</button>
+        </div>
+      `).join('');
+    }
+
+    // 使用保存的服务器
+    function useServer(index) {
+      const servers = JSON.parse(localStorage.getItem('coderemote_servers') || '[]');
+      const server = servers[index];
+      if (server) {
+        document.getElementById('ws-url').value = server.url;
+        document.getElementById('token').value = server.token;
+      }
+    }
+
+    // 删除服务器
+    function deleteServer(index) {
+      let servers = JSON.parse(localStorage.getItem('coderemote_servers') || '[]');
+      servers.splice(index, 1);
+      localStorage.setItem('coderemote_servers', JSON.stringify(servers));
+      loadSavedServers();
+    }
+  </script>
+</body>
+</html>

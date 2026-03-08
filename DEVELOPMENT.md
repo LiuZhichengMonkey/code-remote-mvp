@@ -311,20 +311,73 @@ Due to Windows root certificate issues with Cloudflare Tunnel, **ngrok** is the 
    ngrok update
    ```
 
-5. **Start tunnel to WebSocket server** (port 8085):
+5. **Start unified server** (recommended for ngrok single tunnel):
    ```bash
-   ngrok http 8085
+   # Start WebSocket server
+   cd cli && node dist/index.js start -p 8085 -t test123 --no-tunnel
+
+   # Start unified server (HTTP + WebSocket proxy on port 3001)
+   node unified-server.js
    ```
 
-6. **Get public URL**:
+6. **Start ngrok tunnel to unified server**:
+   ```bash
+   ngrok http 3001
+   ```
+
+7. **Get public URL**:
    ```bash
    curl -s http://127.0.0.1:4040/api/tunnels
    ```
+
+#### Unified Server (Recommended for ngrok)
+
+The unified server (`cli/unified-server.js`) serves both HTTP static files and WebSocket proxy on a single port:
+
+- **HTTP**: Serves chat-ui/dist static files
+- **WebSocket**: Proxies to localhost:8085 (actual WebSocket server)
+
+This allows using a **single ngrok tunnel** for both the web UI and WebSocket connection.
+
+```
+Mobile Device                    ngrok                     Local Server
+     |                             |                             |
+     |-- HTTPS: chat-ui/dist ----->|---- HTTP ----->| Port 3001 |--> Static Files
+     |                             |                             |
+     |-- WSS: WebSocket ---------->|---- WS ------>| (Proxied)  |--> Port 8085 WS Server
+```
 
 #### WebSocket over ngrok
 
 - ngrok HTTP tunnel: `https://xxx.ngrok-free.dev`
 - WebSocket URL: `wss://xxx.ngrok-free.dev` (replace http with ws, https with wss)
+
+#### Chat-UI Settings Persistence
+
+Chat-UI automatically saves connection settings to localStorage:
+
+- `coderemote_url`: Last used WebSocket URL
+- `coderemote_token`: Last used token
+
+Default values are configured in `chat-ui/src/App.tsx`:
+```typescript
+const DEFAULT_WS_URL = 'wss://your-ngrok-url.ngrok-free.dev';
+const DEFAULT_TOKEN = 'test123';
+```
+
+#### 国内网络注意事项
+
+**5G 网络可能封锁 ngrok 域名**，解决方案：
+1. 使用国内隧道服务：cpolar、natapp
+2. 使用 VPN 绕过封锁
+3. 自建 FRP 服务器（需要云服务器）
+
+### Alternative: Standalone HTML
+
+For networks that block ngrok web access but allow WebSocket, use `web/mobile-standalone.html`:
+1. Save the file to your phone
+2. Open in Safari
+3. Enter tunnel URL and token manually
 
 ---
 

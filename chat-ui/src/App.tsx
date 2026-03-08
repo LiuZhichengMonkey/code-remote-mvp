@@ -924,13 +924,26 @@ const ScrollIndex = ({
 
 // --- Main App ---
 
+// Helper to get stored value from localStorage
+const getStoredValue = (key: string, defaultValue: string): string => {
+  try {
+    return localStorage.getItem(key) || defaultValue;
+  } catch {
+    return defaultValue;
+  }
+};
+
+// Default WebSocket URL - change this to your tunnel URL
+const DEFAULT_WS_URL = 'wss://acropetal-nonfalteringly-ruben.ngrok-free.dev';
+const DEFAULT_TOKEN = 'test123';
+
 export default function App() {
   // WebSocket state
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [serverUrl, setServerUrl] = useState('ws://192.168.5.23:8085');
-  const [token, setToken] = useState('test123');
+  const [serverUrl, setServerUrl] = useState(() => getStoredValue('coderemote_url', DEFAULT_WS_URL));
+  const [token, setToken] = useState(() => getStoredValue('coderemote_token', DEFAULT_TOKEN));
   const [showSettings, setShowSettings] = useState(false);
 
   // Refs for WebSocket callback to access latest state
@@ -944,8 +957,6 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const currentSession = sessions.find(s => s.id === currentSessionId);
-  const messages = currentSession?.messages || [];
 
   // Multi-project History state
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -953,6 +964,29 @@ export default function App() {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set());
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+
+  // Find current session from either sessions or projectSessions
+  const currentSession = useMemo(() => {
+    // First try to find in current project sessions
+    let session = sessions.find(s => s.id === currentSessionId);
+    if (session) return session;
+
+    // Then search in all project sessions
+    if (currentProjectId && projectSessions[currentProjectId]) {
+      session = projectSessions[currentProjectId].find(s => s.id === currentSessionId);
+      if (session) return session;
+    }
+
+    // Finally search in all projects
+    for (const projectId of Object.keys(projectSessions)) {
+      session = projectSessions[projectId].find(s => s.id === currentSessionId);
+      if (session) return session;
+    }
+
+    return null;
+  }, [sessions, currentSessionId, currentProjectId, projectSessions]);
+
+  const messages = currentSession?.messages || [];
 
   // Handle keyboard for mobile - scroll to bottom when input is focused
   const handleInputFocus = useCallback(() => {
@@ -998,6 +1032,13 @@ export default function App() {
           setIsConnecting(false);
           setShowSettings(false); // Auto-close settings panel on success
           console.log('Auth successful');
+          // Save connection settings to localStorage
+          try {
+            localStorage.setItem('coderemote_url', serverUrl);
+            localStorage.setItem('coderemote_token', token);
+          } catch (e) {
+            console.warn('Failed to save settings:', e);
+          }
           // Request project list from server
           newWs.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
         } else if (msg.type === 'auth_failed') {
