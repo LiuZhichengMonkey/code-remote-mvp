@@ -141,6 +141,16 @@ export class SessionStorage {
 
           // 处理用户消息
           if (entry.type === 'user' && entry.message) {
+            // 跳过 tool_result 消息（工具调用结果不是用户真正输入的内容）
+            if (Array.isArray(entry.message.content)) {
+              const isToolResult = entry.message.content.some(
+                (block: {type?: string}) => block.type === 'tool_result'
+              );
+              if (isToolResult) {
+                continue; // 跳过这条消息
+              }
+            }
+
             const msg: ClaudeMessage = {
               id: entry.uuid || `user-${Date.now()}`,
               role: 'user',
