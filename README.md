@@ -89,6 +89,19 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-09 - Bugfix: 过滤 tool_result 类型的用户消息
+
+**问题**: 打开历史会话时，工具调用结果（如 "Task #1 created successfully"）显示在用户的气泡上
+
+**原因**: `tool_result` 类型的消息在会话文件中 `type` 为 `"user"`，但内容是工具调用的结果，不是用户真正输入的内容
+
+**解决方案**: 在 `storage.ts` 中添加过滤逻辑，检查 `content` 数组中是否包含 `type: 'tool_result'` 的块，如果是则跳过
+
+**Files Changed**:
+- `cli/src/claude/storage.ts` - 添加 tool_result 过滤逻辑
+
+---
+
 ### 2026-03-09 - 消息分页加载功能
 
 **新功能**:
