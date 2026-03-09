@@ -1,5 +1,5 @@
 import { spawn, exec } from 'child_process';
-import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG, ToolUseEvent, ToolResultEvent } from './types';
+import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG, ToolUseEvent, ToolResultEvent, LogMessage } from './types';
 
 export class ClaudeCodeEngine {
   private config: ClaudeConfig;
@@ -41,6 +41,7 @@ export class ClaudeCodeEngine {
     message: string,
     messages: ClaudeMessage[],
     onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
+    onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
     cwd?: string
   ): Promise<{ response: string; claudeSessionId?: string }> {
@@ -51,9 +52,9 @@ export class ClaudeCodeEngine {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         if (useCLI) {
-          return await this.callClaudeCLI(message, onChunk, claudeSessionId, cwd);
+          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd);
         } else {
-          const response = await this.callAnthropicAPI(messages, onChunk);
+          const response = await this.callAnthropicAPI(messages, onChunk, onLog);
           return { response, claudeSessionId };
         }
       } catch (error: any) {
@@ -87,6 +88,7 @@ export class ClaudeCodeEngine {
   private async callClaudeCLI(
     prompt: string,
     onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
+    onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
     cwd?: string
   ): Promise<{ response: string; claudeSessionId?: string }> {
@@ -106,16 +108,23 @@ export class ClaudeCodeEngine {
         cliCwd = cliCwd.replace(/[\\/]cli$/, '');
       }
 
-      console.log('[Claude CLI] Starting stream...');
-      console.log('[Claude CLI] Prompt:', prompt.substring(0, 50) + '...');
-      console.log('[Claude CLI] Resume session:', claudeSessionId || 'new session');
-      console.log('[Claude CLI] CWD:', cliCwd);
+      // 发送日志到前端
+      const sendLog = (level: 'info' | 'debug' | 'warn' | 'error', message: string) => {
+        console.log(`[Claude CLI] ${message}`);
+        onLog({ level, message, timestamp: Date.now() });
+      };
+
+      sendLog('info', 'Starting stream...');
+      sendLog('debug', `Prompt: ${prompt}`);
+      sendLog('debug', `Resume session: ${claudeSessionId || 'new session'}`);
+      sendLog('debug', `CWD: ${cliCwd}`);
 
       const args = [
         '--print',
         '--verbose',
         '--output-format', 'stream-json',
         '--include-partial-messages',
+        '--mcp-config', 'E:/code-remote-mvp/cli/mcp-config.json'
       ];
 
       // 添加 --resume 参数恢复会话
@@ -123,9 +132,11 @@ export class ClaudeCodeEngine {
         args.push('--resume', claudeSessionId);
       }
 
-      args.push(prompt);
+      // Windows 命令行需要用引号包裹包含空格的 prompt
+      args.push(`"${prompt}"`);
 
-      console.log('[Claude CLI] Args:', args.join(' '));
+      // 打印完整命令便于调试
+      console.log('[Claude CLI] Full command: claude ' + args.join(' '));
 
       // 使用 stream-json 格式获取实时流式输出
       const proc = spawn('claude', args, {
@@ -154,7 +165,7 @@ export class ClaudeCodeEngine {
             // 检查是否是错误响应
             if (json.type === 'error' || json.is_error) {
               const errorMsg = json.error?.message || json.message || 'Unknown error';
-              console.error('[Claude CLI] API Error:', errorMsg);
+              sendLog('error', `API Error: ${errorMsg}`);
               reject(new Error(`Claude API error: ${errorMsg}`));
               proc.kill();
               return;
@@ -163,12 +174,12 @@ export class ClaudeCodeEngine {
             // 处理流式事件 (使用 --include-partial-messages 时)
             if (json.type === 'stream_event' && json.event?.type === 'content_block_delta') {
               const delta = json.event.delta;
-              console.log('[Claude CLI] Delta type:', delta?.type, '| text:', delta?.text?.substring(0, 20));
+              console.log('[Claude CLI] Delta:', JSON.stringify(delta)?.substring(0, 200));
 
               // 处理 thinking 内容
               if (delta?.type === 'thinking_delta' && delta.thinking) {
                 const thinkingText = delta.thinking;
-                console.log('[Claude CLI] Thinking:', thinkingText.substring(0, 50));
+                sendLog('debug', `Thinking: ${thinkingText.substring(0, 30)}...`);
                 fullThinking += thinkingText;
                 // 发送 thinking 更新
                 if (this.config.streamMode === 'realtime') {
@@ -202,7 +213,7 @@ export class ClaudeCodeEngine {
                   toolInput: contentBlock.input,
                   toolUseId: contentBlock.id
                 };
-                console.log('[Claude CLI] Tool use:', toolEvent.toolName);
+                sendLog('info', `🔧 Tool: ${toolEvent.toolName}`);
                 if (this.config.streamMode === 'realtime') {
                   onChunk('', false, undefined, toolEvent);
                 }
@@ -223,7 +234,7 @@ export class ClaudeCodeEngine {
                   const text = block.text;
                   // 检查文本是否包含 API 错误
                   if (text.includes('API Error:') || text.includes('429')) {
-                    console.error('[Claude CLI] API Error in text:', text.substring(0, 100));
+                    sendLog('error', `API Error in text: ${text.substring(0, 100)}`);
                     reject(new Error(text));
                     proc.kill();
                     return;
@@ -289,6 +300,7 @@ export class ClaudeCodeEngine {
         }
 
         // 发送完成信号
+        sendLog('info', '✅ Response completed');
         if (this.config.streamMode === 'realtime') {
           onChunk('', true);
         } else {
@@ -305,11 +317,18 @@ export class ClaudeCodeEngine {
 
   private async callAnthropicAPI(
     messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean, thinking?: string) => void
+    onChunk: (content: string, done: boolean, thinking?: string) => void,
+    onLog: (log: LogMessage) => void
   ): Promise<string> {
     if (!this.config.apiKey) {
       throw new Error('API Key not configured. Set ANTHROPIC_API_KEY environment variable or configure in config.');
     }
+
+    // 发送日志到前端
+    const sendLog = (level: 'info' | 'debug' | 'warn' | 'error', message: string) => {
+      console.log(`[Claude API] ${message}`);
+      onLog({ level, message, timestamp: Date.now() });
+    };
 
     try {
       const Anthropic = require('@anthropic-ai/sdk');
@@ -320,6 +339,7 @@ export class ClaudeCodeEngine {
         content: m.content
       }));
 
+      sendLog('info', 'Starting API stream...');
       let fullResponse = '';
       let fullThinking = '';
 
@@ -337,7 +357,7 @@ export class ClaudeCodeEngine {
       // 监听 thinking 事件
       stream.on('contentBlockStart', (event: any) => {
         if (event.content_block?.type === 'thinking') {
-          console.log('[Claude API] Thinking block started');
+          sendLog('debug', 'Thinking block started');
         }
       });
 
@@ -366,6 +386,7 @@ export class ClaudeCodeEngine {
         onChunk('', true);
       }
 
+      sendLog('info', '✅ Response completed');
       return fullResponse;
     } catch (error: unknown) {
       if (error instanceof Error) {

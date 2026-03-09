@@ -126,6 +126,13 @@ interface WSMessage {
   success?: boolean;
   sessionId?: string;
   projectId?: string;
+  // 附件（图片）
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    data: string;  // base64 encoded
+  }>;
   // 工具事件
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -483,8 +490,8 @@ const ChatBubble = React.memo(({
             ? "bg-accent text-white rounded-tr-none"
             : "bg-card text-white/90 rounded-tl-none border border-white/5"
         )}>
-          {/* Thinking Process - only show during streaming */}
-          {!isUser && thinkingContent && isStreaming && (
+          {/* Thinking Process - show during streaming and after completion */}
+          {!isUser && thinkingContent && (
             <div className="mb-4 overflow-hidden">
               <button
                 onClick={() => setIsThinkingExpanded(!isThinkingExpanded)}
@@ -1045,6 +1052,9 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Server logs state
+  const [serverLogs, setServerLogs] = useState<Array<{ level: string; message: string; timestamp: number }>>([]);
+
   // Multi-project History state
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectSessions, setProjectSessions] = useState<Record<string, ChatSession[]>>({});
@@ -1231,6 +1241,8 @@ export default function App() {
         } else if (msg.type === 'claude_done' || msg.done) {
           console.log('Claude done');
           setIsGenerating(false);
+          // Clear logs when done
+          setServerLogs([]);
           setSessions(prev => {
             const targetSessionId = activeSessionId || prev[0]?.id;
             if (!targetSessionId) return prev;
@@ -1246,9 +1258,19 @@ export default function App() {
               return s;
             });
           });
+        } else if (msg.type === 'claude_log') {
+          // Handle server log messages
+          console.log('Server log:', msg.level, msg.message);
+          setServerLogs(prev => [...prev, {
+            level: msg.level || 'info',
+            message: msg.message || '',
+            timestamp: msg.timestamp || Date.now()
+          }]);
         } else if (msg.type === 'claude_error') {
           console.log('Claude error:', msg.error);
           setIsGenerating(false);
+          // Clear logs when done
+          setServerLogs([]);
           setSessions(prev => {
             const targetSessionId = activeSessionId || prev[0]?.id;
             if (!targetSessionId) return prev;
@@ -1763,6 +1785,16 @@ export default function App() {
       sessionId,
       timestamp: Date.now()
     };
+    // Include attachments (images) if any
+    if (attachments.length > 0) {
+      message.attachments = attachments.map(att => ({
+        id: att.id,
+        name: att.name,
+        type: att.type,
+        data: att.data  // base64 encoded image data
+      }));
+      console.log('[handleSend] Sending attachments:', attachments.length);
+    }
     console.log('[handleSend] Final message:', JSON.stringify(message));
     // Include projectId for cross-project sessions
     if (currentProjectId) {
@@ -2063,16 +2095,41 @@ export default function App() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="flex items-center gap-3 px-4 py-3 mx-4 my-2 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20"
+              className="flex flex-col px-4 py-3 mx-4 my-2 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20"
             >
-              <div className="relative">
-                <Loader2 className="w-5 h-5 text-accent animate-spin" />
-                <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                  <Loader2 className="w-5 h-5 text-accent animate-spin" />
+                  <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
+                </div>
+                <div className="flex flex-col flex-1">
+                  <span className="text-sm font-medium text-white">Claude 正在处理...</span>
+                  {serverLogs.length > 0 && (
+                    <span className="text-xs text-white/50 truncate">
+                      {serverLogs[serverLogs.length - 1].message}
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-white">Claude 正在处理...</span>
-                <span className="text-xs text-white/50">请稍候，正在生成回复</span>
-              </div>
+              {/* Show recent logs */}
+              {serverLogs.length > 1 && (
+                <div className="mt-2 pt-2 border-t border-white/10 max-h-[60px] overflow-y-auto no-scrollbar">
+                  {serverLogs.slice(-5).reverse().map((log, idx) => (
+                    <div key={idx} className="flex items-center gap-2 text-[10px] text-white/40 py-0.5">
+                      <span className={cn(
+                        "px-1 rounded text-[9px]",
+                        log.level === 'error' && "bg-red-500/20 text-red-400",
+                        log.level === 'warn' && "bg-yellow-500/20 text-yellow-400",
+                        log.level === 'info' && "bg-green-500/20 text-green-400",
+                        log.level === 'debug' && "bg-blue-500/20 text-blue-400"
+                      )}>
+                        {log.level.toUpperCase()}
+                      </span>
+                      <span className="truncate">{log.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>

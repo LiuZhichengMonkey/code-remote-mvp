@@ -41,6 +41,13 @@ export interface ClientMessage {
   stream?: boolean;
   limit?: number;      // 分页：每次加载的消息数量
   beforeIndex?: number; // 分页：从哪条消息开始加载
+  // 附件（图片）
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    data: string;  // base64 encoded
+  }>;
 }
 
 export class CodeRemoteServer {
@@ -193,6 +200,7 @@ export class CodeRemoteServer {
         break;
 
       case 'claude':
+        console.log(chalk.yellow('📎'), `Received claude message, attachments:`, message.attachments?.length || 0, '| content:', message.content?.substring(0, 30));
         this.handleClaudeMessage(ws, message);
         break;
 
@@ -288,12 +296,15 @@ export class CodeRemoteServer {
     const content = message.content || '';
     const sessionId = message.sessionId;
     const projectId = message.projectId;
+    const attachments = message.attachments;
 
     // Debug logging
+    console.log(chalk.gray('   📎 Attachments in handleClaudeMessage:'), attachments?.length || 0);
     console.log(chalk.magenta('🤖'), `Claude request received:`);
     console.log(chalk.gray('   Content:'), content.substring(0, 100));
     console.log(chalk.gray('   SessionId:'), sessionId);
     console.log(chalk.gray('   ProjectId:'), projectId || '(none)');
+    console.log(chalk.gray('   Attachments:'), attachments?.length || 0);
     console.log(chalk.gray('   ClientId:'), clientId);
 
     this.claudeHandler.handleClaudeMessage(
@@ -309,7 +320,8 @@ export class CodeRemoteServer {
         }));
       },
       sessionId,
-      projectId
+      projectId,
+      attachments
     );
   }
 

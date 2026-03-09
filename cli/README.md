@@ -154,3 +154,12 @@ taskkill /PID <PID> /F
 - Check firewall settings
 - Verify port is not blocked
 - Ensure server is running
+
+## Changelog
+
+### v1.13.0
+- **Feature**: Image upload support - users can attach images to messages
+- **Feature**: Server logs displayed in UI - real-time debugging information
+- **Feature**: Thinking process visible after response completion
+- **Bugfix**: Fixed Windows command line prompt parsing (spaces issue)
+- **Feature**: MCP config support for extending Claude capabilities

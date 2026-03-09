@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent, ClaudeSession } from '../claude';
+import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent, ClaudeSession, LogMessage } from '../claude';
 import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
 
@@ -20,7 +20,13 @@ export class ClaudeHandler {
     content: string,
     sendError: (code: string, message: string) => void,
     sessionId?: string,
-    projectId?: string
+    projectId?: string,
+    attachments?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      data: string;
+    }>
   ): Promise<void> {
     // 检查是否是斜杠命令
     if (content.startsWith('/')) {
@@ -79,7 +85,49 @@ export class ClaudeHandler {
       this.sessionManager.createTemporary();
     }
 
-    // 创建用户消息
+    // 处理附件中的图片（保存到临时文件并在消息中引用）
+    let imagePaths: string[] = [];
+    if (attachments && attachments.length > 0) {
+      console.log(`[ClaudeHandler] Processing ${attachments.length} image attachments`);
+      const fs = require('fs');
+      const path = require('path');
+
+      // 获取工作目录
+      const session = this.sessionManager.getCurrent();
+      const cwd = session?.cwd || process.cwd();
+
+      // 创建临时图片目录
+      const tempImageDir = path.join(cwd, '.claude', 'temp_images');
+      if (!fs.existsSync(tempImageDir)) {
+        fs.mkdirSync(tempImageDir, { recursive: true });
+      }
+
+      for (let i = 0; i < attachments.length; i++) {
+        const att = attachments[i];
+        // 解码 base64
+        const buffer = Buffer.from(att.data, 'base64');
+        // 生成文件名
+        const ext = att.type.split('/')[1] || 'png';
+        const fileName = `uploaded_image_${Date.now()}_${i}.${ext}`;
+        const filePath = path.join(tempImageDir, fileName);
+
+        // 保存文件
+        fs.writeFileSync(filePath, buffer);
+        console.log(`[ClaudeHandler] Saved image to: ${filePath}`);
+        imagePaths.push(filePath);
+      }
+
+      // 在消息内容前添加图片路径说明（使用完整路径并明确告诉 Claude 读取）
+      // 注意：Windows 命令行中换行符会导致参数解析问题，所以用空格替代
+      const imageDescription = imagePaths.map(p =>
+        `【用户上传的图片文件】 文件路径: ${p} 请使用 Read 工具读取此图片文件进行分析。`
+      ).join(' ');
+
+      content = `${imageDescription} 用户说: ${content}`;
+      console.log(`[ClaudeHandler] Added ${imagePaths.length} image references with urgent read instruction`);
+    }
+
+    // 创建用户消息（保留图片路径信息）
     const userMessage = createMessage('user', content);
     this.sessionManager.addMessage(userMessage);
 
@@ -129,6 +177,15 @@ export class ClaudeHandler {
               timestamp: Date.now()
             }));
           }
+        },
+        (log: LogMessage) => {
+          // 发送日志到前端
+          ws.send(JSON.stringify({
+            type: 'claude_log',
+            level: log.level,
+            message: log.message,
+            timestamp: log.timestamp
+          }));
         },
         claudeSessionId,
         cwd

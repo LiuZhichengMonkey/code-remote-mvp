@@ -26,6 +26,16 @@ export interface ClaudeConfig {
   sessionTimeout: number;
 }
 
+// 日志级别类型
+export type LogLevel = 'info' | 'debug' | 'warn' | 'error';
+
+// 日志消息接口
+export interface LogMessage {
+  level: LogLevel;
+  message: string;
+  timestamp: number;
+}
+
 export interface ClaudeStreamChunk {
   type: 'claude_stream';
   content: string;
