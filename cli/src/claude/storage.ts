@@ -314,6 +314,45 @@ export class SessionStorage {
     return this.parseSessionFile(filePath);
   }
 
+  // 分页加载会话消息（从后往前加载）
+  loadPaginated(sessionId: string, limit: number = 20, beforeIndex?: number): {
+    session: ClaudeSession | null;
+    hasMore: boolean;
+    totalMessages: number;
+  } {
+    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
+    if (!fs.existsSync(filePath)) {
+      return { session: null, hasMore: false, totalMessages: 0 };
+    }
+
+    const fullSession = this.parseSessionFile(filePath);
+    if (!fullSession) {
+      return { session: null, hasMore: false, totalMessages: 0 };
+    }
+
+    const totalMessages = fullSession.messages.length;
+
+    // 计算要加载的消息范围
+    const endIndex = beforeIndex !== undefined ? beforeIndex : totalMessages;
+    const startIndex = Math.max(0, endIndex - limit);
+
+    // 切片获取消息
+    const messages = fullSession.messages.slice(startIndex, endIndex);
+    const hasMore = startIndex > 0;
+
+    return {
+      session: {
+        ...fullSession,
+        messages,
+        // 标记这是部分加载的会话
+        _partial: true,
+        _totalMessages: totalMessages
+      } as any,
+      hasMore,
+      totalMessages
+    };
+  }
+
   list(): ClaudeSession[] {
     if (!fs.existsSync(this.projectDir)) {
       return [];
@@ -554,6 +593,21 @@ export class SessionStorage {
     const storage = new SessionStorage(claudeDirToPath(projectId));
     storage.projectDir = projectDir;
     return storage.load(sessionId);
+  }
+
+  /**
+   * 分页加载指定项目的会话内容（从后往前）
+   */
+  static loadSessionFromProjectPaginated(
+    projectId: string,
+    sessionId: string,
+    limit: number = 20,
+    beforeIndex?: number
+  ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
+    const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
+    const storage = new SessionStorage(claudeDirToPath(projectId));
+    storage.projectDir = projectDir;
+    return storage.loadPaginated(sessionId, limit, beforeIndex);
   }
 
   /**

@@ -89,6 +89,25 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-09 - 消息分页加载功能
+
+**新功能**:
+1. **消息分页**: 打开历史会话时默认只加载最后 20 条消息，滚动到顶部自动加载更多
+2. **加载更多 UI**: 顶部显示"Load earlier messages"按钮，显示剩余消息数量
+
+**优化**:
+- Thinking 只在实时流式生成时显示，历史记录中不显示
+- 过滤只包含 `<thinking>` 标签的消息，避免空白气泡
+
+**Files Changed**:
+- `cli/src/claude/storage.ts` - 添加 `loadPaginated()` 分页加载方法
+- `cli/src/claude/session.ts` - 添加 `resumePaginated()` 方法
+- `cli/src/handlers/claude.ts` - 添加 `load_more` action，修改 `resume` 支持分页
+- `cli/src/server.ts` - 添加 `limit` 和 `beforeIndex` 字段
+- `chat-ui/src/App.tsx` - 分页状态、加载更多函数、消息过滤
+
+---
+
 ### 2026-03-09 - UI 优化和会话标题编辑功能
 
 **新功能**:

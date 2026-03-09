@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent } from '../claude';
+import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent, ClaudeSession } from '../claude';
 import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
 
@@ -176,10 +176,12 @@ export class ClaudeHandler {
 
   handleSessionAction(
     ws: WebSocket,
-    action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename',
+    action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more',
     sessionId?: string,
     projectId?: string,
-    title?: string
+    title?: string,
+    limit?: number,
+    beforeIndex?: number
   ): void {
     switch (action) {
       case 'new':
@@ -232,22 +234,24 @@ export class ClaudeHandler {
 
       case 'resume':
         if (sessionId) {
-          let session;
+          // 默认加载最后 20 条消息
+          const loadLimit = limit || 20;
+          let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
+
           if (projectId) {
-            // 从指定项目恢复会话
-            session = SessionStorage.loadSessionFromProject(projectId, sessionId);
-            if (session) {
-              // 设置到 sessionManager 以便后续消息处理
-              this.sessionManager.setSessionFromCrossProject(session);
+            // 从指定项目恢复会话（分页）
+            result = SessionStorage.loadSessionFromProjectPaginated(projectId, sessionId, loadLimit);
+            if (result.session) {
+              this.sessionManager.setSessionFromCrossProject(result.session);
             }
           } else {
-            // 从当前项目恢复会话
-            session = this.sessionManager.resume(sessionId);
+            // 从当前项目恢复会话（分页）
+            result = this.sessionManager.resumePaginated(sessionId, loadLimit);
           }
 
-          if (session) {
+          if (result.session) {
             // 转换消息格式：assistant -> model
-            const messages = session.messages.map(msg => ({
+            const messages = result.session.messages.map((msg: ClaudeMessage) => ({
               ...msg,
               role: msg.role === 'assistant' ? 'model' : msg.role
             }));
@@ -255,18 +259,56 @@ export class ClaudeHandler {
               type: 'session_resumed',
               projectId: projectId,
               session: {
-                id: session.id,
-                title: session.title,
-                summary: session.title, // 添加 summary 字段
+                id: result.session!.id,
+                title: result.session!.title,
+                summary: result.session!.title,
                 messages,
-                createdAt: session.createdAt
+                createdAt: result.session!.createdAt
               },
+              hasMore: result.hasMore,
+              totalMessages: result.totalMessages,
               timestamp: Date.now()
             }));
           } else {
             ws.send(JSON.stringify({
               type: 'error',
               content: 'Session not found',
+              timestamp: Date.now()
+            }));
+          }
+        }
+        break;
+
+      case 'load_more':
+        // 加载更多历史消息
+        if (sessionId) {
+          const loadLimit = limit || 20;
+          let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
+
+          if (projectId) {
+            result = SessionStorage.loadSessionFromProjectPaginated(projectId, sessionId, loadLimit, beforeIndex);
+          } else {
+            result = this.sessionManager.resumePaginated(sessionId, loadLimit, beforeIndex);
+          }
+
+          if (result.session) {
+            const messages = result.session.messages.map((msg: ClaudeMessage) => ({
+              ...msg,
+              role: msg.role === 'assistant' ? 'model' : msg.role
+            }));
+            ws.send(JSON.stringify({
+              type: 'messages_loaded',
+              sessionId,
+              projectId,
+              messages,
+              hasMore: result.hasMore,
+              totalMessages: result.totalMessages,
+              timestamp: Date.now()
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'error',
+              content: 'Failed to load more messages',
               timestamp: Date.now()
             }));
           }

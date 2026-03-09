@@ -77,6 +77,20 @@ export class SessionManager {
     return session;
   }
 
+  // 分页恢复会话（从后往前加载消息）
+  resumePaginated(
+    sessionId: string,
+    limit: number = 20,
+    beforeIndex?: number
+  ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
+    const result = this.storage.loadPaginated(sessionId, limit, beforeIndex);
+    if (result.session) {
+      this.currentSession = result.session;
+      this.sessions.set(sessionId, result.session);
+    }
+    return result;
+  }
+
   resumeLatest(): ClaudeSession | null {
     const latest = this.storage.getLatest();
     if (latest) {

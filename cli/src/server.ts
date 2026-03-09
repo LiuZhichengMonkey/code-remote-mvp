@@ -34,11 +34,13 @@ export interface ClientMessage {
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename';
+  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more';
   sessionId?: string;
   projectId?: string;
   title?: string;
   stream?: boolean;
+  limit?: number;      // 分页：每次加载的消息数量
+  beforeIndex?: number; // 分页：从哪条消息开始加载
 }
 
 export class CodeRemoteServer {
@@ -331,7 +333,9 @@ export class CodeRemoteServer {
       (message.action || 'list') as any,
       message.sessionId,
       message.projectId,
-      message.title
+      message.title,
+      message.limit,
+      message.beforeIndex
     );
   }
 

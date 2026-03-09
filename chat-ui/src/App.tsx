@@ -262,19 +262,14 @@ const Header = ({
 );
 
 // 格式化工具调用为 Claude CLI 风格
-// 特殊处理常见工具，显示简洁格式
 const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): string => {
-  if (!toolInput) {
-    return toolName;
-  }
+  if (!toolInput) return toolName;
 
-  // 提取文件名（不含路径）
   const getFileName = (path: string): string => {
     const parts = path.split(/[/\\]/);
     return parts[parts.length - 1] || path;
   };
 
-  // 格式化单个值
   const formatValue = (value: unknown): string => {
     if (value === null || value === undefined) return '';
     if (typeof value === 'string') return value;
@@ -283,27 +278,21 @@ const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): 
     return JSON.stringify(value);
   };
 
-  // 根据工具类型特殊处理
   switch (toolName) {
     case 'Read':
     case 'Glob':
     case 'Grep': {
-      // 这些工具显示主要参数
-      const mainKey = toolName === 'Read' ? 'file_path' :
-                      toolName === 'Glob' ? 'pattern' : 'pattern';
-      const mainValue = toolInput[mainKey] || toolInput.path || Object.values(toolInput)[0];
+      const mainKey = toolName === 'Read' ? 'file_path' : 'pattern';
+      const mainValue = toolInput[mainKey] || Object.values(toolInput)[0];
       if (typeof mainValue === 'string') {
-        // 对于文件路径，只显示文件名
         const display = toolName === 'Read' ? getFileName(mainValue) : mainValue;
         return `${toolName}(${display})`;
       }
       return `${toolName}(${formatValue(mainValue)})`;
     }
     case 'Bash': {
-      // Bash命令显示命令内容
-      const cmd = toolInput.command || toolInput.cmd || Object.values(toolInput)[0];
+      const cmd = toolInput.command || Object.values(toolInput)[0];
       if (typeof cmd === 'string') {
-        // 截断长命令
         const truncated = cmd.length > 60 ? cmd.substring(0, 60) + '...' : cmd;
         return `${toolName}(${truncated})`;
       }
@@ -311,7 +300,6 @@ const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): 
     }
     case 'Write':
     case 'Edit': {
-      // 写入/编辑工具显示文件名
       const filePath = toolInput.file_path || toolInput.path || Object.values(toolInput)[0];
       if (typeof filePath === 'string') {
         return `${toolName}(${getFileName(filePath)})`;
@@ -319,7 +307,6 @@ const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): 
       return toolName;
     }
     default: {
-      // 默认显示第一个参数
       const firstValue = Object.values(toolInput)[0];
       if (firstValue) {
         const formatted = formatValue(firstValue);
@@ -494,7 +481,7 @@ const ChatBubble = React.memo(({
             ? "bg-accent text-white rounded-tr-none"
             : "bg-card text-white/90 rounded-tl-none border border-white/5"
         )}>
-          {/* Thinking Process - 只在实时生成时显示 */}
+          {/* Thinking Process - only show during streaming */}
           {!isUser && thinkingContent && isStreaming && (
             <div className="mb-4 overflow-hidden">
               <button
@@ -532,18 +519,22 @@ const ChatBubble = React.memo(({
             </div>
           )}
 
-          {/* Tool Use Section - Claude CLI Style */}
+          {/* Tool Use Section */}
           {!isUser && message.tools && message.tools.length > 0 && (
-            <div className="mb-3 space-y-1 font-mono text-xs">
+            <div className="mb-3 space-y-2">
               {message.tools.map((tool, idx) => (
-                <div key={idx} className="text-white/70">
-                  {/* Tool Call */}
-                  <div className="flex items-start gap-1.5">
-                    <span className="text-amber-400 shrink-0">●</span>
-                    <span className="break-all">
-                      {formatToolCall(tool.toolName, tool.toolInput)}
+                <div
+                  key={idx}
+                  className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg text-xs"
+                >
+                  <span className="text-blue-400">🔧</span>
+                  <span className="text-blue-300 font-medium">{tool.toolName}</span>
+                  {tool.toolInput && (
+                    <span className="text-white/40 truncate max-w-[200px]">
+                      {typeof tool.toolInput === 'object' ? JSON.stringify(tool.toolInput).substring(0, 50) : String(tool.toolInput).substring(0, 50)}
+                      ...
                     </span>
-                  </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -583,17 +574,6 @@ const ChatBubble = React.memo(({
               <span className="inline-block w-1.5 h-4 ml-1 bg-accent animate-pulse align-middle" />
             )}
           </div>
-
-          {/* Retry Button for Rate Limit Errors */}
-          {!isUser && message.canRetry && (
-            <button
-              onClick={() => onRetry?.()}
-              className="mt-3 flex items-center gap-2 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 rounded-lg text-amber-400 text-sm font-medium transition-colors"
-            >
-              <RefreshCw size={16} />
-              重试 (Rate Limit)
-            </button>
-          )}
 
           {/* Options (Cards) */}
           {!isStreaming && allChoices.length > 0 && (
@@ -1070,6 +1050,12 @@ export default function App() {
   const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set());
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
 
+  // Pagination state for message loading
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [totalMessages, setTotalMessages] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const isLoadingMoreRef = useRef(false);
+
   // Find current session from either sessions or projectSessions
   const currentSession = useMemo(() => {
     // First try to find in current project sessions
@@ -1104,6 +1090,37 @@ export default function App() {
       }, 300);
     }
   }, [messages.length]);
+
+  // Load more messages (pagination)
+  const loadMoreMessages = useCallback(() => {
+    if (!ws || !currentSessionId || !hasMoreMessages || isLoadingMoreRef.current) return;
+
+    isLoadingMoreRef.current = true;
+    setIsLoadingMore(true);
+
+    // Calculate beforeIndex based on current messages
+    const beforeIndex = messages.length;
+
+    ws.send(JSON.stringify({
+      type: 'session',
+      action: 'load_more',
+      sessionId: currentSessionId,
+      projectId: currentProjectId || undefined,
+      limit: 20,
+      beforeIndex
+    }));
+  }, [ws, currentSessionId, currentProjectId, hasMoreMessages, messages.length]);
+
+  // Handle scroll to detect when user scrolls to top
+  const handleScroll = useCallback(() => {
+    if (!scrollRef.current || !hasMoreMessages || isLoadingMoreRef.current) return;
+
+    const { scrollTop } = scrollRef.current;
+    // When user scrolls near the top (within 100px), load more messages
+    if (scrollTop < 100) {
+      loadMoreMessages();
+    }
+  }, [hasMoreMessages, loadMoreMessages]);
 
   // Sync currentSessionId ref
   useEffect(() => {
@@ -1155,8 +1172,8 @@ export default function App() {
           // Claude is starting to respond
           console.log('Claude started responding');
         } else if (msg.type === 'claude_tool') {
-          // Handle tool use and tool result events
-          console.log('Tool event:', msg.toolName || 'result', msg.toolUseId);
+          // Handle tool use events
+          console.log('Tool use:', msg.toolName);
           setSessions(prev => {
             const targetSessionId = activeSessionId || prev[0]?.id;
             if (!targetSessionId) return prev;
@@ -1167,28 +1184,6 @@ export default function App() {
               const lastMsg = messages[messages.length - 1];
 
               if (lastMsg && lastMsg.role === 'model') {
-                // If this is a tool result (has result but no toolName)
-                if (msg.result !== undefined) {
-                  const existingTools = lastMsg.tools || [];
-                  // Find and update the last tool with the result
-                  if (existingTools.length > 0) {
-                    const updatedTools = [...existingTools];
-                    const lastTool = updatedTools[updatedTools.length - 1];
-                    updatedTools[updatedTools.length - 1] = {
-                      ...lastTool,
-                      result: msg.result,
-                      isError: msg.isError
-                    };
-                    return {
-                      ...s,
-                      messages: [...messages.slice(0, -1), {
-                        ...lastMsg,
-                        tools: updatedTools
-                      }]
-                    };
-                  }
-                }
-                // Otherwise, it's a new tool use event
                 const toolEvent = {
                   toolName: msg.toolName,
                   toolInput: msg.toolInput,
@@ -1252,9 +1247,6 @@ export default function App() {
         } else if (msg.type === 'claude_error') {
           console.log('Claude error:', msg.error);
           setIsGenerating(false);
-          const errorMsg = msg.error || 'Unknown error';
-          const isRateLimitError = errorMsg.includes('429') || errorMsg.includes('Rate limit');
-
           setSessions(prev => {
             const targetSessionId = activeSessionId || prev[0]?.id;
             if (!targetSessionId) return prev;
@@ -1263,16 +1255,12 @@ export default function App() {
               if (s.id !== targetSessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
-              // 找到最后一条用户消息用于重试
-              const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
 
               if (lastMsg && lastMsg.role === 'model') {
                 return { ...s, messages: [...messages.slice(0, -1), {
                   ...lastMsg,
-                  content: `⚠️ ${errorMsg}`,
-                  status: 'error',
-                  canRetry: isRateLimitError,
-                  retryContent: lastUserMsg?.content
+                  content: `Error: ${msg.error || 'Unknown error'}`,
+                  status: 'error'
                 }] };
               }
               return s;
@@ -1413,7 +1401,7 @@ export default function App() {
           }
         } else if (msg.type === 'session_resumed') {
           // Handle session resumed with messages
-          console.log('Session resumed:', msg.session, 'projectId:', msg.projectId);
+          console.log('Session resumed:', msg.session, 'projectId:', msg.projectId, 'hasMore:', msg.hasMore, 'totalMessages:', msg.totalMessages);
           if (msg.session) {
             const resumedSession: ChatSession = {
               id: msg.session.id,
@@ -1421,6 +1409,10 @@ export default function App() {
               messages: msg.session.messages || [],
               createdAt: msg.session.createdAt || Date.now()
             };
+
+            // Update pagination state
+            setHasMoreMessages(msg.hasMore || false);
+            setTotalMessages(msg.totalMessages || msg.session.messages?.length || 0);
 
             // Always update sessions (for message stream handling)
             setSessions(prev => {
@@ -1483,6 +1475,62 @@ export default function App() {
             setCurrentSessionId(msg.newSessionId);
             currentSessionIdRef.current = msg.newSessionId;
           }
+        } else if (msg.type === 'messages_loaded') {
+          // Handle more messages loaded (pagination)
+          console.log('Messages loaded:', msg.messages?.length, 'hasMore:', msg.hasMore, 'totalMessages:', msg.totalMessages);
+          if (msg.messages && msg.sessionId) {
+            // Prepend messages to current session
+            setSessions(prev => prev.map(s => {
+              if (s.id === msg.sessionId) {
+                return {
+                  ...s,
+                  messages: [...msg.messages, ...s.messages]
+                };
+              }
+              return s;
+            }));
+
+            // Also update projectSessions if projectId exists
+            if (msg.projectId) {
+              setProjectSessions(prev => {
+                const projectSessionList = prev[msg.projectId!];
+                if (projectSessionList) {
+                  return {
+                    ...prev,
+                    [msg.projectId!]: projectSessionList.map(s => {
+                      if (s.id === msg.sessionId) {
+                        return {
+                          ...s,
+                          messages: [...msg.messages, ...s.messages]
+                        };
+                      }
+                      return s;
+                    })
+                  };
+                }
+                return prev;
+              });
+            }
+
+            // Update pagination state
+            setHasMoreMessages(msg.hasMore || false);
+            setTotalMessages(msg.totalMessages || 0);
+
+            // Keep scroll position after prepending messages
+            // Store the current scroll position before updating
+            const scrollEl = scrollRef.current;
+            if (scrollEl) {
+              const oldScrollHeight = scrollEl.scrollHeight;
+              // Wait for React to render the new messages, then adjust scroll position
+              setTimeout(() => {
+                const newScrollHeight = scrollEl.scrollHeight;
+                const addedHeight = newScrollHeight - oldScrollHeight;
+                scrollEl.scrollTop = addedHeight;
+              }, 0);
+            }
+          }
+          setIsLoadingMore(false);
+          isLoadingMoreRef.current = false;
         }
       } catch (e) {
         console.error('Failed to parse message:', e);
@@ -1733,20 +1781,9 @@ export default function App() {
 
   const handleTitleChange = (newTitle: string) => {
     if (!currentSessionId) return;
-    // 更新本地状态
     setSessions(prev => prev.map(s =>
       s.id === currentSessionId ? { ...s, title: newTitle } : s
     ));
-    // 发送到后端保存
-    if (wsRef.current && isConnected && newTitle.trim()) {
-      wsRef.current.send(JSON.stringify({
-        type: 'session',
-        action: 'rename',
-        sessionId: currentSessionId,
-        title: newTitle.trim(),
-        projectId: currentProjectId
-      }));
-    }
   };
 
   const copyToClipboard = (text: string) => {
@@ -1942,8 +1979,31 @@ export default function App() {
       {/* Main Chat Area */}
       <main
         ref={scrollRef}
+        onScroll={handleScroll}
         className="flex-1 overflow-y-auto chat-scroll pt-[80px] pb-[120px] no-scrollbar relative"
       >
+        {/* Load more indicator */}
+        {messages.length > 0 && hasMoreMessages && (
+          <div className="flex justify-center py-3">
+            <button
+              onClick={loadMoreMessages}
+              disabled={isLoadingMore}
+              className="flex items-center gap-2 px-4 py-2 text-sm text-white/50 hover:text-white/70 transition-colors disabled:opacity-50"
+            >
+              {isLoadingMore ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white/70 rounded-full animate-spin" />
+                  <span>Loading...</span>
+                </>
+              ) : (
+                <>
+                  <ChevronUp size={16} />
+                  <span>Load earlier messages ({totalMessages - messages.length} more)</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center px-8 text-center">
             <motion.div
@@ -1969,12 +2029,10 @@ export default function App() {
             .filter((msg) => {
               // 过滤空消息
               if (!msg.content || msg.content.trim() === '') return false;
-              // 过滤只有 thinking 标签的消息（已保存的会话）
-              const contentWithoutThinking = msg.content
-                .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
-                .replace(/<thinking>[\s\S]*$/g, '')
-                .trim();
-              return contentWithoutThinking !== '' || (msg.tools && msg.tools.length > 0);
+              // 过滤只包含 thinking 标签的消息
+              const thinkingRegex = /^<thinking>[\s\S]*<\/thinking>\s*$/;
+              if (thinkingRegex.test(msg.content.trim())) return false;
+              return true;
             })
             .map((msg) => (
               <ChatBubble
@@ -1982,15 +2040,6 @@ export default function App() {
                 message={msg}
                 isStreaming={msg.status === 'sending'}
                 onCopy={copyToClipboard}
-                onRetry={() => {
-                  const idx = messages.findIndex(m => m.id === msg.id);
-                  if (idx > 0) {
-                    const prevUserMsg = messages[idx - 1];
-                    if (prevUserMsg.role === 'user') {
-                      handleSend(prevUserMsg.content, prevUserMsg.attachments || []);
-                    }
-                  }
-                }}
                 onRegenerate={() => {
                   const idx = messages.findIndex(m => m.id === msg.id);
                   if (idx > 0) {
