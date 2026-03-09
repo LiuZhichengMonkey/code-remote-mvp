@@ -23,7 +23,9 @@ import {
   FileText,
   Check,
   RefreshCw,
-  Trash2
+  Trash2,
+  Loader2,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -2053,6 +2055,27 @@ export default function App() {
             />
           ))
         )}
+
+        {/* Loading indicator when Claude is processing */}
+        <AnimatePresence>
+          {isGenerating && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="flex items-center gap-3 px-4 py-3 mx-4 my-2 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20"
+            >
+              <div className="relative">
+                <Loader2 className="w-5 h-5 text-accent animate-spin" />
+                <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
+              </div>
+              <div className="flex flex-col">
+                <span className="text-sm font-medium text-white">Claude 正在处理...</span>
+                <span className="text-xs text-white/50">请稍候，正在生成回复</span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
       <InputArea

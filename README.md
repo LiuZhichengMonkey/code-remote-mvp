@@ -89,6 +89,23 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-09 - Feature: 处理中状态提示
+
+**新功能**: 发送消息后显示"Claude 正在处理..."的加载提示
+
+**原因**: 用户反馈发送消息后没有反馈提示，不知道 Claude 是否还在工作中
+
+**实现**:
+- 在消息列表底部添加加载提示组件
+- 使用 Loader2 旋转动画 + Sparkles 闪烁图标
+- 渐变背景 (accent → purple)
+- 使用 Framer Motion 添加入场/退场动画
+
+**Files Changed**:
+- `chat-ui/src/App.tsx` - 添加 Loader2、Sparkles 图标导入，添加加载提示组件
+
+---
+
 ### 2026-03-09 - Feature: 429 Rate Limit 自动重试
 
 **新功能**: 遇到 Rate Limit (429) 错误时自动重试
