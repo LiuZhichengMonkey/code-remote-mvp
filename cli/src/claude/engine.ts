@@ -4,6 +4,8 @@ import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG, ToolUseEvent, ToolResultEv
 export class ClaudeCodeEngine {
   private config: ClaudeConfig;
   private cliAvailable: boolean | null = null;
+  private maxRetries: number = 3; // 最大重试次数
+  private baseRetryDelay: number = 2000; // 基础重试延迟（毫秒）
 
   constructor(config: Partial<ClaudeConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -44,12 +46,42 @@ export class ClaudeCodeEngine {
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
-    if (useCLI) {
-      return this.callClaudeCLI(message, onChunk, claudeSessionId, cwd);
-    } else {
-      const response = await this.callAnthropicAPI(messages, onChunk);
-      return { response, claudeSessionId };
+    // 自动重试逻辑
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        if (useCLI) {
+          return await this.callClaudeCLI(message, onChunk, claudeSessionId, cwd);
+        } else {
+          const response = await this.callAnthropicAPI(messages, onChunk);
+          return { response, claudeSessionId };
+        }
+      } catch (error: any) {
+        const errorMsg = error.message || '';
+        const is429Error = errorMsg.includes('429') ||
+                          errorMsg.includes('rate limit') ||
+                          errorMsg.includes('Rate limit') ||
+                          errorMsg.includes('overloaded');
+
+        if (is429Error && attempt < this.maxRetries) {
+          // 计算重试延迟（指数退避）
+          const delay = this.baseRetryDelay * Math.pow(2, attempt);
+          console.log(`[Claude] Rate limit hit, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
+
+          // 通知前端重试状态
+          onChunk(`[Rate limit] Retrying in ${Math.round(delay / 1000)}s... (attempt ${attempt + 1}/${this.maxRetries})`, false);
+
+          // 等待后重试
+          await new Promise(resolve => setTimeout(resolve, delay));
+          lastError = error;
+        } else {
+          throw error;
+        }
+      }
     }
+
+    // 如果所有重试都失败，抛出最后一个错误
+    throw lastError || new Error('Max retries exceeded');
   }
 
   private async callClaudeCLI(
@@ -147,8 +179,10 @@ export class ClaudeCodeEngine {
               else if (delta?.type === 'text_delta' && delta.text) {
                 const text = delta.text;
                 console.log('[Claude CLI] Stream text:', text);
+
+                // 直接发送文本内容，不收集为工具结果
+                // Claude的解释文本应该作为普通内容显示
                 fullResponse += text;
-                // 实时发送到客户端
                 if (this.config.streamMode === 'realtime') {
                   onChunk(text, false);
                 }

@@ -89,6 +89,20 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-09 - Feature: 429 Rate Limit 自动重试
+
+**新功能**: 遇到 Rate Limit (429) 错误时自动重试
+
+**实现**:
+- 最大重试次数: 3 次
+- 重试策略: 指数退避（2s → 4s → 8s）
+- 重试时会向前端发送状态通知
+
+**Files Changed**:
+- `cli/src/claude/engine.ts` - 添加 maxRetries、baseRetryDelay 属性和自动重试逻辑
+
+---
+
 ### 2026-03-09 - Bugfix: 过滤 tool_result 类型的用户消息
 
 **问题**: 打开历史会话时，工具调用结果（如 "Task #1 created successfully"）显示在用户的气泡上
