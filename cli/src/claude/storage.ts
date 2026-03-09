@@ -162,8 +162,8 @@ export class SessionStorage {
             messageMap.set(msg.id, msg);
             messages.push(msg);
 
-            // 第一条用户消息作为标题
-            if (messages.length === 1) {
+            // 第一条用户消息作为标题（只有在没有 summary 的情况下）
+            if (messages.length === 1 && title === 'New Chat') {
               title = msg.content.substring(0, 50);
             }
           }
@@ -556,9 +556,15 @@ export class SessionStorage {
               }
             }
 
+            // summary 优先级最高，先处理
+            if (entry.type === 'summary' && entry.summary) {
+              title = entry.summary;
+            }
+
             if (entry.type === 'user' && entry.message) {
               messageCount++;
-              if (messageCount === 1 && entry.message.content) {
+              // 只有在没有 summary 的情况下，才用第一条消息内容作为标题
+              if (messageCount === 1 && title === 'New Chat' && entry.message.content) {
                 title = typeof entry.message.content === 'string'
                   ? entry.message.content.substring(0, 50)
                   : 'New Chat';
@@ -567,10 +573,6 @@ export class SessionStorage {
 
             if (entry.type === 'assistant') {
               messageCount++;
-            }
-
-            if (entry.type === 'summary' && entry.summary) {
-              title = entry.summary;
             }
           } catch {
             // 忽略解析错误

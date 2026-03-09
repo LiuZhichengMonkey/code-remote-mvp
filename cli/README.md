@@ -157,6 +157,13 @@ taskkill /PID <PID> /F
 
 ## Changelog
 
+### v1.14.0
+- **Feature**: Session title rename - rename sessions and persist to .jsonl file
+- **Bugfix**: Session title now has higher priority than first message content
+- **Feature**: Refresh button now forces reload of session list
+- **UI**: Thinking content now preserves line breaks (whitespace-pre-wrap)
+- **UI**: Tool usage section temporarily hidden
+
 ### v1.13.0
 - **Feature**: Image upload support - users can attach images to messages
 - **Feature**: Server logs displayed in UI - real-time debugging information

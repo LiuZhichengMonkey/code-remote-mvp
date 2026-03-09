@@ -232,6 +232,7 @@ const Header = ({
   onNewChat,
   title,
   onTitleChange,
+  onTitleBlur,
   onSettingsClick,
   isConnected
 }: {
@@ -239,6 +240,7 @@ const Header = ({
   onNewChat: () => void;
   title: string;
   onTitleChange: (newTitle: string) => void;
+  onTitleBlur: (newTitle: string) => void;
   onSettingsClick: () => void;
   isConnected: boolean;
 }) => (
@@ -255,6 +257,12 @@ const Header = ({
       <input
         value={title}
         onChange={(e) => onTitleChange(e.target.value)}
+        onBlur={(e) => onTitleBlur(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.currentTarget.blur();
+          }
+        }}
         className="bg-transparent text-[13px] font-medium text-white/50 tracking-wide uppercase text-center focus:outline-none focus:text-white/80 w-full max-w-[200px]"
         placeholder="New Chat"
       />
@@ -519,7 +527,7 @@ const ChatBubble = React.memo(({
                       height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
                       opacity: { duration: 0.2 }
                     }}
-                    className="overflow-hidden bg-white/[0.03] rounded-xl p-4 border border-white/5 text-[13.5px] text-white/50 italic leading-relaxed font-serif"
+                    className="overflow-hidden bg-white/[0.03] rounded-xl p-4 border border-white/5 text-[13.5px] text-white/50 italic leading-relaxed font-serif whitespace-pre-wrap"
                   >
                     {thinkingContent}
                   </motion.div>
@@ -528,8 +536,8 @@ const ChatBubble = React.memo(({
             </div>
           )}
 
-          {/* Tool Use Section */}
-          {!isUser && message.tools && message.tools.length > 0 && (
+          {/* Tool Use Section - Hidden for now */}
+          {false && !isUser && message.tools && message.tools.length > 0 && (
             <div className="mb-3 space-y-2">
               {message.tools.map((tool, idx) => (
                 <div
@@ -1659,6 +1667,8 @@ export default function App() {
   // Load all projects
   const loadProjects = () => {
     if (wsRef.current && isConnected) {
+      // Clear cached project sessions to force reload
+      setProjectSessions({});
       wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
     }
   };
@@ -1820,6 +1830,22 @@ export default function App() {
     ));
   };
 
+  // 发送重命名请求到后端
+  const handleTitleBlur = (newTitle: string) => {
+    if (!currentSessionId || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    const message = {
+      type: 'session',
+      action: 'rename',
+      sessionId: currentSessionId,
+      title: newTitle,
+      projectId: currentProjectId,
+      timestamp: Date.now()
+    };
+    wsRef.current.send(JSON.stringify(message));
+    console.log('[handleTitleBlur] Sent rename request:', message);
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
   };
@@ -1843,6 +1869,7 @@ export default function App() {
         onNewChat={handleNewChat}
         title={currentSession?.title || 'New Chat'}
         onTitleChange={handleTitleChange}
+        onTitleBlur={handleTitleBlur}
         onSettingsClick={() => setShowSettings(!showSettings)}
         isConnected={isConnected}
       />
