@@ -122,6 +122,16 @@ export class SessionManager {
     return this.storage.delete(sessionId);
   }
 
+  rename(sessionId: string, newTitle: string): boolean {
+    // 更新内存中的会话标题
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.title = newTitle;
+    }
+    // 更新存储中的标题
+    return this.storage.rename(sessionId, newTitle);
+  }
+
   clearCurrent(): void {
     this.currentSession = null;
   }

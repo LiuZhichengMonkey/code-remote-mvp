@@ -34,9 +34,10 @@ export interface ClientMessage {
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project';
+  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename';
   sessionId?: string;
   projectId?: string;
+  title?: string;
   stream?: boolean;
 }
 
@@ -329,7 +330,8 @@ export class CodeRemoteServer {
       ws,
       (message.action || 'list') as any,
       message.sessionId,
-      message.projectId
+      message.projectId,
+      message.title
     );
   }
 

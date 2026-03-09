@@ -89,6 +89,27 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-09 - UI 优化和会话标题编辑功能
+
+**新功能**:
+1. **会话标题编辑**: 点击顶部标题可直接编辑，修改后自动保存到会话文件
+2. **工具调用显示优化**: 使用 Claude CLI 风格显示工具调用，如 `Read(file.txt)` 而不是完整路径
+3. **429 错误重试**: 遇到 Rate Limit 错误时显示重试按钮
+
+**优化**:
+- Thinking 区域只在实时生成时显示，已保存的会话不显示
+- 过滤掉只有 thinking 内容的空白消息气泡
+
+**Files Changed**:
+- `chat-ui/src/App.tsx` - 工具调用格式化、thinking 显示逻辑、重试按钮、标题编辑
+- `chat-ui/src/types.ts` - 添加 canRetry 和 retryContent 字段
+- `cli/src/claude/storage.ts` - 添加 rename 和 renameSessionFromProject 方法
+- `cli/src/claude/session.ts` - 添加 rename 方法
+- `cli/src/handlers/claude.ts` - 添加 rename action 处理
+- `cli/src/server.ts` - 添加 title 字段支持
+
+---
+
 ### 2026-03-08 - Session Not Saving Bug
 
 **Issue**: Sessions created via CodeRemote were not persisting - closing and reopening the page would lose all conversation history.

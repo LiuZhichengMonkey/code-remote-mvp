@@ -25,6 +25,8 @@ export interface Message {
   options?: ChatOption[];
   thinking?: string;
   tools?: ToolUse[];  // 工具使用记录
+  canRetry?: boolean; // 是否可以重试（如429限流错误）
+  retryContent?: string; // 重试时发送的内容
 }
 
 export interface Attachment {

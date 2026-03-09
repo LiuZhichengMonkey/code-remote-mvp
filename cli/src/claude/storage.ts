@@ -349,6 +349,53 @@ export class SessionStorage {
     return false;
   }
 
+  rename(sessionId: string, newTitle: string): boolean {
+    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+
+    try {
+      // 读取现有内容
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n').filter(line => line.trim());
+
+      // 查找并更新 summary 行（如果存在），或添加新的 summary 行
+      let hasSummary = false;
+      const updatedLines = lines.map(line => {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type === 'summary') {
+            hasSummary = true;
+            return JSON.stringify({ ...entry, summary: newTitle });
+          }
+        } catch {
+          // 忽略解析错误
+        }
+        return line;
+      });
+
+      // 如果没有 summary 行，在文件开头添加一个
+      if (!hasSummary) {
+        const summaryEntry = {
+          type: 'summary',
+          summary: newTitle,
+          sessionId: sessionId,
+          timestamp: new Date().toISOString()
+        };
+        updatedLines.unshift(JSON.stringify(summaryEntry));
+      }
+
+      // 写回文件
+      fs.writeFileSync(filePath, updatedLines.join('\n') + '\n', 'utf-8');
+      console.log(`[SessionStorage] Renamed session ${sessionId} to "${newTitle}"`);
+      return true;
+    } catch (error) {
+      console.error(`[SessionStorage] Failed to rename session ${sessionId}:`, error);
+      return false;
+    }
+  }
+
   getLatest(): ClaudeSession | null {
     const sessions = this.list();
     return sessions.length > 0 ? sessions[0] : null;
@@ -519,5 +566,51 @@ export class SessionStorage {
       return true;
     }
     return false;
+  }
+
+  /**
+   * 重命名指定项目的会话
+   */
+  static renameSessionFromProject(projectId: string, sessionId: string, newTitle: string): boolean {
+    const filePath = path.join(CLAUDE_PROJECTS_DIR, projectId, `${sessionId}.jsonl`);
+    if (!fs.existsSync(filePath)) {
+      return false;
+    }
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n').filter(line => line.trim());
+
+      let hasSummary = false;
+      const updatedLines = lines.map(line => {
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type === 'summary') {
+            hasSummary = true;
+            return JSON.stringify({ ...entry, summary: newTitle });
+          }
+        } catch {
+          // 忽略解析错误
+        }
+        return line;
+      });
+
+      if (!hasSummary) {
+        const summaryEntry = {
+          type: 'summary',
+          summary: newTitle,
+          sessionId: sessionId,
+          timestamp: new Date().toISOString()
+        };
+        updatedLines.unshift(JSON.stringify(summaryEntry));
+      }
+
+      fs.writeFileSync(filePath, updatedLines.join('\n') + '\n', 'utf-8');
+      console.log(`[SessionStorage] Renamed session ${sessionId} in project ${projectId} to "${newTitle}"`);
+      return true;
+    } catch (error) {
+      console.error(`[SessionStorage] Failed to rename session ${sessionId}:`, error);
+      return false;
+    }
   }
 }

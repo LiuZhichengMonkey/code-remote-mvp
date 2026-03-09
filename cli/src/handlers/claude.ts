@@ -176,9 +176,10 @@ export class ClaudeHandler {
 
   handleSessionAction(
     ws: WebSocket,
-    action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project',
+    action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename',
     sessionId?: string,
-    projectId?: string
+    projectId?: string,
+    title?: string
   ): void {
     switch (action) {
       case 'new':
@@ -287,6 +288,27 @@ export class ClaudeHandler {
             sessionId,
             projectId,
             success: deleted,
+            timestamp: Date.now()
+          }));
+        }
+        break;
+
+      case 'rename':
+        if (sessionId && title) {
+          let renamed;
+          if (projectId) {
+            // 重命名指定项目的会话
+            renamed = SessionStorage.renameSessionFromProject(projectId, sessionId, title);
+          } else {
+            // 重命名当前项目的会话
+            renamed = this.sessionManager.rename(sessionId, title);
+          }
+          ws.send(JSON.stringify({
+            type: 'session_renamed',
+            sessionId,
+            projectId,
+            title,
+            success: renamed,
             timestamp: Date.now()
           }));
         }
