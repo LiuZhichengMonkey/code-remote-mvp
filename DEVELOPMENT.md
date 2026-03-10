@@ -2,7 +2,7 @@
 
 > Technical documentation for agents and developers extending CodeRemote functionality
 
-## Current Status (2025-03-08)
+## Current Status (2025-03-11)
 
 ### Working Features
 - ✅ Local WiFi WebSocket connection (ws://192.168.x.x:port)
@@ -14,6 +14,10 @@
 - ✅ Image transfer (bidirectional, up to 10MB, PNG/JPG/GIF/WebP)
 - ✅ Image saved to E:/CodeRemote/Images/ on server
 - ✅ **Multi-Project History** - View and restore sessions from all projects
+- ✅ **Pagination** - Load messages progressively (scroll to load more)
+- ✅ **Code Blocks** - Syntax highlighting and copy button
+- ✅ **Auto-Start** - Windows scheduled task for boot auto-start
+- ✅ **Message Filtering** - Filter out task-notification system messages
 
 ### Tested Platforms
 - **iOS Safari**: WebSocket works with WSS (secure WebSocket)
@@ -520,6 +524,156 @@ code-remote-mvp/
 │
 ├── start.bat               # Windows startup script
 └── start.ps1               # PowerShell startup script
+```
+
+---
+
+## Pagination Support (2025-03-11)
+
+### Overview
+
+Session messages now support pagination to handle large conversations efficiently. Messages are loaded from newest to oldest.
+
+### WebSocket Protocol
+
+```typescript
+// Load session with pagination
+// Request
+{ type: 'session', action: 'resume', sessionId: 'session-abc', limit: 20 }
+
+// Response includes pagination info
+{
+  type: 'session_restored',
+  session: { id: 'session-abc', messages: [...], _partial: true, _totalMessages: 100 },
+  hasMore: true,
+  totalMessages: 100
+}
+
+// Load more messages (scroll up)
+// Request: beforeIndex = current loaded message count
+{ type: 'session', action: 'load_more', sessionId: 'session-abc', limit: 20, beforeIndex: 20 }
+
+// Response
+{
+  type: 'messages_loaded',
+  messages: [...],  // Older messages
+  hasMore: true,
+  totalMessages: 100
+}
+```
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/claude/storage.ts` | Added `loadPaginated()` method with `hasMore` and `totalMessages` support |
+| `cli/src/handlers/claude.ts` | Added `load_more` action handler |
+| `chat-ui/src/App.tsx` | Added scroll-to-top detection for auto-loading more messages |
+
+---
+
+## Code Block Syntax Highlighting (2025-03-11)
+
+### Overview
+
+Code blocks in messages now feature syntax highlighting and a copy button.
+
+### Supported Languages
+
+- JavaScript/TypeScript
+- Python
+- Bash
+- JSON
+
+### Implementation
+
+```typescript
+// In App.tsx
+const CodeBlock = ({ code, language }: { code: string; language: string }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="relative group/mycode">
+      <div className="flex items-center justify-between px-3 py-2 bg-black/30">
+        <span>{language || 'code'}</span>
+        <button onClick={handleCopy}>
+          {copied ? <Check /> : <Copy />}
+        </button>
+      </div>
+      <pre className="p-3 overflow-x-auto">
+        <code dangerouslySetInnerHTML={{
+          __html: highlightCode(code, language)
+        }} />
+      </pre>
+    </div>
+  );
+};
+```
+
+---
+
+## Auto-Start Service Scripts (2025-03-11)
+
+### Overview
+
+Windows batch scripts for service management and auto-start on boot.
+
+### Available Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `start-services.bat` | Start server + ngrok with network check |
+| `stop-services.bat` | Stop all services |
+| `install-autostart.bat` | Install Windows scheduled task for auto-start |
+| `uninstall-autostart.bat` | Remove auto-start scheduled task |
+
+### Usage
+
+```batch
+# Start services manually
+start-services.bat
+
+# Install auto-start (requires admin)
+install-autostart.bat
+
+# Uninstall auto-start
+uninstall-autostart.bat
+```
+
+### Network Check
+
+The start script waits for network connectivity before starting services:
+
+```batch
+:check_network
+ping -n 1 -w 1000 8.8.8.8 >nul 2>&1
+if %errorlevel%==0 goto :network_done
+timeout /t 2 /nobreak >nul
+goto :check_network
+```
+
+---
+
+## Message Filtering
+
+### Task-Notification Filtering
+
+System messages containing `<task-notification>` tags are automatically filtered from session history to keep the chat clean.
+
+```typescript
+// In storage.ts loadPaginated()
+const filteredMessages = fullSession.messages.filter((msg) => {
+  if (msg.content && msg.content.includes('<task-notification>')) {
+    return false;  // Filter out system notifications
+  }
+  return true;
+});
 ```
 
 ---

@@ -27,7 +27,7 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'ping' | 'image_meta' | 'claude' | 'session' | 'stop';
+  type: 'auth' | 'message' | 'ping' | 'pong' | 'image_meta' | 'claude' | 'session' | 'stop';
   token?: string;
   content?: string;
   fileName?: string;
@@ -138,21 +138,24 @@ export class CodeRemoteServer {
       const clientIp = req.socket.remoteAddress || 'unknown';
       console.log(chalk.blue('→'), `New connection from ${clientIp}`);
 
-      // Ping/Pong for connection health
+      // Application-level ping/pong for connection health (works with browsers)
       let pingInterval: NodeJS.Timeout;
       let isAlive = true;
 
-      ws.on('pong', () => {
+      // Handle application-level pong
+      const handlePong = () => {
         isAlive = true;
-      });
+      };
 
       pingInterval = setInterval(() => {
         if (!isAlive) {
+          console.log(chalk.yellow('⚠'), 'Client not responding to ping, terminating connection');
           ws.terminate();
           return;
         }
         isAlive = false;
-        ws.ping();
+        // Send application-level ping (browser-compatible)
+        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
       }, 30000);
 
       ws.on('message', (data: Buffer, isBinary: boolean) => {
@@ -161,6 +164,11 @@ export class CodeRemoteServer {
         } else {
           try {
             const message: ClientMessage = JSON.parse(data.toString());
+            // Handle application-level pong response
+            if (message.type === 'pong') {
+              handlePong();
+              return;
+            }
             this.handleMessage(ws, message, pingInterval);
           } catch (error) {
             this.sendError(ws, 'Invalid message format');
@@ -251,9 +259,6 @@ export class CodeRemoteServer {
         connectedAt: new Date()
       };
       this.clients.set(clientId, client);
-
-      // Clear ping interval for authenticated connections (let client manage)
-      if (pingInterval) clearInterval(pingInterval);
 
       const response: ServerMessage = {
         type: 'auth_success',

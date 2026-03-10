@@ -682,15 +682,66 @@ const InputArea = ({
   const [input, setInput] = useState('');
   const [files, setFiles] = useState<Attachment[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [showSkills, setShowSkills] = useState(false);
+  const [skillFilter, setSkillFilter] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 技能列表
+  const skills = [
+    { id: 'git-commit', name: 'Git Commit', description: '提交代码并推送到 GitHub', trigger: '/git-workflow' },
+    { id: 'create-readme', name: 'Create README', description: '为项目创建 README 文档', trigger: '/create-readme' },
+    { id: 'simplify', name: 'Simplify Code', description: '简化并优化代码', trigger: '/simplify' },
+    { id: 'brainstorm', name: 'Brainstorm', description: '头脑风暴新功能创意', trigger: '/brainstorming' },
+  ];
+
+  // 过滤技能
+  const filteredSkills = skillFilter
+    ? skills.filter(s => s.name.toLowerCase().includes(skillFilter.toLowerCase()) || s.description.toLowerCase().includes(skillFilter.toLowerCase()))
+    : skills;
+
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
+    const value = e.target.value;
+    setInput(value);
+
+    // 检测是否输入了 /
+    if (value === '/') {
+      setShowSkills(true);
+      setSkillFilter('');
+    } else if (showSkills && value.startsWith('/')) {
+      setSkillFilter(value.slice(1));
+    } else if (showSkills && !value.startsWith('/')) {
+      setShowSkills(false);
+      setSkillFilter('');
+    }
+
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
     }
+  };
+
+  // 选择技能 - 自动发送
+  const handleSelectSkill = (skill: typeof skills[0]) => {
+    const skillMessage = skill.trigger + ' ';
+    console.log('[handleSelectSkill] skill:', skill.name, 'message:', skillMessage, 'isConnected:', isConnected, 'isGenerating:', isGenerating);
+    setInput(skillMessage);
+    setShowSkills(false);
+    setSkillFilter('');
+
+    // 自动发送技能消息
+    if (isConnected && !isGenerating) {
+      console.log('[handleSelectSkill] Calling onSend...');
+      onSend(skillMessage, []);
+    } else {
+      console.log('[handleSelectSkill] NOT sending - isConnected:', isConnected, 'isGenerating:', isGenerating);
+    }
+  };
+
+  // 关闭技能弹窗
+  const closeSkillsPopup = () => {
+    setShowSkills(false);
+    setSkillFilter('');
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -743,11 +794,17 @@ const InputArea = ({
           >
             {files.map(file => (
               <div key={file.id} className="relative flex-shrink-0">
-                <img
-                  src={file.url}
-                  alt="preview"
-                  className="w-16 h-16 object-cover rounded-lg border border-white/10"
-                />
+                {file.type.startsWith('image/') ? (
+                  <img
+                    src={file.url}
+                    alt="preview"
+                    className="w-16 h-16 object-cover rounded-lg border border-white/10"
+                  />
+                ) : (
+                  <div className="w-16 h-16 flex items-center justify-center bg-white/10 rounded-lg border border-white/10">
+                    <FileText size={24} className="text-white/50" />
+                  </div>
+                )}
                 <button
                   onClick={() => removeFile(file.id)}
                   className="absolute -top-2 -right-2 bg-black/80 text-white rounded-full p-0.5 border border-white/20"
@@ -773,7 +830,7 @@ const InputArea = ({
           ref={fileInputRef}
           className="hidden"
           multiple
-          accept="image/*"
+          accept="*/*"
           onChange={handleFileSelect}
         />
 
@@ -810,7 +867,36 @@ const InputArea = ({
                 }
               }}
               disabled={!isConnected}
+              onBlur={() => setTimeout(() => setShowSkills(false), 200)}
             />
+          )}
+
+          {/* Skills Popup */}
+          {showSkills && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
+              <div className="p-2 border-b border-white/10">
+                <span className="text-xs text-white/50">选择技能</span>
+              </div>
+              <div className="max-h-[200px] overflow-y-auto">
+                {filteredSkills.length === 0 ? (
+                  <div className="p-3 text-xs text-white/40">没有找到匹配的技能</div>
+                ) : (
+                  filteredSkills.map(skill => (
+                    <button
+                      key={skill.id}
+                      onClick={() => handleSelectSkill(skill)}
+                      className="w-full p-3 text-left hover:bg-white/5 transition-colors flex items-center gap-3"
+                    >
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-white">{skill.name}</div>
+                        <div className="text-xs text-white/40">{skill.description}</div>
+                      </div>
+                      <span className="text-xs text-accent font-mono">{skill.trigger}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
           )}
         </div>
 
@@ -1111,13 +1197,18 @@ export default function App() {
     }
   }, [messages.length]);
 
+  // Track messages length with ref to avoid stale closure
+  const messagesLengthRef = useRef(0);
+  messagesLengthRef.current = messages.length;
+
   // Load more messages (pagination)
   const loadMoreMessages = useCallback(() => {
-    if (!ws || !currentSessionId || !hasMoreMessages || isLoadingMoreRef.current) return;
+    if (!ws || !currentSessionId || !hasMoreMessages || isLoadingMoreRef.current) {
+      return;
+    }
 
-    // 使用 totalMessages 来计算 beforeIndex，而不是 messages.length
-    // 因为 messages 可能不完整
-    const beforeIndex = totalMessages - (totalMessages - messages.length);
+    // Use ref to get the latest messages length
+    const beforeIndex = messagesLengthRef.current;
 
     ws.send(JSON.stringify({
       type: 'session',
@@ -1195,6 +1286,9 @@ export default function App() {
           }
           // Request project list from server
           newWs.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
+        } else if (msg.type === 'ping') {
+          // Respond to server heartbeat ping
+          newWs.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         } else if (msg.type === 'auth_failed') {
           setIsConnected(false);
           setIsConnecting(false);
@@ -1521,7 +1615,6 @@ export default function App() {
           }
         } else if (msg.type === 'messages_loaded') {
           // Handle more messages loaded (pagination)
-          console.log('Messages loaded:', msg.messages?.length, 'hasMore:', msg.hasMore, 'totalMessages:', msg.totalMessages);
           if (msg.messages && msg.sessionId) {
             // Prepend messages to current session
             setSessions(prev => prev.map(s => {
@@ -1564,17 +1657,22 @@ export default function App() {
             // Store the current scroll position before updating
             const scrollEl = scrollRef.current;
             if (scrollEl) {
+              const oldScrollTop = scrollEl.scrollTop;
               const oldScrollHeight = scrollEl.scrollHeight;
               // Wait for React to render the new messages, then adjust scroll position
               setTimeout(() => {
                 const newScrollHeight = scrollEl.scrollHeight;
                 const addedHeight = newScrollHeight - oldScrollHeight;
-                scrollEl.scrollTop = addedHeight;
-              }, 0);
+                // Restore scroll position by accounting for the added content height
+                scrollEl.scrollTop = oldScrollTop + addedHeight;
+              }, 50);
             }
           }
-          setIsLoadingMore(false);
-          isLoadingMoreRef.current = false;
+          // Don't reset isLoadingMoreRef here - let it stay true until after the scroll is restored
+          setTimeout(() => {
+            setIsLoadingMore(false);
+            isLoadingMoreRef.current = false;
+          }, 100);
         }
       } catch (e) {
         console.error('Failed to parse message:', e);
@@ -1625,6 +1723,8 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Skip auto-scroll when loading more messages
+    if (isLoadingMoreRef.current) return;
     scrollToBottom();
   }, [messages]);
 

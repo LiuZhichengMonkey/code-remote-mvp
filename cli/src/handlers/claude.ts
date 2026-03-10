@@ -39,7 +39,7 @@ export class ClaudeHandler {
       const parsed = this.commandHandler.parseCommand(content);
 
       if (parsed) {
-        // 执行命令
+        // 执行已知的系统命令
         const result = await this.commandHandler.execute(parsed.type, parsed.args);
 
         ws.send(JSON.stringify({
@@ -53,13 +53,8 @@ export class ClaudeHandler {
         return;
       }
 
-      // 未知的斜杠命令
-      ws.send(JSON.stringify({
-        type: 'command_error',
-        content: `Unknown command: ${content.split(' ')[0]}. Type /help for available commands.`,
-        timestamp: Date.now()
-      }));
-      return;
+      // 未知的斜杠命令 - 可能是 skill，继续发送给 Claude CLI
+      console.log(`[ClaudeHandler] Unknown slash command, treating as skill: ${content.split(' ')[0]}`);
     }
 
     // 如果前端传入了 sessionId 和 projectId，先恢复指定项目的会话
@@ -112,25 +107,26 @@ export class ClaudeHandler {
         const att = attachments[i];
         // 解码 base64
         const buffer = Buffer.from(att.data, 'base64');
-        // 生成文件名
-        const ext = att.type.split('/')[1] || 'png';
-        const fileName = `uploaded_image_${Date.now()}_${i}.${ext}`;
+        // 生成文件名 - 从 mime type 提取扩展名
+        const mimeType = att.type || 'application/octet-stream';
+        const ext = mimeType.split('/')[1] || 'bin';
+        const fileName = `uploaded_file_${Date.now()}_${i}.${ext}`;
         const filePath = path.join(tempImageDir, fileName);
 
         // 保存文件
         fs.writeFileSync(filePath, buffer);
-        console.log(`[ClaudeHandler] Saved image to: ${filePath}`);
+        console.log(`[ClaudeHandler] Saved file to: ${filePath}, type: ${mimeType}`);
         imagePaths.push(filePath);
       }
 
-      // 在消息内容前添加图片路径说明（使用完整路径并明确告诉 Claude 读取）
+      // 在消息内容前添加文件路径说明（使用完整路径并明确告诉 Claude 读取）
       // 注意：Windows 命令行中换行符会导致参数解析问题，所以用空格替代
-      const imageDescription = imagePaths.map(p =>
-        `【用户上传的图片文件】 文件路径: ${p} 请使用 Read 工具读取此图片文件进行分析。`
+      const fileDescription = imagePaths.map(p =>
+        `【用户上传的文件】 文件路径: ${p} 请使用 Read 工具读取此文件内容进行分析。`
       ).join(' ');
 
-      content = `${imageDescription} 用户说: ${content}`;
-      console.log(`[ClaudeHandler] Added ${imagePaths.length} image references with urgent read instruction`);
+      content = `${fileDescription} 用户说: ${content}`;
+      console.log(`[ClaudeHandler] Added ${imagePaths.length} file references`);
     }
 
     // 创建用户消息（保留图片路径信息）

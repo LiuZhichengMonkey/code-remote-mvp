@@ -139,6 +139,11 @@ export class SessionStorage {
             updatedAt = entryTime;
           }
 
+          // 跳过 queue-operation 类型（包含 task-notification 等系统消息）
+          if (entry.type === 'queue-operation') {
+            continue;
+          }
+
           // 处理用户消息
           if (entry.type === 'user' && entry.message) {
             // 跳过 tool_result 消息（工具调用结果不是用户真正输入的内容）
@@ -398,7 +403,15 @@ export class SessionStorage {
       return { session: null, hasMore: false, totalMessages: 0 };
     }
 
-    const totalMessages = fullSession.messages.length;
+    // 先过滤掉包含 task-notification 的消息
+    const filteredMessages = fullSession.messages.filter((msg: ClaudeMessage) => {
+      if (msg.content && msg.content.includes('<task-notification>')) {
+        return false;
+      }
+      return true;
+    });
+
+    const totalMessages = filteredMessages.length;
 
     // 计算要加载的消息范围（从后往前加载）
     // beforeIndex 表示当前已经加载了多少条消息（从最新往回算）
@@ -418,7 +431,7 @@ export class SessionStorage {
     }
 
     // 切片获取消息
-    const messages = fullSession.messages.slice(startIndex, endIndex);
+    const messages = filteredMessages.slice(startIndex, endIndex);
     const hasMore = startIndex > 0;
 
     return {
