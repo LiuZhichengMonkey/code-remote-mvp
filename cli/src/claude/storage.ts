@@ -168,8 +168,11 @@ export class SessionStorage {
             }
           }
 
-          // 处理助手消息
+          // 处理助手消息 - 需要根据 parentUuid 合并同一回复
           if (entry.type === 'assistant' && entry.message) {
+            const parentUuid = entry.parentUuid;
+            const messageId = entry.message?.id;
+
             let content = '';
             let thinking = '';
 
@@ -186,19 +189,74 @@ export class SessionStorage {
               }
             }
 
-            // 跳过空消息（没有内容的助手消息）
-            if (!content && !thinking) {
-              continue;
-            }
+            // 根据 parentUuid 合并同一回复的多个部分
+            const mergeKey = parentUuid || messageId || entry.uuid;
 
-            const msg: ClaudeMessage = {
-              id: entry.uuid || `assistant-${Date.now()}`,
-              role: 'assistant',
-              content: thinking ? `<thinking>${thinking}</thinking>${content}` : content,
-              timestamp: entryTime
-            };
-            messageMap.set(msg.id, msg);
-            messages.push(msg);
+            if (mergeKey && !messages.find(m => m.id === entry.uuid)) {
+              // 检查是否已存在同一条消息
+              const existingIdx = messages.findIndex(m =>
+                m.id === entry.uuid ||
+                (m as any).mergeKey === mergeKey
+              );
+
+              if (existingIdx === -1) {
+                // 新消息
+                // 跳过空消息
+                if (!content && !thinking) {
+                  continue;
+                }
+
+                const msg: ClaudeMessage = {
+                  id: entry.uuid || `assistant-${Date.now()}`,
+                  role: 'assistant',
+                  content: thinking ? `<thinking>${thinking}</thinking>${content}` : content,
+                  timestamp: entryTime,
+                  mergeKey // 标记用于合并
+                } as any;
+                messageMap.set(msg.id, msg);
+                messages.push(msg);
+              } else {
+                // 已有消息，合并内容
+                const existing = messages[existingIdx];
+                const existingContent = existing.content || '';
+                const newContent = thinking ? `<thinking>${thinking}</thinking>${content}` : content;
+
+                if (content && !existingContent.includes(content)) {
+                  // 追加 text 内容
+                  if (existingContent.includes('<thinking>')) {
+                    // 在 </thinking> 之后插入 text
+                    const insertPos = existingContent.indexOf('</thinking>') + '</thinking>'.length;
+                    existing.content = existingContent.slice(0, insertPos) + content + existingContent.slice(insertPos);
+                  } else {
+                    existing.content = existingContent + content;
+                  }
+                }
+                if (thinking && !existingContent.includes(thinking)) {
+                  // 更新 thinking
+                  if (existingContent.includes('<thinking>')) {
+                    const start = existingContent.indexOf('<thinking>') + '<thinking>'.length;
+                    const end = existingContent.indexOf('</thinking>');
+                    existing.content = existingContent.slice(0, start) + thinking + existingContent.slice(end);
+                  } else {
+                    existing.content = `<thinking>${thinking}</thinking>${existingContent}`;
+                  }
+                }
+              }
+            } else {
+              // 没有 merge key，直接添加
+              if (!content && !thinking) {
+                continue;
+              }
+
+              const msg: ClaudeMessage = {
+                id: entry.uuid || `assistant-${Date.now()}`,
+                role: 'assistant',
+                content: thinking ? `<thinking>${thinking}</thinking>${content}` : content,
+                timestamp: entryTime
+              };
+              messageMap.set(msg.id, msg);
+              messages.push(msg);
+            }
           }
 
           // 处理 summary (标题)
@@ -342,9 +400,22 @@ export class SessionStorage {
 
     const totalMessages = fullSession.messages.length;
 
-    // 计算要加载的消息范围
-    const endIndex = beforeIndex !== undefined ? beforeIndex : totalMessages;
-    const startIndex = Math.max(0, endIndex - limit);
+    // 计算要加载的消息范围（从后往前加载）
+    // beforeIndex 表示当前已经加载了多少条消息（从最新往回算）
+    // 例如：总共有 100 条，已加载 20 条，要加载再之前的 20 条
+    // 则 endIndex = 100 - 20 = 80, startIndex = 80 - 20 = 60
+    let endIndex: number;
+    let startIndex: number;
+
+    if (beforeIndex !== undefined) {
+      // 从已加载的消息之前继续加载
+      endIndex = totalMessages - beforeIndex;
+      startIndex = Math.max(0, endIndex - limit);
+    } else {
+      // 首次加载，加载最后 limit 条消息
+      endIndex = totalMessages;
+      startIndex = Math.max(0, endIndex - limit);
+    }
 
     // 切片获取消息
     const messages = fullSession.messages.slice(startIndex, endIndex);

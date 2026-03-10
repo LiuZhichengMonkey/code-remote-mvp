@@ -6,9 +6,44 @@ export class ClaudeCodeEngine {
   private cliAvailable: boolean | null = null;
   private maxRetries: number = 3; // 最大重试次数
   private baseRetryDelay: number = 2000; // 基础重试延迟（毫秒）
+  private currentProcess: ReturnType<typeof spawn> | null = null; // 当前运行的进程
+  private intentionallyStopped: boolean = false; // 标记是否是主动停止
 
   constructor(config: Partial<ClaudeConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  // 停止当前运行的 Claude CLI 进程
+  stop(): boolean {
+    if (this.currentProcess) {
+      const pid = this.currentProcess.pid;
+      this.intentionallyStopped = true; // 标记为主动停止
+      console.log('[ClaudeCodeEngine] Stopping current process, PID:', pid);
+
+      // Windows 上需要使用 taskkill 来杀死进程树
+      if (process.platform === 'win32') {
+        try {
+          const { execSync } = require('child_process');
+          // 使用 taskkill /T /F 强制杀死进程及其子进程
+          execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+          console.log('[ClaudeCodeEngine] Process killed via taskkill');
+        } catch (e) {
+          console.log('[ClaudeCodeEngine] taskkill failed, trying proc.kill()');
+          this.currentProcess.kill();
+        }
+      } else {
+        this.currentProcess.kill('SIGTERM');
+      }
+
+      this.currentProcess = null;
+      return true;
+    }
+    return false;
+  }
+
+  // 检查是否有正在运行的进程
+  isRunning(): boolean {
+    return this.currentProcess !== null;
   }
 
   async detectClaudeCLI(): Promise<boolean> {
@@ -145,6 +180,10 @@ export class ClaudeCodeEngine {
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
       });
+
+      // 保存当前进程引用以便后续停止
+      this.currentProcess = proc;
+      console.log('[ClaudeCodeEngine] Started process with PID:', proc.pid);
 
       let fullResponse = '';
       let fullThinking = '';
@@ -294,8 +333,31 @@ export class ClaudeCodeEngine {
         clearTimeout(timeout);
         console.log('[Claude CLI] Closed, code:', code, 'response length:', fullResponse.length);
 
-        if (code !== 0 && !fullResponse) {
+        // 清除当前进程引用和停止标记
+        if (this.currentProcess === proc) {
+          this.currentProcess = null;
+        }
+        const wasIntentionallyStopped = this.intentionallyStopped;
+        this.intentionallyStopped = false; // 重置标记
+
+        // 如果是主动停止，不显示错误
+        if (code !== 0 && !fullResponse && !wasIntentionallyStopped) {
           reject(new Error(`Claude CLI exited with code ${code}: ${stderr}`));
+          return;
+        }
+
+        // 主动停止时，发送完成信号
+        if (wasIntentionallyStopped) {
+          sendLog('info', '⏹ Response stopped by user');
+          if (this.config.streamMode === 'realtime') {
+            onChunk('', true);
+          } else {
+            onChunk(fullResponse, true);
+          }
+          resolve({
+            response: fullResponse,
+            claudeSessionId: responseSessionId
+          });
           return;
         }
 

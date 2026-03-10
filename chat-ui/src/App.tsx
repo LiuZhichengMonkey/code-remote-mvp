@@ -1115,11 +1115,9 @@ export default function App() {
   const loadMoreMessages = useCallback(() => {
     if (!ws || !currentSessionId || !hasMoreMessages || isLoadingMoreRef.current) return;
 
-    isLoadingMoreRef.current = true;
-    setIsLoadingMore(true);
-
-    // Calculate beforeIndex based on current messages
-    const beforeIndex = messages.length;
+    // 使用 totalMessages 来计算 beforeIndex，而不是 messages.length
+    // 因为 messages 可能不完整
+    const beforeIndex = totalMessages - (totalMessages - messages.length);
 
     ws.send(JSON.stringify({
       type: 'session',
@@ -1129,18 +1127,32 @@ export default function App() {
       limit: 20,
       beforeIndex
     }));
-  }, [ws, currentSessionId, currentProjectId, hasMoreMessages, messages.length]);
+
+    isLoadingMoreRef.current = true;
+    setIsLoadingMore(true);
+  }, [ws, currentSessionId, currentProjectId, hasMoreMessages, totalMessages]);
 
   // Handle scroll to detect when user scrolls to top
-  const handleScroll = useCallback(() => {
-    if (!scrollRef.current || !hasMoreMessages || isLoadingMoreRef.current) return;
+  // 使用防抖来防止滚动事件触发太频繁
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-    const { scrollTop } = scrollRef.current;
-    // When user scrolls near the top (within 100px), load more messages
-    if (scrollTop < 100) {
-      loadMoreMessages();
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    // 清除之前的定时器
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
     }
-  }, [hasMoreMessages, loadMoreMessages]);
+
+    // 设置新的定时器，300ms 后才触发加载
+    scrollTimeoutRef.current = setTimeout(() => {
+      const target = e.target as HTMLDivElement;
+      const { scrollTop } = target;
+
+      // 当滚动到顶部附近时（100px内），加载更多消息
+      if (scrollTop < 100 && hasMoreMessages && !isLoadingMoreRef.current) {
+        loadMoreMessages();
+      }
+    }, 300);
+  }, [hasMoreMessages]);
 
   // Sync currentSessionId ref
   useEffect(() => {
@@ -1664,11 +1676,12 @@ export default function App() {
     }
   };
 
-  // Load all projects
-  const loadProjects = () => {
+  // Load all projects (with optional force refresh)
+  const loadProjects = (forceRefresh: boolean = false) => {
     if (wsRef.current && isConnected) {
-      // Clear cached project sessions to force reload
-      setProjectSessions({});
+      if (forceRefresh) {
+        setProjectSessions({});
+      }
       wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
     }
   };
@@ -1814,7 +1827,15 @@ export default function App() {
   };
 
   const handleStop = () => {
-    // Cannot really stop WebSocket stream, but update UI
+    // Send stop request to server to kill Claude CLI process
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'stop',
+        timestamp: Date.now()
+      }));
+      console.log('[handleStop] Sent stop request');
+    }
+    // Update UI
     setIsGenerating(false);
   };
 
@@ -1921,7 +1942,7 @@ export default function App() {
                 <h2 className="text-xl font-semibold">History</h2>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={loadProjects}
+                    onClick={() => loadProjects(true)}
                     className="text-white/40 hover:text-white transition-colors"
                     title="Refresh projects"
                   >
@@ -2138,8 +2159,8 @@ export default function App() {
                   )}
                 </div>
               </div>
-              {/* Show recent logs */}
-              {serverLogs.length > 1 && (
+              {/* Show recent logs - hidden for now, only for debugging */}
+              {false && serverLogs.length > 1 && (
                 <div className="mt-2 pt-2 border-t border-white/10 max-h-[60px] overflow-y-auto no-scrollbar">
                   {serverLogs.slice(-5).reverse().map((log, idx) => (
                     <div key={idx} className="flex items-center gap-2 text-[10px] text-white/40 py-0.5">

@@ -27,7 +27,7 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'ping' | 'image_meta' | 'claude' | 'session';
+  type: 'auth' | 'message' | 'ping' | 'image_meta' | 'claude' | 'session' | 'stop';
   token?: string;
   content?: string;
   fileName?: string;
@@ -210,6 +210,26 @@ export class CodeRemoteServer {
 
       case 'image_meta':
         this.handleImageMeta(ws, message);
+        break;
+
+      case 'stop':
+        // 停止当前运行的 Claude CLI 进程
+        console.log(chalk.yellow('⏹'), 'Received stop request');
+        const stopped = this.claudeHandler.stop();
+        if (stopped) {
+          ws.send(JSON.stringify({
+            type: 'stopped',
+            success: true,
+            timestamp: Date.now()
+          }));
+        } else {
+          ws.send(JSON.stringify({
+            type: 'stopped',
+            success: false,
+            error: 'No running process to stop',
+            timestamp: Date.now()
+          }));
+        }
         break;
 
       case 'ping':

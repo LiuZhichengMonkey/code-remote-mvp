@@ -15,6 +15,12 @@ export class ClaudeHandler {
     console.log(`[ClaudeHandler] Workspace: ${workspaceRoot || process.cwd()}`);
   }
 
+  // 停止当前运行的 Claude CLI 进程
+  stop(): boolean {
+    console.log('[ClaudeHandler] Stopping Claude CLI process...');
+    return this.engine.stop();
+  }
+
   async handleClaudeMessage(
     ws: WebSocket,
     content: string,
@@ -338,6 +344,7 @@ export class ClaudeHandler {
 
       case 'load_more':
         // 加载更多历史消息
+        console.log(`[LoadMore] sessionId: ${sessionId}, limit: ${limit || 20}, beforeIndex: ${beforeIndex}`);
         if (sessionId) {
           const loadLimit = limit || 20;
           let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
@@ -348,6 +355,7 @@ export class ClaudeHandler {
             result = this.sessionManager.resumePaginated(sessionId, loadLimit, beforeIndex);
           }
 
+          console.log(`[LoadMore] result: hasMore=${result.hasMore}, totalMessages=${result.totalMessages}, messagesLoaded=${result.session?.messages.length}`);
           if (result.session) {
             const messages = result.session.messages.map((msg: ClaudeMessage) => ({
               ...msg,
