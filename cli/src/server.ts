@@ -20,14 +20,14 @@ export interface Client {
 }
 
 export interface ServerMessage {
-  type: 'auth_success' | 'auth_failed' | 'message' | 'error' | 'pong';
+  type: 'auth_success' | 'auth_failed' | 'message' | 'error';
   clientId?: string;
   content?: string;
   timestamp?: number;
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'ping' | 'pong' | 'image_meta' | 'claude' | 'session' | 'stop';
+  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop';
   token?: string;
   content?: string;
   fileName?: string;
@@ -138,38 +138,13 @@ export class CodeRemoteServer {
       const clientIp = req.socket.remoteAddress || 'unknown';
       console.log(chalk.blue('→'), `New connection from ${clientIp}`);
 
-      // Application-level ping/pong for connection health (works with browsers)
-      let pingInterval: NodeJS.Timeout;
-      let isAlive = true;
-
-      // Handle application-level pong
-      const handlePong = () => {
-        isAlive = true;
-      };
-
-      pingInterval = setInterval(() => {
-        if (!isAlive) {
-          console.log(chalk.yellow('⚠'), 'Client not responding to ping, terminating connection');
-          ws.terminate();
-          return;
-        }
-        isAlive = false;
-        // Send application-level ping (browser-compatible)
-        ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-      }, 30000);
-
       ws.on('message', (data: Buffer, isBinary: boolean) => {
         if (isBinary) {
           this.handleBinaryMessage(ws, data);
         } else {
           try {
             const message: ClientMessage = JSON.parse(data.toString());
-            // Handle application-level pong response
-            if (message.type === 'pong') {
-              handlePong();
-              return;
-            }
-            this.handleMessage(ws, message, pingInterval);
+            this.handleMessage(ws, message);
           } catch (error) {
             this.sendError(ws, 'Invalid message format');
           }
@@ -177,7 +152,6 @@ export class CodeRemoteServer {
       });
 
       ws.on('close', () => {
-        clearInterval(pingInterval);
         this.handleDisconnection(ws);
         console.log(chalk.red('×'), `Client disconnected from ${clientIp}`);
       });
@@ -196,10 +170,10 @@ export class CodeRemoteServer {
     });
   }
 
-  private handleMessage(ws: WebSocket, message: ClientMessage, pingInterval?: NodeJS.Timeout) {
+  private handleMessage(ws: WebSocket, message: ClientMessage) {
     switch (message.type) {
       case 'auth':
-        this.handleAuth(ws, message.token, pingInterval);
+        this.handleAuth(ws, message.token);
         break;
 
       case 'message':
@@ -240,16 +214,12 @@ export class CodeRemoteServer {
         }
         break;
 
-      case 'ping':
-        ws.send(JSON.stringify({ type: 'pong' }));
-        break;
-
       default:
         this.sendError(ws, 'Unknown message type');
     }
   }
 
-  private handleAuth(ws: WebSocket, token?: string, pingInterval?: NodeJS.Timeout) {
+  private handleAuth(ws: WebSocket, token?: string) {
     if (token === this.token) {
       const clientId = uuidv4();
       const client: Client = {

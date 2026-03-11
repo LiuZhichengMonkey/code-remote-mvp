@@ -2,16 +2,19 @@ import { WebSocket } from 'ws';
 import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent, ClaudeSession, LogMessage } from '../claude';
 import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
+import { parseAgentMentions, hasAgentMention, buildCollaborationContext, listAvailableAgents } from '../agent';
 
 export class ClaudeHandler {
   private engine: ClaudeCodeEngine;
   private sessionManager: SessionManager;
   private commandHandler: CommandHandler;
+  private workspaceRoot?: string;
 
   constructor(workspaceRoot?: string) {
     this.engine = new ClaudeCodeEngine();
     this.sessionManager = new SessionManager(workspaceRoot);
     this.commandHandler = new CommandHandler(workspaceRoot);
+    this.workspaceRoot = workspaceRoot;
     console.log(`[ClaudeHandler] Workspace: ${workspaceRoot || process.cwd()}`);
   }
 
@@ -55,6 +58,53 @@ export class ClaudeHandler {
 
       // 未知的斜杠命令 - 可能是 skill，继续发送给 Claude CLI
       console.log(`[ClaudeHandler] Unknown slash command, treating as skill: ${content.split(' ')[0]}`);
+    }
+
+    // 解析 @agent 语法
+    let agentSystemPrompt: string | null = null;
+    let agentInfo: { host: string | null; experts: string[] } = { host: null, experts: [] };
+
+    if (hasAgentMention(content)) {
+      const parsed = parseAgentMentions(content);
+      agentInfo = { host: parsed.hostAgent, experts: parsed.expertAgents };
+
+      if (parsed.hostAgent) {
+        console.log(`[ClaudeHandler] Agent collaboration: @${parsed.hostAgent}`, parsed.expertAgents.length > 0 ? `+ experts: ${parsed.expertAgents.join(', ')}` : '');
+
+        // 构建协作上下文
+        const collaboration = buildCollaborationContext(
+          parsed.hostAgent,
+          parsed.expertAgents,
+          this.workspaceRoot
+        );
+
+        if (collaboration.host) {
+          agentSystemPrompt = collaboration.systemPrompt;
+          content = parsed.cleanMessage; // 使用清理后的消息
+
+          // 通知前端当前使用的 agent
+          ws.send(JSON.stringify({
+            type: 'agent_loaded',
+            hostAgent: parsed.hostAgent,
+            expertAgents: parsed.expertAgents,
+            timestamp: Date.now()
+          }));
+
+          console.log(`[ClaudeHandler] Loaded agent: ${parsed.hostAgent} with ${parsed.expertAgents.length} experts`);
+        } else {
+          console.warn(`[ClaudeHandler] Agent not found: ${parsed.hostAgent}`);
+          // 列出可用 agent
+          const available = listAvailableAgents(this.workspaceRoot);
+          if (available.length > 0) {
+            ws.send(JSON.stringify({
+              type: 'agent_not_found',
+              requestedAgent: parsed.hostAgent,
+              availableAgents: available,
+              timestamp: Date.now()
+            }));
+          }
+        }
+      }
     }
 
     // 如果前端传入了 sessionId 和 projectId，先恢复指定项目的会话
@@ -190,7 +240,8 @@ export class ClaudeHandler {
           }));
         },
         claudeSessionId,
-        cwd
+        cwd,
+        agentSystemPrompt || undefined  // 传递 agent system prompt
       );
 
       // 如果是新会话，使用 Claude CLI 返回的 session ID

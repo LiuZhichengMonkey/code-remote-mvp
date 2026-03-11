@@ -43,11 +43,10 @@
   font-size: 15px;
   line-height: 1.6;
   word-wrap: break-word;
-  white-space: pre-wrap;
 }
 
 .markdown-body p {
-  margin-bottom: 12px;
+  margin-bottom: 4px;
 }
 
 .markdown-body p:last-child {

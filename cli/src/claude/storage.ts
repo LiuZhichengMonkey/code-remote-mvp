@@ -156,12 +156,23 @@ export class SessionStorage {
               }
             }
 
+            // 获取消息内容
+            const content = typeof entry.message.content === 'string'
+              ? entry.message.content
+              : (entry.message.content as Array<{text?: string}>).map((c: {text?: string}) => c.text || '').join('');
+
+            // 跳过上下文压缩时自动生成的摘要消息
+            // 这类消息以 "This session is being continued from a previous conversation" 开头
+            // 并且 entry 中有 isVisibleInTranscriptOnly: true 或 isCompactSummary: true 标记
+            if (entry.isVisibleInTranscriptOnly || entry.isCompactSummary ||
+                content.startsWith('This session is being continued from a previous conversation')) {
+              continue;
+            }
+
             const msg: ClaudeMessage = {
               id: entry.uuid || `user-${Date.now()}`,
               role: 'user',
-              content: typeof entry.message.content === 'string'
-                ? entry.message.content
-                : (entry.message.content as Array<{text?: string}>).map((c: {text?: string}) => c.text || '').join(''),
+              content,
               timestamp: entryTime
             };
             messageMap.set(msg.id, msg);

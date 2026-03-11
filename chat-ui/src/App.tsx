@@ -2209,11 +2209,25 @@ export default function App() {
         ) : (
           messages
             .filter((msg) => {
-              // 过滤空消息
-              if (!msg.content || msg.content.trim() === '') return false;
-              // 过滤只包含 thinking 标签的消息
+              // 正在流式传输的消息总是显示（可能有 thinking 但还没有 content）
+              if (msg.status === 'sending') return true;
+
+              // 过滤空消息（既没有 content 也没有 thinking）
+              const hasContent = msg.content && msg.content.trim() !== '';
+              const hasThinking = msg.thinking && msg.thinking.trim() !== '';
+
+              // 检查 content 中是否包含 thinking 标签
+              const hasThinkingInContent = msg.content && (
+                msg.content.includes('<thinking>') ||
+                msg.content.includes('🤔 Thinking...')
+              );
+
+              if (!hasContent && !hasThinking && !hasThinkingInContent) return false;
+
+              // 过滤只包含闭合的 thinking 标签的消息（已完成的 thinking）
               const thinkingRegex = /^<thinking>[\s\S]*<\/thinking>\s*$/;
-              if (thinkingRegex.test(msg.content.trim())) return false;
+              if (thinkingRegex.test(msg.content?.trim() || '')) return false;
+
               return true;
             })
             .map((msg) => (

@@ -78,7 +78,8 @@ export class ClaudeCodeEngine {
     onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
     onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
-    cwd?: string
+    cwd?: string,
+    agentSystemPrompt?: string  // Agent 的 system prompt
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
@@ -87,7 +88,7 @@ export class ClaudeCodeEngine {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         if (useCLI) {
-          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd);
+          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd, agentSystemPrompt);
         } else {
           const response = await this.callAnthropicAPI(messages, onChunk, onLog);
           return { response, claudeSessionId };
@@ -125,7 +126,8 @@ export class ClaudeCodeEngine {
     onChunk: (content: string, done: boolean, thinking?: string, toolEvent?: ToolUseEvent | ToolResultEvent) => void,
     onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
-    cwd?: string
+    cwd?: string,
+    agentSystemPrompt?: string
   ): Promise<{ response: string; claudeSessionId?: string }> {
     return new Promise((resolve, reject) => {
       // 删除嵌套会话检测的环境变量
@@ -167,8 +169,20 @@ export class ClaudeCodeEngine {
         args.push('--resume', claudeSessionId);
       }
 
+      // 如果有 agent system prompt，注入到消息前面
+      let finalPrompt = prompt;
+      if (agentSystemPrompt) {
+        sendLog('info', 'Using agent system prompt');
+        // 使用 <system-reminder> 格式注入 system prompt
+        finalPrompt = `<system-reminder>
+${agentSystemPrompt}
+</system-reminder>
+
+用户请求：${prompt}`;
+      }
+
       // Windows 命令行需要用引号包裹包含空格的 prompt
-      args.push(`"${prompt}"`);
+      args.push(`"${finalPrompt}"`);
 
       // 打印完整命令便于调试
       console.log('[Claude CLI] Full command: claude ' + args.join(' '));
@@ -218,7 +232,7 @@ export class ClaudeCodeEngine {
               // 处理 thinking 内容
               if (delta?.type === 'thinking_delta' && delta.thinking) {
                 const thinkingText = delta.thinking;
-                sendLog('debug', `Thinking: ${thinkingText.substring(0, 30)}...`);
+                // 不再每个 delta 都发送 log，避免刷屏
                 fullThinking += thinkingText;
                 // 发送 thinking 更新
                 if (this.config.streamMode === 'realtime') {

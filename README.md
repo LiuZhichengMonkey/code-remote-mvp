@@ -89,6 +89,28 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-11 - Agent 系统 & 体验优化
+
+**新功能**:
+1. **Agent 系统**: 支持 @ 语法动态加载专家 agent，每个 agent 可有自己的记忆、skill 和配置
+2. **流式 thinking 显示**: 即使只有 thinking 内容没有普通文本，也会实时显示
+
+**修复**:
+1. **移除心跳机制**: 解决 Cloudflare 10000 次请求限制问题（ping/pong 每 30 秒一次，长时间运行会超限）
+2. **过滤上下文压缩摘要**: 不再显示 "This session is being continued from a previous conversation..." 系统消息
+3. **Markdown 换行优化**: 减少段落之间的间距（从 12px 改为 4px，移除 white-space: pre-wrap）
+
+**Files Changed**:
+- `cli/src/agent/` - 新增 Agent 系统（parser, config, context, types, index）
+- `cli/src/server.ts` - 移除 ping/pong 心跳机制
+- `cli/src/claude/storage.ts` - 过滤 isCompactSummary 和 isVisibleInTranscriptOnly 消息
+- `cli/src/handlers/claude.ts` - 支持 agent system prompt
+- `cli/src/claude/engine.ts` - 支持 agent system prompt 注入
+- `chat-ui/src/App.tsx` - 流式消息过滤逻辑优化
+- `chat-ui/src/index.css` - Markdown 样式调整
+
+---
+
 ### 2026-03-09 - Feature: 处理中状态提示
 
 **新功能**: 发送消息后显示"Claude 正在处理..."的加载提示
