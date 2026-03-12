@@ -336,7 +336,7 @@ export class DebateOrchestrator {
       }
     }
 
-    // 记录发言
+    // 记录发言（保存到 session 和 blackboard）
     const speech: AgentSpeech = {
       agentName: agent.name,
       role: agent.role,
@@ -346,6 +346,10 @@ export class DebateOrchestrator {
       step
     };
 
+    // 保存到 session（持久化，不会被压缩）
+    this.session.speeches.push(speech);
+
+    // 保存到 blackboard（会被压缩）
     this.blackboardManager.recordSpeech(speech);
 
     // 更新黑板
@@ -405,7 +409,7 @@ export class DebateOrchestrator {
       content = await moderator.generateSpeech(this.blackboardManager.getState(), context);
     }
 
-    // 记录发言
+    // 记录发言（保存到 session 和 blackboard）
     const speech: AgentSpeech = {
       agentName: moderator.name,
       role: moderator.role,
@@ -415,6 +419,10 @@ export class DebateOrchestrator {
       step: 'settlement'
     };
 
+    // 保存到 session（持久化，不会被压缩）
+    this.session.speeches.push(speech);
+
+    // 保存到 blackboard（会被压缩）
     this.blackboardManager.recordSpeech(speech);
 
     // 发送发言事件
@@ -647,6 +655,29 @@ ${blackboard.historySummary || '首轮讨论，暂无历史'}
     md += `\n`;
 
     md += `## 完整辩论记录\n\n`;
+
+    // 按轮次分组发言
+    const speechesByRound: Record<number, AgentSpeech[]> = {};
+    for (const speech of this.session.speeches) {
+      if (!speechesByRound[speech.round]) {
+        speechesByRound[speech.round] = [];
+      }
+      speechesByRound[speech.round].push(speech);
+    }
+
+    if (Object.keys(speechesByRound).length > 0) {
+      for (const round of Object.keys(speechesByRound).map(Number).sort((a, b) => a - b)) {
+        md += `### 第 ${round} 轮\n\n`;
+        for (const speech of speechesByRound[round]) {
+          md += `**[${speech.role}] ${speech.agentName}**\n\n`;
+          md += `${speech.content}\n\n`;
+          md += `---\n\n`;
+        }
+      }
+    } else {
+      md += `_暂无记录（可能已被压缩）_\n\n`;
+    }
+
     md += `---\n\n`;
     md += `_共 ${this.session.speeches.length} 条发言_\n`;
 
