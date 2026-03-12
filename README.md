@@ -89,6 +89,68 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-13 - Feature: 多智能体对抗分析引擎
+
+**新功能**: 完整的多Agent对抗辩论系统，支持复杂问题的多维度深度分析
+
+**核心特性**:
+1. **全局黑板机制**: 状态压缩、历史摘要，解决上下文爆炸问题
+2. **多角色对抗**: Proposer(建构者) vs Skeptic(破坏者) + FactChecker(查证员) + Expert(动态专家)
+3. **共识评分**: 自动判断辩论终止条件（达到85分或最大轮次）
+4. **会话复用**: 每个Agent角色维护独立Claude会话，避免重复发送系统提示词，节省30-50% Token
+5. **会话持久化**: 辩论状态保存到JSON文件，支持跨进程恢复
+6. **并发执行**: EventBus消息总线 + ConcurrentAgent支持并行响应
+7. **外部化提示词**: Agent角色定义在独立的.md文件中
+
+**架构**:
+```
+multi-agent/
+├── index.ts              # 模块导出
+├── types.ts              # 类型定义
+├── blackboard.ts         # 全局黑板（记忆管理）
+├── agents.ts             # Agent 角色定义
+├── orchestrator.ts       # 辩论协调器（状态机）
+├── llm-adapter.ts        # LLM 适配器（支持Claude CLI会话复用）
+├── prompt-loader.ts      # Prompt 加载器
+├── prompts/              # Agent Prompt 模板
+├── bus/                  # 消息总线模块
+│   ├── EventBus.ts       # 事件总线（单播/广播/主题订阅）
+│   ├── MessageQueue.ts   # 消息队列
+│   └── LockManager.ts    # 异步锁
+└── concurrent/           # 并发模块
+    ├── ConcurrentAgent.ts    # 并发Agent
+    └── ParallelOrchestrator.ts # 并行执行器
+```
+
+**使用示例**:
+```typescript
+import { DebateOrchestrator, ClaudeCLIAdapter } from './multi-agent';
+
+// 创建辩论会话
+const debate = DebateOrchestrator.create(
+  '如何设计一个多Agent协作的AI系统？',
+  { name: '系统架构师', background: '精通分布式系统...' },
+  { maxRounds: 10, terminationScore: 85 }
+);
+
+// 设置 LLM 适配器（支持会话复用）
+const adapter = new ClaudeCLIAdapter({ sessionsDir: './sessions' });
+debate.setLLMAdapter(adapter);
+
+// 运行辩论
+while (debate.getState().status === 'running') {
+  await debate.runRound();
+}
+```
+
+**Files Changed**:
+- `cli/src/multi-agent/` - 新增多智能体系统
+- `cli/src/claude/engine.ts` - 支持 stdin 传递 prompt（修复多行文本问题）
+- `cli/src/handlers/claude.ts` - 支持 agent 配置加载
+- `multi-agent-sessions/` - 辩论会话持久化目录
+
+---
+
 ### 2026-03-12 - Agent 模块安全性重构
 
 **变更类型**: Refactor / Security

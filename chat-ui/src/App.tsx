@@ -1811,6 +1811,9 @@ export default function App() {
   // Send message
   const handleSend = async (text: string, attachments: Attachment[]) => {
     console.log('[handleSend] called with text:', text?.substring(0, 30));
+    console.log('[handleSend] text length:', text?.length);
+    console.log('[handleSend] full text:', text);
+    console.log('[CLIENT-DEBUG] raw text:', JSON.stringify(text));
     console.log('[handleSend] currentSessionIdRef.current:', currentSessionIdRef.current);
     console.log('[handleSend] currentProjectId:', currentProjectId);
     console.log('[handleSend] sessions.length:', sessions.length);

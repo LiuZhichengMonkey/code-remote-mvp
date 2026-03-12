@@ -2,7 +2,7 @@ import { WebSocket } from 'ws';
 import { ClaudeCodeEngine, SessionManager, createMessage, ClaudeMessage, ToolUseEvent, ToolResultEvent, ClaudeSession, LogMessage } from '../claude';
 import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
-import { parseAgentMentions, hasAgentMention, buildCollaborationContext, listAvailableAgents } from '../agent';
+import { parseAgentMentions, hasAgentMention, listAvailableAgents, loadAgentContext, AgentContext } from '../agent';
 
 export class ClaudeHandler {
   private engine: ClaudeCodeEngine;
@@ -61,36 +61,34 @@ export class ClaudeHandler {
     }
 
     // 解析 @agent 语法
-    let agentSystemPrompt: string | null = null;
     let agentInfo: { host: string | null; experts: string[] } = { host: null, experts: [] };
+    let hostAgentContext: AgentContext | null = null;
 
     if (hasAgentMention(content)) {
       const parsed = parseAgentMentions(content);
+      console.log(`[ClaudeHandler] parseAgentMentions result:`, JSON.stringify(parsed));
       agentInfo = { host: parsed.hostAgent, experts: parsed.expertAgents };
 
       if (parsed.hostAgent) {
-        console.log(`[ClaudeHandler] Agent collaboration: @${parsed.hostAgent}`, parsed.expertAgents.length > 0 ? `+ experts: ${parsed.expertAgents.join(', ')}` : '');
+        console.log(`[ClaudeHandler] Agent mentioned: @${parsed.hostAgent}`, parsed.expertAgents.length > 0 ? `+ experts: ${parsed.expertAgents.join(', ')}` : '');
 
-        // 构建协作上下文
-        const collaboration = buildCollaborationContext(
-          parsed.hostAgent,
-          parsed.expertAgents,
-          this.workspaceRoot
-        );
+        // 加载 agent 上下文（用于前端通知和 agent 配置）
+        hostAgentContext = loadAgentContext(parsed.hostAgent, this.workspaceRoot);
 
-        if (collaboration.host) {
-          agentSystemPrompt = collaboration.systemPrompt;
-          content = parsed.cleanMessage; // 使用清理后的消息
+        if (hostAgentContext) {
+          // 使用清理后的消息（移除 @agent 标记）
+          content = parsed.cleanMessage;
 
-          // 通知前端当前使用的 agent
+          // 通知前端 subagent 即将启动
           ws.send(JSON.stringify({
-            type: 'agent_loaded',
-            hostAgent: parsed.hostAgent,
-            expertAgents: parsed.expertAgents,
+            type: 'subagent_start',
+            agentName: hostAgentContext.config.name,
+            agentDescription: hostAgentContext.config.description,
+            message: content,
             timestamp: Date.now()
           }));
 
-          console.log(`[ClaudeHandler] Loaded agent: ${parsed.hostAgent} with ${parsed.expertAgents.length} experts`);
+          console.log(`[ClaudeHandler] Triggering subagent: ${hostAgentContext.config.name}`);
         } else {
           console.warn(`[ClaudeHandler] Agent not found: ${parsed.hostAgent}`);
           // 列出可用 agent
@@ -241,7 +239,12 @@ export class ClaudeHandler {
         },
         claudeSessionId,
         cwd,
-        agentSystemPrompt || undefined  // 传递 agent system prompt
+        hostAgentContext ? {
+          name: hostAgentContext.config.name,
+          description: hostAgentContext.config.description,
+          systemPrompt: hostAgentContext.config.systemPrompt,
+          tools: hostAgentContext.config.tools
+        } : null
       );
 
       // 如果是新会话，使用 Claude CLI 返回的 session ID

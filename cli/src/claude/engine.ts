@@ -79,7 +79,7 @@ export class ClaudeCodeEngine {
     onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
     cwd?: string,
-    agentSystemPrompt?: string  // Agent 的 system prompt
+    agentConfig?: { name: string; description?: string; systemPrompt?: string; tools?: string[] } | null
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
@@ -88,7 +88,7 @@ export class ClaudeCodeEngine {
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         if (useCLI) {
-          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd, agentSystemPrompt);
+          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd, agentConfig);
         } else {
           const response = await this.callAnthropicAPI(messages, onChunk, onLog);
           return { response, claudeSessionId };
@@ -127,7 +127,7 @@ export class ClaudeCodeEngine {
     onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
     cwd?: string,
-    agentSystemPrompt?: string
+    agentConfig?: { name: string; description?: string; systemPrompt?: string; tools?: string[] } | null
   ): Promise<{ response: string; claudeSessionId?: string }> {
     return new Promise((resolve, reject) => {
       // 删除嵌套会话检测的环境变量
@@ -169,31 +169,50 @@ export class ClaudeCodeEngine {
         args.push('--resume', claudeSessionId);
       }
 
-      // 如果有 agent system prompt，注入到消息前面
-      let finalPrompt = prompt;
-      if (agentSystemPrompt) {
-        sendLog('info', 'Using agent system prompt');
-        // 使用 <system-reminder> 格式注入 system prompt
-        finalPrompt = `<system-reminder>
-${agentSystemPrompt}
-</system-reminder>
+      // 如果有 agent 配置，使用 --agents 定义 agent
+      // Claude Code 会根据 description 匹配并创建独立的 subagent 会话
+      if (agentConfig) {
+        sendLog('info', `Defining subagent: ${agentConfig.name}`);
 
-用户请求：${prompt}`;
+        // 构建 agent JSON 配置
+        // 支持的字段：description, prompt, tools
+        const agentJson: {
+          description: string;
+          prompt?: string;
+          tools?: string[];
+        } = {
+          // description 非常重要：决定何时触发 subagent
+          // 使用强制触发格式，确保一定会调用
+          description: `IMMEDIATELY use this agent when the user's request matches. ${agentConfig.description || `${agentConfig.name} agent`}`
+        };
+
+        if (agentConfig.systemPrompt) {
+          agentJson.prompt = agentConfig.systemPrompt;
+        }
+
+        // 工具限制：只允许使用指定的工具
+        if (agentConfig.tools && agentConfig.tools.length > 0) {
+          agentJson.tools = agentConfig.tools;
+        }
+
+        // 使用 --agents 定义 agent（不使用 --agent 切换主会话）
+        args.push('--agents', JSON.stringify({ [agentConfig.name]: agentJson }));
       }
 
-      // Windows 命令行需要用引号包裹包含空格的 prompt
-      args.push(`"${finalPrompt}"`);
+      // 打印完整命令便于调试（不包含 prompt）
+      console.log('[Claude CLI] Command args: claude ' + args.join(' '));
 
-      // 打印完整命令便于调试
-      console.log('[Claude CLI] Full command: claude ' + args.join(' '));
-
-      // 使用 stream-json 格式获取实时流式输出
-      const proc = spawn('claude', args, {
+      // 使用 stdin 传递 prompt，避免 shell 解析多行文本的问题
+      const proc = spawn('claude', [...args, '--'], {
         cwd: cliCwd,
         env,
         shell: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe']  // stdin 可写
       });
+
+      // 通过 stdin 写入 prompt
+      proc.stdin?.write(prompt);
+      proc.stdin?.end();
 
       // 保存当前进程引用以便后续停止
       this.currentProcess = proc;

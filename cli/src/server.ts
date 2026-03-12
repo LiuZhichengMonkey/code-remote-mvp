@@ -139,13 +139,29 @@ export class CodeRemoteServer {
       console.log(chalk.blue('→'), `New connection from ${clientIp}`);
 
       ws.on('message', (data: Buffer, isBinary: boolean) => {
+        // DEBUG: 记录原始消息的完整信息
+        const dataStr = data.toString();
+        console.log(chalk.cyan('[DEBUG]'), `=== WS MESSAGE ===`);
+        console.log(chalk.cyan('[DEBUG]'), `Total data length: ${data.length}`);
+        console.log(chalk.cyan('[DEBUG]'), `isBinary: ${isBinary}`);
+        console.log(chalk.cyan('[DEBUG]'), `String length: ${dataStr.length}`);
+        console.log(chalk.cyan('[DEBUG]'), `Full raw data:\n${dataStr}`);
+        console.log(chalk.cyan('[DEBUG]'), `==================`);
+
         if (isBinary) {
           this.handleBinaryMessage(ws, data);
         } else {
           try {
-            const message: ClientMessage = JSON.parse(data.toString());
+            const message: ClientMessage = JSON.parse(dataStr);
+            // DEBUG: 记录解析后的消息
+            console.log(chalk.cyan('[DEBUG]'), `=== PARSED MESSAGE ===`);
+            console.log(chalk.cyan('[DEBUG]'), `type: ${message.type}`);
+            console.log(chalk.cyan('[DEBUG]'), `content: ${(message as any).content}`);
+            console.log(chalk.cyan('[DEBUG]'), `content length: ${(message as any).content?.length || 0}`);
+            console.log(chalk.cyan('[DEBUG]'), `==================`);
             this.handleMessage(ws, message);
           } catch (error) {
+            console.error(chalk.red('[DEBUG]'), `JSON parse error:`, error);
             this.sendError(ws, 'Invalid message format');
           }
         }
