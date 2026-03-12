@@ -89,6 +89,34 @@ flutter run -d chrome
 
 ## Debug Log
 
+### 2026-03-12 - Agent 模块安全性重构
+
+**变更类型**: Refactor / Security
+
+**影响范围**: `cli/src/agent/` 目录
+
+**安全修复**:
+1. **路径遍历漏洞 (严重)**: `validateAgentName()` 验证 agent 名称只允许 `[a-zA-Z0-9_-]` 字符，防止攻击者通过构造恶意名称读取任意文件
+2. **TOCTOU 竞态条件**: 使用 `fs.openSync` + `fs.fstatSync` + `fs.readFileSync(fd)` 原子操作，防止符号链接攻击
+3. **日志敏感信息泄露**: 添加 `debugLog()` 函数，生产环境隐藏完整路径
+
+**代码质量改进**:
+1. **YAML 解析增强**: 支持多行值（`|` 和 `>`）和引号包裹的值
+2. **错误处理完善**: `scanAgentDirectory()` 提取为独立函数，添加 try-catch 处理权限错误
+3. **输入验证**: `normalizeMessage()` 处理 null/undefined/非字符串输入
+4. **Unicode 安全**: `safeTruncate()` 正确处理多字节字符截断
+5. **类型守卫**: 添加 `isValidAgentContext()` 验证上下文对象
+6. **废弃函数处理**: `parseAgentConfig`、`loadAgentConfig`、`loadAgentMemory` 现在抛出明确错误
+7. **默认工具常量化**: `DEFAULT_TOOLS` 提取为常量
+
+**Files Changed**:
+- `cli/src/agent/config.ts` - 安全验证、TOCTOU 修复、YAML 解析增强、错误处理
+- `cli/src/agent/context.ts` - host 加载失败抛出明确错误、Unicode 安全截断、工具常量
+- `cli/src/agent/parser.ts` - 输入验证、性能优化（单次正则替换）
+- `cli/src/agent/types.ts` - 添加类型守卫函数
+
+---
+
 ### 2026-03-11 - Agent 系统 & 体验优化
 
 **新功能**:

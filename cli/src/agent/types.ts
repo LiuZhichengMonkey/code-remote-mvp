@@ -1,33 +1,26 @@
 /**
  * Agent 配置类型定义
+ * 简化版：只支持 Claude Code 原生格式
  */
 
-export interface AgentMcpServer {
-  name: string;
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}
-
+/**
+ * Agent 配置（简化版，对应 .claude/agents/*.md 格式）
+ */
 export interface AgentConfig {
   name: string;
   description?: string;
   systemPrompt?: string;
   tools?: string[];           // 可用工具列表
-  mcpServers?: AgentMcpServer[];  // MCP 服务器配置
-  model?: string;             // 指定模型
-  temperature?: number;       // 温度参数
-  // 协作配置
-  role?: 'host' | 'expert' | 'both';  // 角色：主持人/专家/两者皆可
-  expertise?: string[];       // 专长领域
+  // 简化的 subagent 配置
+  subagent?: {
+    type: 'prompt';  // 使用 prompt 模式，让 Claude Code 自动委托
+  };
 }
 
 export interface AgentContext {
   config: AgentConfig;
-  memory?: string;            // 记忆内容
-  skills?: string[];          // 技能列表
-  basePath: string;           // Agent 目录路径
-  source: 'project' | 'user'; // 来源：项目内 or 用户目录
+  basePath: string;           // Agent 文件路径
+  source: 'project' | 'user' | 'parent'; // 来源
 }
 
 export interface ParsedAgents {
@@ -42,11 +35,27 @@ export interface AgentCollaboration {
   systemPrompt: string;           // 合并后的 system prompt
 }
 
-// Agent 目录结构
-export const AGENT_DIR_NAME = '.agents';
-export const USER_AGENT_DIR_NAME = '.coderemote/agents';
-
-// 配置文件名
-export const CONFIG_FILE = 'config.yaml';
+// 目录常量（保留兼容性）
+export const AGENT_DIR_NAME = '.claude/agents';
+export const USER_AGENT_DIR_NAME = '.claude/agents';
+export const CONFIG_FILE = 'agent.md';
 export const MEMORY_FILE = 'memory.md';
 export const SKILLS_DIR = 'skills';
+
+/**
+ * 类型守卫：验证 AgentContext 对象
+ */
+export function isValidAgentContext(context: unknown): context is AgentContext {
+  if (!context || typeof context !== 'object') return false;
+
+  const c = context as AgentContext;
+  return (
+    typeof c.config === 'object' &&
+    c.config !== null &&
+    typeof c.config.name === 'string' &&
+    c.config.name.length > 0 &&
+    typeof c.basePath === 'string' &&
+    c.basePath.length > 0 &&
+    ['project', 'user', 'parent'].includes(c.source)
+  );
+}

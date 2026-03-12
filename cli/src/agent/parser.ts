@@ -6,6 +6,20 @@
 import { ParsedAgents } from './types';
 
 /**
+ * 验证并规范化消息输入
+ */
+function normalizeMessage(message: unknown): string {
+  if (message === null || message === undefined) {
+    return '';
+  }
+  if (typeof message !== 'string') {
+    console.warn('[Agent] parseAgentMentions: message is not a string, converting');
+    return String(message);
+  }
+  return message;
+}
+
+/**
  * 从消息中解析 @agent 语法
  *
  * 示例：
@@ -14,15 +28,26 @@ import { ParsedAgents } from './types';
  * - "普通消息" -> { hostAgent: null, expertAgents: [], cleanMessage: "普通消息" }
  */
 export function parseAgentMentions(message: string): ParsedAgents {
+  // 输入验证
+  const normalizedMessage = normalizeMessage(message);
+
+  if (!normalizedMessage.trim()) {
+    return {
+      hostAgent: null,
+      expertAgents: [],
+      cleanMessage: ''
+    };
+  }
+
   // 匹配 @agent 名：字母、数字、下划线、连字符
   const agentRegex = /@([a-zA-Z0-9_-]+)/g;
-  const matches = [...message.matchAll(agentRegex)];
+  const matches = [...normalizedMessage.matchAll(agentRegex)];
 
   if (matches.length === 0) {
     return {
       hostAgent: null,
       expertAgents: [],
-      cleanMessage: message.trim()
+      cleanMessage: normalizedMessage.trim()
     };
   }
 
@@ -33,12 +58,8 @@ export function parseAgentMentions(message: string): ParsedAgents {
   const hostAgent = agentNames[0];
   const expertAgents = agentNames.slice(1);
 
-  // 移除所有 @agent 标记
-  let cleanMessage = message;
-  for (const match of matches) {
-    cleanMessage = cleanMessage.replace(match[0], '');
-  }
-  cleanMessage = cleanMessage.replace(/\s+/g, ' ').trim();
+  // 批量移除所有 @agent 标记（单次正则替换，更高效）
+  const cleanMessage = normalizedMessage.replace(/@[a-zA-Z0-9_-]+/g, '').replace(/\s+/g, ' ').trim();
 
   return {
     hostAgent,
@@ -51,17 +72,23 @@ export function parseAgentMentions(message: string): ParsedAgents {
  * 检查消息是否包含 @agent
  */
 export function hasAgentMention(message: string): boolean {
-  return /@[a-zA-Z0-9_-]+/.test(message);
+  const normalizedMessage = normalizeMessage(message);
+  return /@[a-zA-Z0-9_-]+/.test(normalizedMessage);
 }
 
 /**
  * 从消息中提取所有 agent 名称
  */
 export function extractAgentNames(message: string): string[] {
+  const normalizedMessage = normalizeMessage(message);
+  if (!normalizedMessage.trim()) {
+    return [];
+  }
+
   const regex = /@([a-zA-Z0-9_-]+)/g;
   const names: string[] = [];
   let match;
-  while ((match = regex.exec(message)) !== null) {
+  while ((match = regex.exec(normalizedMessage)) !== null) {
     names.push(match[1].toLowerCase());
   }
   return names;
