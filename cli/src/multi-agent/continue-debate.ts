@@ -88,6 +88,7 @@ async function continueDebate() {
   debate.setLLMAdapter(adapter);
 
   // 订阅事件
+  let debateCompleted = false;
   debate.subscribe((event) => {
     switch (event.type) {
       case 'speech':
@@ -114,6 +115,7 @@ async function continueDebate() {
 
       case 'debate_complete':
         console.log(`\n🎉 辩论结束！`);
+        debateCompleted = true;
         break;
     }
   });
@@ -121,8 +123,11 @@ async function continueDebate() {
   console.log('\n🚀 继续讨论...\n');
 
   // 运行辩论
-  let round = stateData.round;
+  // 使用黑板中的轮次，而不是保存文件中的轮次
+  let round = debate.getBlackboard().round;
   const maxRounds = 10;
+
+  console.log(`📊 当前黑板轮次: ${round}, 最大轮次: ${maxRounds}`);
 
   while (debate.getState().status === 'running' && round < maxRounds) {
     round++;
@@ -131,7 +136,16 @@ async function continueDebate() {
     console.log('═'.repeat(60));
 
     await debate.runRound();
+
+    // 更新轮次（黑板中的轮次已在 runRound 中更新）
+    round = debate.getBlackboard().round;
   }
+
+  // 检查辩论是否完成
+  const finalState = debate.getState();
+  debateCompleted = finalState.status === 'completed';
+
+  console.log(`\n📋 最终状态: ${finalState.status}, 轮次: ${round}, 分数: ${debate.getBlackboard().consensusScore}/100`);
 
   // 最终统计
   console.log('\n' + '='.repeat(60));
@@ -163,6 +177,38 @@ async function continueDebate() {
   console.log(`  输入费用: $${inputCost.toFixed(6)}`);
   console.log(`  输出费用: $${outputCost.toFixed(6)}`);
   console.log(`  总费用: $${totalCost.toFixed(6)}`);
+
+  // 保存最终报告
+  if (debateCompleted) {
+    console.log('\n📄 辩论已完成，保存最终报告...');
+
+    const finalBoard = debate.getBlackboard();
+
+    // 先保存最终状态
+    saveDebateState(stateData.debateSessionId, round, debate);
+
+    // 保存 Markdown 报告
+    const mdReport = debate.exportMarkdownReport();
+    const mdReportFile = path.join(sessionsDir, `${stateData.debateSessionId}_report.md`);
+    fs.writeFileSync(mdReportFile, mdReport, 'utf-8');
+    console.log(`  ✅ Markdown 报告: ${mdReportFile}`);
+
+    // 保存 JSON 报告
+    const jsonReport = {
+      debateSessionId: stateData.debateSessionId,
+      completedAt: new Date().toISOString(),
+      finalReport: debate.getFinalReport(),
+      blackboard: finalBoard,
+      tokenUsage: finalUsage,
+      speeches: debate.getState().speeches
+    };
+    const jsonReportFile = path.join(sessionsDir, `${stateData.debateSessionId}_final.json`);
+    fs.writeFileSync(jsonReportFile, JSON.stringify(jsonReport, null, 2), 'utf-8');
+    console.log(`  ✅ JSON 报告: ${jsonReportFile}`);
+  } else {
+    console.log('\n⏳ 辩论未完成，已保存当前状态');
+    saveDebateState(stateData.debateSessionId, round, debate);
+  }
 
   return finalUsage;
 }

@@ -566,19 +566,91 @@ ${blackboard.historySummary || '首轮讨论，暂无历史'}
       this.session.speeches
     );
 
+    const finalReport: FinalReport = {
+      coreConclusion: this.session.blackboard.currentTopic,
+      perspectives: Object.values(this.session.blackboard.agentInsights),
+      risks: this.session.blackboard.coreClashes,
+      facts: this.session.blackboard.verifiedFacts,
+      totalRounds: this.session.blackboard.round,
+      finalScore: this.session.blackboard.consensusScore,
+      detailedReport: report
+    };
+
+    // 保存最终报告到会话
+    (this.session as any).finalReport = finalReport;
+
     // 发送完成事件
     this.emit({
       type: 'debate_complete',
-      data: {
-        coreConclusion: this.session.blackboard.currentTopic,
-        perspectives: Object.values(this.session.blackboard.agentInsights),
-        risks: this.session.blackboard.coreClashes,
-        facts: this.session.blackboard.verifiedFacts,
-        totalRounds: this.session.blackboard.round,
-        finalScore: this.session.blackboard.consensusScore
-      } as FinalReport,
+      data: finalReport,
       timestamp: Date.now()
     });
+  }
+
+  /**
+   * 获取最终报告
+   */
+  getFinalReport(): FinalReport | null {
+    return (this.session as any).finalReport || null;
+  }
+
+  /**
+   * 导出完整报告为 Markdown
+   */
+  exportMarkdownReport(): string {
+    const report = (this.session as any).finalReport;
+    const blackboard = this.session.blackboard;
+
+    let md = `# 多智能体辩论报告\n\n`;
+    md += `> 生成时间: ${new Date().toLocaleString('zh-CN')}\n\n`;
+
+    md += `## 基本信息\n\n`;
+    md += `| 项目 | 值 |\n`;
+    md += `|------|----|\n`;
+    md += `| 辩论 ID | ${this.session.id} |\n`;
+    md += `| 原始问题 | ${this.session.originalQuestion} |\n`;
+    md += `| 总轮次 | ${blackboard.round} |\n`;
+    md += `| 最终得分 | ${blackboard.consensusScore}/100 |\n`;
+    md += `| 专家 | ${this.session.customExpert?.name || '无'} |\n\n`;
+
+    md += `## 核心结论\n\n`;
+    md += `${blackboard.currentTopic}\n\n`;
+
+    if (report?.detailedReport) {
+      md += `${report.detailedReport}\n\n`;
+    }
+
+    md += `## 各方见解\n\n`;
+    for (const [agent, insight] of Object.entries(blackboard.agentInsights)) {
+      md += `### ${agent}\n\n`;
+      md += `${insight}\n\n`;
+    }
+
+    md += `## 已验证事实\n\n`;
+    if (blackboard.verifiedFacts.length > 0) {
+      for (const fact of blackboard.verifiedFacts) {
+        md += `- ${fact}\n`;
+      }
+    } else {
+      md += `_暂无_\n`;
+    }
+    md += `\n`;
+
+    md += `## 待解决问题\n\n`;
+    if (blackboard.coreClashes.length > 0) {
+      for (const clash of blackboard.coreClashes) {
+        md += `- ${clash}\n`;
+      }
+    } else {
+      md += `_全部解决_\n`;
+    }
+    md += `\n`;
+
+    md += `## 完整辩论记录\n\n`;
+    md += `---\n\n`;
+    md += `_共 ${this.session.speeches.length} 条发言_\n`;
+
+    return md;
   }
 
   /**

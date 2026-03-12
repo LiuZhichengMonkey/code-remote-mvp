@@ -103,6 +103,8 @@ export interface FinalReport {
   totalRounds: number;
   /** 最终得分 */
   finalScore: number;
+  /** 详细报告（Markdown 格式） */
+  detailedReport?: string;
 }
 
 /**

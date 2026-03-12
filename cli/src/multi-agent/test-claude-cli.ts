@@ -57,6 +57,7 @@ async function runClaudeCLITest() {
   debate.setLLMAdapter(adapter);
 
   // 订阅事件
+  let debateCompleted = false;
   debate.subscribe((event) => {
     switch (event.type) {
       case 'speech':
@@ -81,6 +82,7 @@ async function runClaudeCLITest() {
 
       case 'debate_complete':
         console.log(`\n🎉 辩论结束！`);
+        debateCompleted = true;
         break;
     }
   });
@@ -120,6 +122,10 @@ async function runClaudeCLITest() {
     // 每轮结束后保存状态
     saveDebateState();
   }
+
+  // 检查辩论是否完成
+  const finalState = debate.getState();
+  debateCompleted = finalState.status === 'completed';
 
   // 最终统计
   console.log('\n' + '='.repeat(60));
@@ -173,6 +179,36 @@ async function runClaudeCLITest() {
   console.log('\n📝 最终黑板状态:');
   const finalBoard = debate.getBlackboard();
   console.log(JSON.stringify(finalBoard, null, 2));
+
+  // 保存最终报告
+  if (debateCompleted) {
+    console.log('\n📄 辩论已完成，保存最终报告...');
+
+    const finalBoard = debate.getBlackboard();
+
+    // 保存 Markdown 报告
+    const mdReport = debate.exportMarkdownReport();
+    const mdReportFile = path.join(sessionsDir, `${adapter.getDebateSessionId()}_report.md`);
+    fs.writeFileSync(mdReportFile, mdReport, 'utf-8');
+    console.log(`  ✅ Markdown 报告: ${mdReportFile}`);
+
+    // 保存 JSON 报告
+    const jsonReport = {
+      debateSessionId: adapter.getDebateSessionId(),
+      completedAt: new Date().toISOString(),
+      finalReport: debate.getFinalReport(),
+      blackboard: finalBoard,
+      tokenUsage: finalUsage,
+      speeches: debate.getState().speeches
+    };
+    const jsonReportFile = path.join(sessionsDir, `${adapter.getDebateSessionId()}_final.json`);
+    fs.writeFileSync(jsonReportFile, JSON.stringify(jsonReport, null, 2), 'utf-8');
+    console.log(`  ✅ JSON 报告: ${jsonReportFile}`);
+  } else {
+    console.log('\n⏳ 辩论未完成（达到最大轮次或未达终止分数）');
+    console.log(`   最终状态: ${finalState.status}`);
+    console.log(`   最终分数: ${debate.getBlackboard().consensusScore}/100`);
+  }
 
   console.log('\n💡 提示: 会话已保存，下次运行时可以恢复之前的辩论上下文');
 
