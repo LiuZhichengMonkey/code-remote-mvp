@@ -593,13 +593,15 @@ export class SubagentSessionManager {
   }
 
   /**
-   * 清理所有资源（包括会话映射）
+   * 清理所有资源（包括会话映射和磁盘文件）
    * 会先停止所有正在运行的进程，然后清理数据
-   * 注意：不删除 Claude 会话文件，以便后续讨论复用会话
    */
   cleanupAll(): void {
     // 先停止所有正在运行的进程
     this.stopAll();
+
+    // 收集需要删除的 Claude 会话 ID
+    const claudeSessionIds: string[] = [];
 
     // 清理所有会话记录
     for (const session of this.sessions.values()) {
@@ -611,15 +613,21 @@ export class SubagentSessionManager {
           // 忽略终止失败
         }
       }
+      // 收集 Claude 会话 ID
+      if (session.claudeSessionId) {
+        claudeSessionIds.push(session.claudeSessionId);
+      }
     }
 
-    // 不删除会话文件，保留以便后续复用
-    // 只清理内存中的映射
+    // 删除磁盘上的专家会话文件
+    this.deleteSessionFiles(claudeSessionIds);
+
+    // 清理内存中的数据
     this.sessions.clear();
-    // 保留 agentSessionMap 以便下次讨论复用
-    // this.agentSessionMap.clear();
+    // 同时清除 agentSessionMap，避免下次尝试恢复已删除的会话
+    this.agentSessionMap.clear();
     this.totalTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-    console.log('[SubagentSessionManager] cleanupAll completed: sessions cleared, processes stopped, agentSessionMap preserved for reuse');
+    console.log('[SubagentSessionManager] cleanupAll completed: sessions cleared, files deleted, agentSessionMap cleared');
   }
 
   /**
