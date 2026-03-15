@@ -49,7 +49,7 @@ describe('ImageHandler', () => {
 
     await expect(
       imageHandler.handleImage('client1', largeBuffer, meta)
-    ).rejects.toThrow('图片过大');
+    ).rejects.toThrow('文件过大');
   });
 
   test('应该拒绝不支持的文件类型', async () => {
@@ -72,7 +72,7 @@ describe('ImageHandler', () => {
     const name2 = imageHandler.generateFileName('test.png');
 
     expect(name1).not.toBe(name2);
-    expect(name1).toMatch(/^image_\d{8}_\d{9}\.png$/);
+    expect(name1).toMatch(/^test_\d{8}_\d{9}\.png$/);
   });
 
   test('应该自动创建保存目录', async () => {

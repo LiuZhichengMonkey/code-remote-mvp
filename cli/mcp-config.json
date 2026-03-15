@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "MiniMax": {
+      "command": "C:\\Users\\TheCheng\\.local\\bin\\uvx.exe",
+      "args": ["minimax-coding-plan-mcp"],
+      "env": {
+        "MINIMAX_API_KEY": "sk-cp-XE75U1g6wOzCSjukGNPd8kFeGUvh3nBUGAVZ4KKS8r49PkIkqlr2SVLXP2lLtErzN3Tks6RaWBWk0iwUVRkBTr1gk1eRcMemECf8mnExq4F4f2rNLCkNamg",
+        "MINIMAX_API_HOST": "https://api.minimaxi.com"
+      }
+    }
+  }
+}

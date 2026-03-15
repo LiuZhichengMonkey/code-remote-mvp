@@ -183,7 +183,11 @@
         function e(){
             const i=document.getElementById('mi'),
                   c=i.value.trim();
+            console.log('[CLIENT DEBUG] Input value:', i.value);
+            console.log('[CLIENT DEBUG] Trimmed content:', c);
+            console.log('[CLIENT DEBUG] Content length:', c.length);
             if(!c||!I)return;
+            console.log('[CLIENT DEBUG] Sending:', {type:'message',content:c});
             w.send(JSON.stringify({type:'message',content:c}));
             x(c,'sent');
             i.value=''

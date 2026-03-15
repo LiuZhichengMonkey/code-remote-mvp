@@ -1346,6 +1346,7 @@ export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [runningSessions, setRunningSessions] = useState<Set<string>>(new Set()); // Track running sessions by ID
+  const [runningSessionsInfo, setRunningSessionsInfo] = useState<Map<string, { title: string; projectId?: string }>>(new Map()); // Store session info
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set()); // Track completed sessions (for notification)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1609,14 +1610,43 @@ export default function App() {
           setIsConnecting(false);
           console.error('Auth failed');
           newWs.close();
+        } else if (msg.type === 'running_sessions') {
+          // 重连时收到所有运行中会话的信息
+          console.log('Running sessions on server:', msg.sessions);
+          if (msg.sessions && Array.isArray(msg.sessions)) {
+            const newRunningSet = new Set<string>();
+            const newInfoMap = new Map<string, { title: string; projectId?: string }>();
+
+            msg.sessions.forEach((s: { sessionId: string; title: string; projectId?: string }) => {
+              newRunningSet.add(s.sessionId);
+              newInfoMap.set(s.sessionId, { title: s.title, projectId: s.projectId });
+            });
+
+            setRunningSessions(newRunningSet);
+            setRunningSessionsInfo(newInfoMap);
+
+            // 如果有运行中的会话，自动切换到第一个
+            if (msg.sessions.length > 0) {
+              const firstSession = msg.sessions[0];
+              setCurrentSessionId(firstSession.sessionId);
+              currentSessionIdRef.current = firstSession.sessionId;
+              console.log('Reconnected to running session:', firstSession.sessionId);
+            }
+          }
         } else if (msg.type === 'session_running') {
-          // 重连时发现有运行中的会话
+          // 兼容旧格式：单个运行中会话
           console.log('Session running on server:', msg.sessionId);
           if (msg.sessionId) {
-            // 自动切换到运行中的会话
             setCurrentSessionId(msg.sessionId);
             currentSessionIdRef.current = msg.sessionId;
             setRunningSessions(prev => new Set(prev).add(msg.sessionId));
+            if (msg.title) {
+              setRunningSessionsInfo(prev => {
+                const next = new Map(prev);
+                next.set(msg.sessionId, { title: msg.title, projectId: msg.projectId });
+                return next;
+              });
+            }
             console.log('Reconnected to running session:', msg.sessionId);
           }
         } else if (msg.type === 'discussion_running') {
@@ -1734,6 +1764,12 @@ export default function App() {
                 next.delete(sessionId);
                 return next;
               });
+              // 同时清除运行中会话的信息
+              setRunningSessionsInfo(prev => {
+                const next = new Map(prev);
+                next.delete(sessionId);
+                return next;
+              });
               // 标记为已完成
               setCompletedSessions(prev => new Set(prev).add(sessionId));
 
@@ -1768,6 +1804,12 @@ export default function App() {
               const next = new Set(prev);
               next.delete(doneSessionId);
               console.log('[RunningSessions] After:', Array.from(next));
+              return next;
+            });
+            // 同时清除运行中会话的信息
+            setRunningSessionsInfo(prev => {
+              const next = new Map(prev);
+              next.delete(doneSessionId);
               return next;
             });
             // Mark as completed for notification
@@ -2554,6 +2596,13 @@ export default function App() {
       return next;
     });
 
+    // Also save session info for the running session
+    setRunningSessionsInfo(prev => {
+      const next = new Map(prev);
+      next.set(sessionId, { title: text.substring(0, 30), projectId: currentProjectId || undefined });
+      return next;
+    });
+
     console.log('Sending message to WebSocket, sessionId:', sessionId, 'projectId:', currentProjectId);
 
     // Send to WebSocket with session info
@@ -2883,21 +2932,31 @@ export default function App() {
             {runningSessions.size > 0 && (
               <div className="w-full max-w-md mb-6 space-y-2">
                 {Array.from(runningSessions).map(sessionId => {
-                  // 从 sessions 或 projectSessions 中查找会话信息
-                  let sessionInfo = sessions.find(s => s.id === sessionId);
-                  let projectId: string | undefined;
-                  if (!sessionInfo) {
-                    // 在 projectSessions 中查找
-                    for (const [pid, sessionList] of Object.entries(projectSessions)) {
-                      const found = sessionList.find(s => s.id === sessionId);
-                      if (found) {
-                        sessionInfo = found;
-                        projectId = pid;
-                        break;
+                  // 优先使用 runningSessionsInfo，否则从 sessions/projectSessions 查找
+                  const infoFromMap = runningSessionsInfo.get(sessionId);
+                  let title = infoFromMap?.title;
+                  let projectId = infoFromMap?.projectId;
+
+                  if (!title) {
+                    const sessionInfo = sessions.find(s => s.id === sessionId);
+                    if (sessionInfo) {
+                      title = sessionInfo.title;
+                    } else {
+                      // 在 projectSessions 中查找
+                      for (const [pid, sessionList] of Object.entries(projectSessions)) {
+                        const found = sessionList.find(s => s.id === sessionId);
+                        if (found) {
+                          title = found.title;
+                          projectId = pid;
+                          break;
+                        }
                       }
                     }
                   }
-                  const title = sessionInfo?.title || sessionId.substring(0, 12);
+
+                  // 最终使用 ID 前缀作为备用标题
+                  const displayTitle = title || sessionId.substring(0, 12);
+
                   return (
                     <motion.div
                       key={sessionId}
@@ -2905,6 +2964,14 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="flex items-center gap-3 p-3 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20 cursor-pointer hover:border-accent/40 transition-colors"
                       onClick={() => {
+                        // 发送 session_focus 消息切换活跃会话
+                        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                          wsRef.current.send(JSON.stringify({
+                            type: 'session_focus',
+                            sessionId: sessionId
+                          }));
+                        }
+                        // 恢复会话
                         resumeSession(sessionId, projectId);
                         setIsSidebarOpen(false);
                         // 清除完成状态
@@ -2920,7 +2987,7 @@ export default function App() {
                         <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
                       </div>
                       <div className="flex-1 text-left">
-                        <div className="text-sm font-medium text-white truncate">{title}</div>
+                        <div className="text-sm font-medium text-white truncate">{displayTitle}</div>
                         <div className="text-xs text-white/50">运行中 · 点击查看</div>
                       </div>
                       <ChevronRight size={16} className="text-white/30" />

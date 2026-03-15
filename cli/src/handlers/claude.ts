@@ -831,4 +831,8 @@ export class ClaudeHandler {
   getSessionManager(): SessionManager {
     return this.sessionManager;
   }
+
+  getSessionStorage(): import('../claude/storage').SessionStorage {
+    return this.sessionManager.getStorage();
+  }
 }

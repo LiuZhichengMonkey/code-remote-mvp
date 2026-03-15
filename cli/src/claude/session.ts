@@ -129,6 +129,10 @@ export class SessionManager {
     return this.storage.listInfo();
   }
 
+  getStorage(): SessionStorage {
+    return this.storage;
+  }
+
   delete(sessionId: string): boolean {
     if (this.currentSession?.id === sessionId) {
       this.currentSession = null;

@@ -226,12 +226,23 @@ export class DiscussionHandler {
       }
 
       // 运行讨论
+      console.log(chalk.blue('[Discussion] Starting orchestrator.run...'));
       const result = await this.orchestrator.run(session.id);
+      console.log(chalk.green('[Discussion] Orchestrator.run completed'));
+      console.log(chalk.gray('[Discussion] Result:'), {
+        sessionId: result.sessionId,
+        totalRounds: result.totalRounds,
+        totalMessages: result.totalMessages,
+        perspectivesCount: result.perspectives?.length,
+        conclusionLength: result.conclusion?.length
+      });
 
       // 生成主持人总结（用于注入主会话）
       const hostSummary = this.generateHostSummary(result, templates);
+      console.log(chalk.gray('[Discussion] Host summary generated, length:', hostSummary.length));
 
       // 发送结果
+      console.log(chalk.blue('[Discussion] Sending discussion_result...'));
       this.sendMessage(ws, {
         type: 'discussion_result',
         sessionId: session.id,
@@ -241,6 +252,7 @@ export class DiscussionHandler {
         },
         timestamp: Date.now()
       });
+      console.log(chalk.green('[Discussion] discussion_result sent'));
 
       // 持久化讨论结论到会话存储
       if (this.sessionManager) {

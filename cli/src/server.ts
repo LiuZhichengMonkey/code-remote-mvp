@@ -296,24 +296,43 @@ export class CodeRemoteServer {
       // 先清理无效的运行状态（进程已结束但状态残留）
       this.claudeHandler.cleanupStaleSessions();
 
-      // 检查是否有运行中的会话，如果有则恢复消息流
-      // 先检查普通 Claude 会话
-      if (this.claudeHandler.isRunning()) {
-        const runningSessionId = this.claudeHandler.getRunningSessionId();
-        if (runningSessionId) {
-          console.log(chalk.yellow('🔄'), `Reconnecting to running session: ${runningSessionId}`);
-          this.claudeHandler.updateRunningWebSocket(ws);
+      // 检查是否有运行中的会话，发送所有运行中会话的信息
+      const runningSessionIds = this.claudeHandler.getAllRunningSessionIds();
+      if (runningSessionIds.length > 0) {
+        console.log(chalk.yellow('🔄'), `Found ${runningSessionIds.length} running session(s)`);
 
-          // 通知客户端有运行中的会话
-          ws.send(JSON.stringify({
-            type: 'session_running',
-            sessionId: runningSessionId,
-            timestamp: Date.now()
-          }));
-        }
+        // 获取每个运行中会话的详细信息
+        const sessionStorage = this.claudeHandler.getSessionStorage();
+        const runningSessions = runningSessionIds.map(sessionId => {
+          // 尝试加载会话获取标题
+          let title = sessionId.substring(0, 12); // 默认使用 ID 前12位
+          let projectId: string | undefined;
+
+          try {
+            const sessionData = sessionStorage.load(sessionId);
+            if (sessionData && sessionData.title) {
+              title = sessionData.title;
+            }
+          } catch (e) {
+            // 忽略加载错误，使用默认标题
+          }
+
+          return { sessionId, title, projectId };
+        });
+
+        // 发送所有运行中会话的信息
+        ws.send(JSON.stringify({
+          type: 'running_sessions',
+          sessions: runningSessions,
+          timestamp: Date.now()
+        }));
+
+        // 更新所有运行中会话的 WebSocket 连接
+        this.claudeHandler.updateRunningWebSocket(ws);
       }
-      // 再检查讨论会话
-      else if (this.discussionHandler.isRunning()) {
+
+      // 检查讨论会话
+      if (this.discussionHandler.isRunning()) {
         const runningDiscussionId = this.discussionHandler.getRunningDiscussionId();
         if (runningDiscussionId) {
           console.log(chalk.yellow('🔄'), `Reconnecting to running discussion: ${runningDiscussionId}`);

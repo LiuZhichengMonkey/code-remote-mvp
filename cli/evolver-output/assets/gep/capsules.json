@@ -1,0 +1,28 @@
+[
+  {
+    "id": "capsule-claude-code-self-repair",
+    "name": "Claude Code Self Repair",
+    "genes": [
+      "gene-claude-code-error-fix",
+      "gene-claude-code-permission"
+    ],
+    "context": {
+      "priority": "high",
+      "autoApply": true,
+      "requiresConfirmation": false
+    }
+  },
+  {
+    "id": "capsule-claude-code-optimization",
+    "name": "Claude Code Optimization",
+    "genes": [
+      "gene-claude-code-inefficiency",
+      "gene-claude-code-pattern-learn"
+    ],
+    "context": {
+      "priority": "medium",
+      "autoApply": false,
+      "requiresConfirmation": true
+    }
+  }
+]
