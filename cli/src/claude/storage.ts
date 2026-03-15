@@ -81,6 +81,11 @@ export class SessionStorage {
     this.ensureDirectory();
   }
 
+  /** 获取当前项目 ID */
+  getProjectId(): string {
+    return pathToClaudeDir(this.projectPath);
+  }
+
   private ensureDirectory(): void {
     if (!fs.existsSync(CLAUDE_CLI_DIR)) {
       fs.mkdirSync(CLAUDE_CLI_DIR, { recursive: true });

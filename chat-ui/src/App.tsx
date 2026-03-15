@@ -2337,11 +2337,13 @@ export default function App() {
 
   // Resume existing session (supports cross-project)
   const resumeSession = (sessionId: string, projectId?: string) => {
+    console.log('[resumeSession] Called with sessionId:', sessionId, 'projectId:', projectId, 'isConnected:', isConnected);
     if (wsRef.current && isConnected) {
       const msg: any = { type: 'session', action: 'resume', sessionId };
       if (projectId) {
         msg.projectId = projectId;
       }
+      console.log('[resumeSession] Sending resume message:', msg);
       wsRef.current.send(JSON.stringify(msg));
 
       // 通知后端切换活跃会话（用于后台会话优化）
@@ -2349,6 +2351,8 @@ export default function App() {
         type: 'session_focus',
         sessionId: sessionId
       }));
+    } else {
+      console.warn('[resumeSession] Cannot resume - WebSocket not connected');
     }
   };
 
@@ -2937,17 +2941,19 @@ export default function App() {
                   let title = infoFromMap?.title;
                   let projectId = infoFromMap?.projectId;
 
-                  if (!title) {
+                  // 如果 infoFromMap 中没有 title 或 projectId，从其他来源查找
+                  if (!title || !projectId) {
                     const sessionInfo = sessions.find(s => s.id === sessionId);
                     if (sessionInfo) {
-                      title = sessionInfo.title;
-                    } else {
-                      // 在 projectSessions 中查找
+                      if (!title) title = sessionInfo.title;
+                    }
+                    // 在 projectSessions 中查找 projectId 和 title
+                    if (!projectId || !title) {
                       for (const [pid, sessionList] of Object.entries(projectSessions)) {
                         const found = sessionList.find(s => s.id === sessionId);
                         if (found) {
-                          title = found.title;
-                          projectId = pid;
+                          if (!title) title = found.title;
+                          if (!projectId) projectId = pid;
                           break;
                         }
                       }
@@ -2964,13 +2970,7 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="flex items-center gap-3 p-3 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20 cursor-pointer hover:border-accent/40 transition-colors"
                       onClick={() => {
-                        // 发送 session_focus 消息切换活跃会话
-                        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                          wsRef.current.send(JSON.stringify({
-                            type: 'session_focus',
-                            sessionId: sessionId
-                          }));
-                        }
+                        console.log('[RunningTaskCard] Clicked session:', sessionId, 'projectId:', projectId);
                         // 恢复会话
                         resumeSession(sessionId, projectId);
                         setIsSidebarOpen(false);

@@ -309,9 +309,30 @@ export class CodeRemoteServer {
           let projectId: string | undefined;
 
           try {
-            const sessionData = sessionStorage.load(sessionId);
+            // 首先尝试从当前项目加载
+            let sessionData = sessionStorage.load(sessionId);
             if (sessionData && sessionData.title) {
               title = sessionData.title;
+              // 当前项目的 projectId
+              projectId = sessionStorage.getProjectId?.();
+            }
+
+            // 如果当前项目没找到，尝试从所有项目查找
+            if (!sessionData) {
+              const SessionStorage = require('./claude/storage').SessionStorage;
+              const projects = SessionStorage.listAllProjects();
+              for (const project of projects) {
+                try {
+                  const projectSession = SessionStorage.loadSessionFromProject(project.id, sessionId);
+                  if (projectSession) {
+                    if (projectSession.title) title = projectSession.title;
+                    projectId = project.id;
+                    break;
+                  }
+                } catch (e) {
+                  // 忽略加载错误
+                }
+              }
             }
           } catch (e) {
             // 忽略加载错误，使用默认标题
