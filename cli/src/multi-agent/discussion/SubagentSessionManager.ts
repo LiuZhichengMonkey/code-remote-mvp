@@ -6,7 +6,15 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { AgentTemplate } from './types';
+
+/**
+ * Claude 会话文件存储目录
+ */
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
 /**
  * 子会话状态
@@ -591,6 +599,9 @@ export class SubagentSessionManager {
     // 先停止所有正在运行的进程
     this.stopAll();
 
+    // 收集需要删除的 Claude 会话 ID
+    const claudeSessionIds: string[] = [];
+
     // 清理所有会话记录
     for (const session of this.sessions.values()) {
       if (session.process && session.status === 'running') {
@@ -601,12 +612,55 @@ export class SubagentSessionManager {
           // 忽略终止失败
         }
       }
+      // 收集 Claude 会话 ID
+      if (session.claudeSessionId) {
+        claudeSessionIds.push(session.claudeSessionId);
+      }
     }
+
+    // 删除磁盘上的专家会话文件
+    this.deleteSessionFiles(claudeSessionIds);
 
     this.sessions.clear();
     this.agentSessionMap.clear();
     this.totalTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     console.log('[SubagentSessionManager] cleanupAll completed: sessions cleared, processes stopped');
+  }
+
+  /**
+   * 删除磁盘上的会话文件
+   */
+  private deleteSessionFiles(sessionIds: string[]): void {
+    if (sessionIds.length === 0) return;
+
+    let deletedCount = 0;
+    let notFoundCount = 0;
+
+    // 遍历所有项目目录
+    try {
+      const projectDirs = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+      for (const projectDir of projectDirs) {
+        const projectPath = path.join(CLAUDE_PROJECTS_DIR, projectDir);
+        if (!fs.statSync(projectPath).isDirectory()) continue;
+
+        for (const sessionId of sessionIds) {
+          const sessionFile = path.join(projectPath, `${sessionId}.jsonl`);
+          if (fs.existsSync(sessionFile)) {
+            try {
+              fs.unlinkSync(sessionFile);
+              deletedCount++;
+              console.log(`[SubagentSessionManager] Deleted session file: ${sessionId}.jsonl`);
+            } catch (err) {
+              console.error(`[SubagentSessionManager] Failed to delete ${sessionId}.jsonl:`, err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[SubagentSessionManager] Error scanning project directories:', err);
+    }
+
+    console.log(`[SubagentSessionManager] Deleted ${deletedCount} session files, ${notFoundCount} not found`);
   }
 
   /**

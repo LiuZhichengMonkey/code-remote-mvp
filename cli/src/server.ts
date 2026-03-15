@@ -303,30 +303,29 @@ export class CodeRemoteServer {
 
         // 获取每个运行中会话的详细信息
         const sessionStorage = this.claudeHandler.getSessionStorage();
+        const currentProjectId = sessionStorage.getProjectId();
         const runningSessions = runningSessionIds.map(sessionId => {
           // 尝试加载会话获取标题
           let title = sessionId.substring(0, 12); // 默认使用 ID 前12位
-          let projectId: string | undefined;
+          let projectId: string | undefined = currentProjectId; // 默认使用当前项目
 
           try {
             // 首先尝试从当前项目加载
-            let sessionData = sessionStorage.load(sessionId);
+            const sessionData = sessionStorage.load(sessionId);
             if (sessionData && sessionData.title) {
               title = sessionData.title;
-              // 当前项目的 projectId
-              projectId = sessionStorage.getProjectId?.();
-            }
-
-            // 如果当前项目没找到，尝试从所有项目查找
-            if (!sessionData) {
-              const SessionStorage = require('./claude/storage').SessionStorage;
-              const projects = SessionStorage.listAllProjects();
+              console.log(chalk.gray(`  Found session ${sessionId.substring(0, 8)} in current project: ${title}`));
+            } else {
+              // 当前项目没找到，尝试从所有项目查找
+              const SessionStorageClass = require('./claude/storage').SessionStorage;
+              const projects = SessionStorageClass.listAllProjects();
               for (const project of projects) {
                 try {
-                  const projectSession = SessionStorage.loadSessionFromProject(project.id, sessionId);
+                  const projectSession = SessionStorageClass.loadSessionFromProject(project.id, sessionId);
                   if (projectSession) {
                     if (projectSession.title) title = projectSession.title;
                     projectId = project.id;
+                    console.log(chalk.gray(`  Found session ${sessionId.substring(0, 8)} in project ${project.id}: ${title}`));
                     break;
                   }
                 } catch (e) {
@@ -335,7 +334,7 @@ export class CodeRemoteServer {
               }
             }
           } catch (e) {
-            // 忽略加载错误，使用默认标题
+            console.log(chalk.gray(`  Error loading session ${sessionId}: ${e}`));
           }
 
           return { sessionId, title, projectId };
