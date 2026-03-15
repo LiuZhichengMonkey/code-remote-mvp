@@ -1415,9 +1415,34 @@ export default function App() {
     onAddMessage: addMessageToChat,
     onComplete: (result) => {
       console.log('[Discussion] Complete:', result.conclusion?.substring(0, 100));
+      // 从运行中会话集合中移除讨论会话
+      setRunningSessions(prev => {
+        const next = new Set(prev);
+        // 移除所有 discussion_ 开头的会话
+        for (const id of next) {
+          if (id.startsWith('discussion_')) {
+            next.delete(id);
+          }
+        }
+        return next;
+      });
+      // 同时清理 runningSessionsRef
+      runningSessionsRef.current = new Set(Array.from(runningSessionsRef.current).filter(id => !id.startsWith('discussion_')));
     },
     onError: (error) => {
       console.error('[Discussion] Error:', error);
+      // 从运行中会话集合中移除讨论会话
+      setRunningSessions(prev => {
+        const next = new Set(prev);
+        for (const id of next) {
+          if (id.startsWith('discussion_')) {
+            next.delete(id);
+          }
+        }
+        return next;
+      });
+      // 同时清理 runningSessionsRef
+      runningSessionsRef.current = new Set(Array.from(runningSessionsRef.current).filter(id => !id.startsWith('discussion_')));
     },
     onSendToMainSession: (summary, rawResult) => {
       // 讨论结束后，将结果发送到主会话（Claude）
