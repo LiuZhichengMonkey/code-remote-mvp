@@ -15,6 +15,7 @@ import {
   Hash,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   Brain,
   Wifi,
   WifiOff,
@@ -2878,6 +2879,57 @@ export default function App() {
         )}
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center px-8 text-center">
+            {/* 运行中的任务列表 */}
+            {runningSessions.size > 0 && (
+              <div className="w-full max-w-md mb-6 space-y-2">
+                {Array.from(runningSessions).map(sessionId => {
+                  // 从 sessions 或 projectSessions 中查找会话信息
+                  let sessionInfo = sessions.find(s => s.id === sessionId);
+                  let projectId: string | undefined;
+                  if (!sessionInfo) {
+                    // 在 projectSessions 中查找
+                    for (const [pid, sessionList] of Object.entries(projectSessions)) {
+                      const found = sessionList.find(s => s.id === sessionId);
+                      if (found) {
+                        sessionInfo = found;
+                        projectId = pid;
+                        break;
+                      }
+                    }
+                  }
+                  const title = sessionInfo?.title || sessionId.substring(0, 12);
+                  return (
+                    <motion.div
+                      key={sessionId}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="flex items-center gap-3 p-3 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20 cursor-pointer hover:border-accent/40 transition-colors"
+                      onClick={() => {
+                        resumeSession(sessionId, projectId);
+                        setIsSidebarOpen(false);
+                        // 清除完成状态
+                        setCompletedSessions(prev => {
+                          const next = new Set(prev);
+                          next.delete(sessionId);
+                          return next;
+                        });
+                      }}
+                    >
+                      <div className="relative">
+                        <Loader2 className="w-5 h-5 text-accent animate-spin" />
+                        <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
+                      </div>
+                      <div className="flex-1 text-left">
+                        <div className="text-sm font-medium text-white truncate">{title}</div>
+                        <div className="text-xs text-white/50">运行中 · 点击查看</div>
+                      </div>
+                      <ChevronRight size={16} className="text-white/30" />
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
