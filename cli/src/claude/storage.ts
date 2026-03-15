@@ -184,90 +184,51 @@ export class SessionStorage {
             }
           }
 
-          // 处理助手消息 - 需要根据 parentUuid 合并同一回复
+          // 处理助手消息
           if (entry.type === 'assistant' && entry.message) {
             const parentUuid = entry.parentUuid;
             const messageId = entry.message?.id;
 
             let content = '';
-            let thinking = '';
 
             if (typeof entry.message.content === 'string') {
               content = entry.message.content;
             } else {
               for (const block of entry.message.content) {
+                // 只提取 text 内容，跳过 thinking
                 if (block.type === 'text' && block.text) {
                   content += block.text;
                 }
-                if (block.type === 'thinking' && block.thinking) {
-                  thinking += block.thinking;
-                }
+                // 跳过 thinking - 用户不希望在历史记录中看到
               }
             }
 
-            // 根据 parentUuid 合并同一回复的多个部分
-            const mergeKey = parentUuid || messageId || entry.uuid;
+            // 跳过空消息和 "No response requested" 合成消息
+            if (!content || content === 'No response requested.') {
+              continue;
+            }
 
-            if (mergeKey && !messages.find(m => m.id === entry.uuid)) {
-              // 检查是否已存在同一条消息
-              const existingIdx = messages.findIndex(m =>
-                m.id === entry.uuid ||
-                (m as any).mergeKey === mergeKey
-              );
+            // 检查上一条消息是否是助手消息（连续的助手回复合并为一个气泡）
+            const lastMessage = messages[messages.length - 1];
+            if (lastMessage && lastMessage.role === 'assistant') {
+              // 合并到上一条助手消息
+              // 检查是否已存在相同内容，避免重复
+              const contentExists = content && lastMessage.content.includes(content);
 
-              if (existingIdx === -1) {
-                // 新消息
-                // 跳过空消息
-                if (!content && !thinking) {
-                  continue;
-                }
-
-                const msg: ClaudeMessage = {
-                  id: entry.uuid || `assistant-${Date.now()}`,
-                  role: 'assistant',
-                  content: thinking ? `<thinking>${thinking}</thinking>${content}` : content,
-                  timestamp: entryTime,
-                  mergeKey // 标记用于合并
-                } as any;
-                messageMap.set(msg.id, msg);
-                messages.push(msg);
-              } else {
-                // 已有消息，合并内容
-                const existing = messages[existingIdx];
-                const existingContent = existing.content || '';
-                const newContent = thinking ? `<thinking>${thinking}</thinking>${content}` : content;
-
-                if (content && !existingContent.includes(content)) {
-                  // 追加 text 内容
-                  if (existingContent.includes('<thinking>')) {
-                    // 在 </thinking> 之后插入 text
-                    const insertPos = existingContent.indexOf('</thinking>') + '</thinking>'.length;
-                    existing.content = existingContent.slice(0, insertPos) + content + existingContent.slice(insertPos);
-                  } else {
-                    existing.content = existingContent + content;
-                  }
-                }
-                if (thinking && !existingContent.includes(thinking)) {
-                  // 更新 thinking
-                  if (existingContent.includes('<thinking>')) {
-                    const start = existingContent.indexOf('<thinking>') + '<thinking>'.length;
-                    const end = existingContent.indexOf('</thinking>');
-                    existing.content = existingContent.slice(0, start) + thinking + existingContent.slice(end);
-                  } else {
-                    existing.content = `<thinking>${thinking}</thinking>${existingContent}`;
-                  }
+              if (!contentExists && content) {
+                // 追加到末尾，用分隔符分开
+                if (lastMessage.content) {
+                  lastMessage.content += '\n\n---\n\n' + content;
+                } else {
+                  lastMessage.content = content;
                 }
               }
             } else {
-              // 没有 merge key，直接添加
-              if (!content && !thinking) {
-                continue;
-              }
-
+              // 新的助手消息（新的气泡）
               const msg: ClaudeMessage = {
                 id: entry.uuid || `assistant-${Date.now()}`,
                 role: 'assistant',
-                content: thinking ? `<thinking>${thinking}</thinking>${content}` : content,
+                content: content,
                 timestamp: entryTime
               };
               messageMap.set(msg.id, msg);

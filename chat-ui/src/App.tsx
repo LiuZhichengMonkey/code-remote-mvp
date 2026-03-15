@@ -25,13 +25,16 @@ import {
   RefreshCw,
   Trash2,
   Loader2,
-  Sparkles
+  Sparkles,
+  Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { Message, Attachment, ChatSession, ChatOption } from './types';
 import { cn } from './utils';
+import { useDiscussion } from './useDiscussion';
 
 // Simple syntax highlighter for code blocks
 const highlightCode = (code: string, language: string): string => {
@@ -142,6 +145,7 @@ interface WSMessage {
   session?: {
     id: string;
     title: string;
+    summary?: string;
     createdAt?: number;
     messageCount?: number;
     messages?: Message[];
@@ -149,10 +153,25 @@ interface WSMessage {
   sessions?: Array<{
     id: string;
     title: string;
+    summary?: string;
     createdAt: number;
     messageCount: number;
+    messages?: Message[];
   }>;
   projects?: ProjectInfo[];
+  // 日志
+  level?: string;
+  message?: string;
+  timestamp?: number;
+  // 分页
+  hasMore?: boolean;
+  totalMessages?: number;
+  // 会话 ID 更新
+  oldSessionId?: string;
+  newSessionId?: string;
+  title?: string;
+  // 消息加载
+  messages?: Message[];
 }
 
 // --- Connection Panel ---
@@ -352,9 +371,19 @@ const ChatBubble = React.memo(({
 }) => {
   const isUser = message.role === 'user';
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
+  const [isAgentExpanded, setIsAgentExpanded] = useState(false);
 
   let thinkingContent = message.thinking || '';
   let displayContent = message.content;
+
+  // Detect if this is an Agent discussion message (format: "🔍 **代码审查** (Code Reviewer) *R1*\n\n内容")
+  const agentMessageMatch = displayContent.match(/^([^\s]+)\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)(?:\s+\*R(\d+)\*)?\n\n([\s\S]*)$/);
+  const isAgentMessage = !isUser && agentMessageMatch !== null && !isStreaming;
+  const agentIcon = agentMessageMatch?.[1] || '🤖';
+  const agentName = agentMessageMatch?.[2] || 'Agent';
+  const agentRole = agentMessageMatch?.[3] || '';
+  const agentRound = agentMessageMatch?.[4] ? `R${agentMessageMatch[4]}` : '';
+  const agentContent = agentMessageMatch?.[5] || displayContent;
 
   // Parse thinking tags
   const thinkingStartTag = '<thinking>';
@@ -557,9 +586,80 @@ const ChatBubble = React.memo(({
             </div>
           )}
 
+          {/* Agent Discussion Message - Collapsible */}
+          {isAgentMessage && (
+            <div className="mb-1">
+              <button
+                onClick={() => setIsAgentExpanded(!isAgentExpanded)}
+                className="w-full flex items-center justify-between px-3 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">{agentIcon}</span>
+                  <span className="font-semibold text-white">{agentName}</span>
+                  {agentRole && (
+                    <span className="text-white/40 text-sm">({agentRole})</span>
+                  )}
+                  {agentRound && (
+                    <span className="text-xs px-2 py-0.5 bg-accent/20 text-accent rounded-full">{agentRound}</span>
+                  )}
+                </div>
+                <motion.div
+                  animate={{ rotate: isAgentExpanded ? 180 : 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <ChevronDown size={16} className="text-white/40" />
+                </motion.div>
+              </button>
+              <AnimatePresence initial={false}>
+                {isAgentExpanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{
+                      height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
+                      opacity: { duration: 0.2 }
+                    }}
+                    className="overflow-hidden"
+                  >
+                    <div className="markdown-body mt-2 pl-3 border-l-2 border-white/10">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkBreaks]}
+                        components={{
+                          code({ className, children, inline, ...props }: any) {
+                            const match = /language-(\w+)/.exec(className || '');
+                            const codeString = String(children).replace(/\n$/, '');
+                            const isCodeBlock = match || codeString.includes('\n');
+                            if (isCodeBlock && !inline) {
+                              return (
+                                <CodeBlock
+                                  code={codeString}
+                                  language={match ? match[1] : 'text'}
+                                />
+                              );
+                            }
+                            return (
+                              <code className={className} {...props}>
+                                {children}
+                              </code>
+                            );
+                          }
+                        }}
+                      >
+                        {agentContent}
+                      </ReactMarkdown>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* Normal Message Content (not Agent message) */}
+          {!isAgentMessage && (
           <div className="markdown-body">
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={[remarkGfm, remarkBreaks]}
               components={{
                 code({ className, children, inline, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
@@ -582,6 +682,10 @@ const ChatBubble = React.memo(({
                       {children}
                     </code>
                   );
+                },
+                // 处理段落，保留换行
+                p({ children }: any) {
+                  return <p className="whitespace-pre-wrap">{children}</p>;
                 }
               }}
             >
@@ -591,6 +695,7 @@ const ChatBubble = React.memo(({
               <span className="inline-block w-1.5 h-4 ml-1 bg-accent animate-pulse align-middle" />
             )}
           </div>
+          )}
 
           {/* Options (Cards) */}
           {!isStreaming && allChoices.length > 0 && (
@@ -684,6 +789,9 @@ const InputArea = ({
   const [isRecording, setIsRecording] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [skillFilter, setSkillFilter] = useState('');
+  const [showAgents, setShowAgents] = useState(false);
+  const [agentFilter, setAgentFilter] = useState('');
+  const [agentStartPos, setAgentStartPos] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -695,10 +803,30 @@ const InputArea = ({
     { id: 'brainstorm', name: 'Brainstorm', description: '头脑风暴新功能创意', trigger: '/brainstorming' },
   ];
 
+  // Agent 列表
+  const agents = [
+    { id: 'code-reviewer', name: '代码审查', alias: 'code-reviewer', icon: '🔍', color: '#4CAF50', description: '代码质量、bug、最佳实践' },
+    { id: 'architect', name: '架构师', alias: 'architect', icon: '🏗️', color: '#2196F3', description: '系统架构、设计模式' },
+    { id: 'tester', name: '测试专家', alias: 'tester', icon: '🧪', color: '#FF9800', description: '测试覆盖、边缘情况' },
+    { id: 'security', name: '安全专家', alias: 'security', icon: '🔒', color: '#F44336', description: '安全漏洞、认证授权' },
+    { id: 'performance', name: '性能专家', alias: 'performance', icon: '⚡', color: '#9C27B0', description: '性能瓶颈、优化' },
+    { id: 'product', name: '产品经理', alias: 'product', icon: '📊', color: '#00BCD4', description: '产品需求、用户体验' },
+    { id: 'devops', name: '运维专家', alias: 'devops', icon: '🚀', color: '#607D8B', description: '部署、监控、CI/CD' },
+  ];
+
   // 过滤技能
   const filteredSkills = skillFilter
     ? skills.filter(s => s.name.toLowerCase().includes(skillFilter.toLowerCase()) || s.description.toLowerCase().includes(skillFilter.toLowerCase()))
     : skills;
+
+  // 过滤 Agent
+  const filteredAgents = agentFilter
+    ? agents.filter(a =>
+        a.name.includes(agentFilter) ||
+        a.alias.toLowerCase().includes(agentFilter.toLowerCase()) ||
+        a.description.includes(agentFilter)
+      )
+    : agents;
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
@@ -708,11 +836,29 @@ const InputArea = ({
     if (value === '/') {
       setShowSkills(true);
       setSkillFilter('');
+      setShowAgents(false);
     } else if (showSkills && value.startsWith('/')) {
       setSkillFilter(value.slice(1));
     } else if (showSkills && !value.startsWith('/')) {
       setShowSkills(false);
       setSkillFilter('');
+    }
+
+    // 检测是否输入了 @ - Agent 选择
+    const lastAtIndex = value.lastIndexOf('@');
+    if (lastAtIndex !== -1) {
+      // 检查 @ 后面是否有空格（如果有空格，说明 @ 提及已结束）
+      const textAfterAt = value.slice(lastAtIndex + 1);
+      if (!textAfterAt.includes(' ') && !textAfterAt.includes('@')) {
+        setShowAgents(true);
+        setAgentFilter(textAfterAt);
+        setAgentStartPos(lastAtIndex);
+        setShowSkills(false);
+      } else {
+        setShowAgents(false);
+      }
+    } else {
+      setShowAgents(false);
     }
 
     if (textareaRef.current) {
@@ -738,10 +884,35 @@ const InputArea = ({
     }
   };
 
+  // 选择 Agent - 插入 @提及
+  const handleSelectAgent = (agent: typeof agents[0]) => {
+    const value = input;
+    // 替换 @ 后面的文字为选中的 agent 名称
+    const beforeAt = value.slice(0, agentStartPos);
+    const afterFilter = value.slice(agentStartPos + 1 + agentFilter.length);
+    const newValue = beforeAt + '@' + agent.name + ' ' + afterFilter;
+    setInput(newValue);
+    setShowAgents(false);
+    setAgentFilter('');
+
+    // 聚焦回输入框
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      // 移动光标到末尾
+      textareaRef.current?.setSelectionRange(newValue.length, newValue.length);
+    }, 0);
+  };
+
   // 关闭技能弹窗
   const closeSkillsPopup = () => {
     setShowSkills(false);
     setSkillFilter('');
+  };
+
+  // 关闭 Agent 弹窗
+  const closeAgentsPopup = () => {
+    setShowAgents(false);
+    setAgentFilter('');
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -858,7 +1029,7 @@ const InputArea = ({
               value={input}
               onChange={handleTextareaChange}
               onFocus={onFocus}
-              placeholder={isConnected ? "Message... (/ for commands)" : "Connect to start..."}
+              placeholder={isConnected ? "Message... (/ for commands, @ for multi-agent discussion)" : "Connect to start..."}
               className="w-full bg-transparent text-white px-4 py-2.5 resize-none focus:outline-none text-[16px] max-h-[120px] disabled:opacity-50"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -892,6 +1063,35 @@ const InputArea = ({
                         <div className="text-xs text-white/40">{skill.description}</div>
                       </div>
                       <span className="text-xs text-accent font-mono">{skill.trigger}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Agent 选择弹框 */}
+          {showAgents && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
+              <div className="p-2 border-b border-white/10">
+                <span className="text-xs text-white/50">🤖 选择智能体（可多选）</span>
+              </div>
+              <div className="max-h-[280px] overflow-y-auto">
+                {filteredAgents.length === 0 ? (
+                  <div className="p-3 text-xs text-white/40">没有找到匹配的智能体</div>
+                ) : (
+                  filteredAgents.map(agent => (
+                    <button
+                      key={agent.id}
+                      onClick={() => handleSelectAgent(agent)}
+                      className="w-full p-3 text-left hover:bg-white/5 transition-colors flex items-center gap-3"
+                    >
+                      <span className="text-xl" style={{ color: agent.color }}>{agent.icon}</span>
+                      <div className="flex-1">
+                        <div className="text-sm font-medium text-white">{agent.name}</div>
+                        <div className="text-xs text-white/40">{agent.description}</div>
+                      </div>
+                      <span className="text-xs text-white/30 font-mono">@{agent.alias}</span>
                     </button>
                   ))
                 )}
@@ -1162,6 +1362,98 @@ export default function App() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const isLoadingMoreRef = useRef(false);
 
+  // Discussion state - 将讨论消息添加到主聊天
+  const addMessageToChat = useCallback((message: Message) => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) return;
+
+    // 添加到 sessions
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, messages: [...s.messages, message] } : s
+    ));
+
+    // 添加到 projectSessions
+    if (currentProjectId) {
+      setProjectSessions(prev => {
+        const projectList = prev[currentProjectId];
+        if (!projectList) return prev;
+        return {
+          ...prev,
+          [currentProjectId]: projectList.map(s =>
+            s.id === sessionId ? { ...s, messages: [...s.messages, message] } : s
+          )
+        };
+      });
+    }
+  }, [currentProjectId]);
+
+  const discussion = useDiscussion({
+    ws,
+    onAddMessage: addMessageToChat,
+    onComplete: (result) => {
+      console.log('[Discussion] Complete:', result.conclusion?.substring(0, 100));
+    },
+    onError: (error) => {
+      console.error('[Discussion] Error:', error);
+    },
+    onSendToMainSession: (summary, rawResult) => {
+      // 讨论结束后，将结果发送到主会话（Claude）
+      console.log('[Discussion] Sending to main session, summary length:', summary.length);
+      // 延迟发送，确保讨论消息已经显示完成
+      setTimeout(() => {
+        // 自动发送总结到主会话，让 Claude 可以参与互动
+        const summaryMessage = `请基于以下多智能体讨论结果，帮我进行分析和互动：\n\n${summary}`;
+        handleSend(summaryMessage, []);
+      }, 500);
+    },
+    onCreateHostSession: (title, fullRecord) => {
+      // 创建主持人会话保存完整讨论记录
+      console.log('[Discussion] Creating host session:', title);
+      if (wsRef.current && isConnected) {
+        // 保存讨论记录到 pendingHostSessionRef
+        pendingHostSessionRef.current = { title, fullRecord };
+        // 创建新会话
+        wsRef.current.send(JSON.stringify({ type: 'session', action: 'new', title }));
+      }
+    }
+  });
+
+  // Check for @ mentions in input to trigger discussion
+  // Only trigger if the @mention matches a valid agent name
+  const checkForDiscussion = useCallback((text: string): boolean => {
+    const mentionRegex = /@([^\s@]+)/g;
+    const mentions = text.match(mentionRegex);
+
+    if (!mentions || mentions.length === 0) {
+      return false;
+    }
+
+    // Valid agent names (must match backend BUILTIN_TEMPLATES)
+    const validAgents = [
+      '@代码审查', '@code-reviewer', 'codereviewer',
+      '@架构师', '@architect', 'architect',
+      '@测试专家', '@tester', 'tester',
+      '@安全专家', '@security', 'security',
+      '@性能专家', '@performance', 'performance',
+      '@产品经理', '@product', 'product',
+      '@运维专家', '@devops', 'devops'
+    ];
+
+    // Check if any mention matches a valid agent
+    const hasValidMention = mentions.some(mention => {
+      const name = mention.substring(1).toLowerCase(); // Remove @ and normalize
+      return validAgents.some(valid => {
+        const validName = valid.startsWith('@') ? valid.substring(1).toLowerCase() : valid.toLowerCase();
+        return name === validName ||
+               name === validName.replace(/-/g, '') || // code-reviewer -> codereviewer
+               validName.includes(name);
+      });
+    });
+
+    console.log('[checkForDiscussion] text:', text?.substring(0, 50), 'mentions:', mentions, 'hasValidMention:', hasValidMention);
+    return hasValidMention;
+  }, []);
+
   // Find current session from either sessions or projectSessions
   const currentSession = useMemo(() => {
     // First try to find in current project sessions
@@ -1294,6 +1586,41 @@ export default function App() {
           setIsConnecting(false);
           console.error('Auth failed');
           newWs.close();
+        } else if (msg.type === 'session_running') {
+          // 重连时发现有运行中的会话
+          console.log('Session running on server:', msg.sessionId);
+          if (msg.sessionId) {
+            // 自动切换到运行中的会话
+            setCurrentSessionId(msg.sessionId);
+            currentSessionIdRef.current = msg.sessionId;
+            setIsGenerating(true);
+            console.log('Reconnected to running session:', msg.sessionId);
+          }
+        } else if (msg.type === 'discussion_running') {
+          // 重连时发现有运行中的讨论
+          console.log('Discussion running on server:', msg.discussionId);
+          if (msg.discussionId) {
+            setIsGenerating(true);
+
+            // 如果当前没有选中会话，创建一个临时会话来接收讨论消息
+            if (!currentSessionIdRef.current) {
+              const tempSessionId = `discussion_${msg.discussionId}`;
+              const tempSession: ChatSession = {
+                id: tempSessionId,
+                title: '🎯 多智能体讨论进行中...',
+                messages: [],
+                createdAt: Date.now()
+              };
+              setSessions(prev => [tempSession, ...prev]);
+              setCurrentSessionId(tempSessionId);
+              currentSessionIdRef.current = tempSessionId;
+              console.log('[Discussion] Created temp session for running discussion:', tempSessionId);
+            }
+
+            // 恢复讨论状态
+            discussion.restoreRunning(msg.discussionId);
+            console.log('Reconnected to running discussion:', msg.discussionId);
+          }
         } else if (msg.type === 'claude_start') {
           // Claude is starting to respond
           console.log('Claude started responding');
@@ -1446,9 +1773,14 @@ export default function App() {
         } else if (msg.type === 'project_list') {
           // Handle project list from server
           console.log('Received project list:', msg.projects);
-          if (msg.projects) {
+          if (msg.projects && msg.projects.length > 0) {
             setProjects(msg.projects);
             setLoadingProjects(new Set());
+            // Auto-expand the first (most recent) project to show sessions
+            const firstProject = msg.projects[0];
+            setExpandedProjects(prev => new Set(prev).add(firstProject.id));
+            setLoadingProjects(prev => new Set(prev).add(firstProject.id));
+            newWs.send(JSON.stringify({ type: 'session', action: 'list_by_project', projectId: firstProject.id }));
           }
         } else if (msg.type === 'session_list') {
           // Handle session list from server
@@ -1527,8 +1859,18 @@ export default function App() {
             // Clear projectId when creating new session (always in current project)
             setCurrentProjectId(null);
 
+            // If there's a pending host session (discussion record), send it now
+            if (pendingHostSessionRef.current) {
+              const pendingHost = pendingHostSessionRef.current;
+              pendingHostSessionRef.current = null;
+              console.log('[Discussion] Sending discussion record to new host session');
+              // Small delay to ensure state is updated
+              setTimeout(() => {
+                handleSend(pendingHost.fullRecord, []);
+              }, 100);
+            }
             // If there's a pending message, send it now
-            if (pendingMessageRef.current) {
+            else if (pendingMessageRef.current) {
               const pending = pendingMessageRef.current;
               pendingMessageRef.current = null;
               // Small delay to ensure state is updated
@@ -1808,6 +2150,9 @@ export default function App() {
   // Store pending message when waiting for session creation
   const pendingMessageRef = useRef<{ text: string; attachments: Attachment[] } | null>(null);
 
+  // Store pending host session message (for discussion records)
+  const pendingHostSessionRef = useRef<{ title: string; fullRecord: string } | null>(null);
+
   // Send message
   const handleSend = async (text: string, attachments: Attachment[]) => {
     console.log('[handleSend] called with text:', text?.substring(0, 30));
@@ -1825,6 +2170,85 @@ export default function App() {
     const activeWs = wsRef.current;
     if (!activeWs || !isConnected) {
       console.log('Not connected, ws:', activeWs, 'isConnected:', isConnected);
+      return;
+    }
+
+    // Check for @ mentions - trigger discussion mode
+    if (checkForDiscussion(text)) {
+      console.log('[handleSend] Detected @ mentions, starting discussion...');
+
+      // 如果没有当前 session，先创建一个
+      if (!currentSessionIdRef.current) {
+        console.log('[handleSend] No current session for discussion, creating one...');
+        pendingMessageRef.current = { text, attachments: [] };
+        activeWs.send(JSON.stringify({ type: 'session', action: 'new' }));
+        // session 创建后会重新触发 handleSend（通过 pendingMessageRef）
+        // 但这次我们需要特殊处理，所以存储一个标记
+        return;
+      }
+
+      const sessionId = currentSessionIdRef.current;
+
+      // 先添加用户消息到聊天
+      const userMessage: Message = {
+        id: Date.now().toString(),
+        role: 'user',
+        content: text,
+        timestamp: Date.now(),
+        status: 'sent'
+      };
+
+      // 更新 sessions
+      setSessions(prev => {
+        const sessionExists = prev.find(s => s.id === sessionId);
+        if (sessionExists) {
+          return prev.map(s =>
+            s.id === sessionId ? { ...s, messages: [...s.messages, userMessage] } : s
+          );
+        }
+        return [{
+          id: sessionId,
+          title: text.substring(0, 30),
+          messages: [userMessage],
+          createdAt: Date.now()
+        }, ...prev];
+      });
+
+      // 更新 projectSessions
+      if (currentProjectId) {
+        setProjectSessions(prev => {
+          const projectList = prev[currentProjectId] || [];
+          const sessionExists = projectList.find(s => s.id === sessionId);
+          if (sessionExists) {
+            return {
+              ...prev,
+              [currentProjectId]: projectList.map(s =>
+                s.id === sessionId ? { ...s, messages: [...s.messages, userMessage] } : s
+              )
+            };
+          }
+          return {
+            ...prev,
+            [currentProjectId]: [{
+              id: sessionId,
+              title: text.substring(0, 30),
+              messages: [userMessage],
+              createdAt: Date.now()
+            }, ...projectList]
+          };
+        });
+      }
+
+      // 滚动到底部
+      setTimeout(() => {
+        scrollRef.current?.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: 'smooth'
+        });
+      }, 100);
+
+      // 启动讨论
+      discussion.startDiscussion(text, { maxRounds: 3 });
       return;
     }
 
