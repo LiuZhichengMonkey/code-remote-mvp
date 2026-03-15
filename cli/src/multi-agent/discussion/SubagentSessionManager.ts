@@ -343,7 +343,7 @@ export class SubagentSessionManager {
       // 进程结束
       proc.on('close', (code) => {
         clearTimeout(timeout);
-        console.log(`[SubagentManager] ${agent.name} closed, code: ${code}`);
+        console.log(`[SubagentManager] ${agent.name} closed, code: ${code}, output length: ${fullOutput.length}`);
 
         session.output = fullOutput;
         session.endTime = Date.now();
@@ -365,7 +365,7 @@ export class SubagentSessionManager {
           console.log(`[SubagentManager] ${agent.name} tokens: in=${tokenUsage.inputTokens}, out=${tokenUsage.outputTokens}, total=${tokenUsage.totalTokens}`);
         }
 
-        if (code === 0 || fullOutput) {
+        if (code === 0 || fullOutput.length > 0) {
           session.status = 'completed';
           // 通知完成
           if (this.onMessageCallback) {
@@ -374,7 +374,9 @@ export class SubagentSessionManager {
           resolve();
         } else {
           session.status = 'error';
-          session.error = stderr || `Process exited with code ${code}`;
+          const errorMsg = stderr || `Process exited with code ${code}`;
+          console.error(`[SubagentManager] ${agent.name} failed: ${errorMsg}`);
+          session.error = errorMsg;
           reject(new Error(session.error));
         }
       });
@@ -389,8 +391,7 @@ export class SubagentSessionManager {
         reject(err);
       });
 
-      // 立即 resolve（不等待进程结束）
-      resolve();
+      // 不要立即 resolve，等待进程完成
     });
   }
 
