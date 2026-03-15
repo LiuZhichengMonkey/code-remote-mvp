@@ -14,7 +14,9 @@ export type {
   MessagePriority,
   MessageHandler,
   MessageStats,
-  EventBusConfig
+  EventBusConfig,
+  MessageSender,
+  MessageRecipient
 } from './EventBus';
 
 export { MessageQueue } from './MessageQueue';

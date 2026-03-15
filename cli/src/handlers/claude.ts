@@ -4,11 +4,40 @@ import { CommandHandler } from './commands';
 import { SessionStorage, ProjectInfo } from '../claude/storage';
 import { parseAgentMentions, hasAgentMention, listAvailableAgents, loadAgentContext, AgentContext } from '../agent';
 
+/** 单个会话的运行状态 */
+interface SessionRunState {
+  sessionId: string;
+  engine: ClaudeCodeEngine;
+  ws: WebSocket;
+  sessionManager: SessionManager;
+  isRunning: boolean;
+  /** 累积的消息内容（用于后台会话） */
+  accumulatedContent: string;
+  accumulatedThinking: string;
+}
+
 export class ClaudeHandler {
   private engine: ClaudeCodeEngine;
   private sessionManager: SessionManager;
   private commandHandler: CommandHandler;
   private workspaceRoot?: string;
+
+  /** 多会话并发运行状态 - 支持多个会话同时运行 */
+  private runningSessions: Map<string, SessionRunState> = new Map();
+
+  /** 当前活跃的会话 ID（前端正在查看的会话） */
+  private activeSessionId: string | null = null;
+
+  /** 兼容旧接口：获取第一个运行中的会话 */
+  private runningState: {
+    sessionId: string | null;
+    ws: WebSocket | null;
+    isRunning: boolean;
+  } = {
+    sessionId: null,
+    ws: null,
+    isRunning: false
+  };
 
   constructor(workspaceRoot?: string) {
     this.engine = new ClaudeCodeEngine();
@@ -18,10 +47,180 @@ export class ClaudeHandler {
     console.log(`[ClaudeHandler] Workspace: ${workspaceRoot || process.cwd()}`);
   }
 
-  // 停止当前运行的 Claude CLI 进程
+  /**
+   * 检查是否有任何运行中的进程
+   */
+  isRunning(): boolean {
+    return this.runningSessions.size > 0 || this.engine.isRunning();
+  }
+
+  /**
+   * 清理无效的运行状态（进程已结束但状态残留）
+   * 在客户端重连时调用，检查进程是否真的还活着
+   */
+  cleanupStaleSessions(): void {
+    const staleSessions: string[] = [];
+    for (const [sessionId, state] of this.runningSessions) {
+      // 检查 engine 的进程是否真的还在运行
+      if (state.isRunning && !state.engine.isRunning()) {
+        staleSessions.push(sessionId);
+      }
+    }
+    for (const sessionId of staleSessions) {
+      console.log(`[ClaudeHandler] Cleaning up stale session: ${sessionId}`);
+      this.runningSessions.delete(sessionId);
+    }
+    // 同时清理兼容状态
+    if (this.runningState.isRunning && !this.engine.isRunning()) {
+      const hasRunningSession = Array.from(this.runningSessions.values()).some(s => s.isRunning);
+      if (!hasRunningSession) {
+        this.runningState = { sessionId: null, ws: null, isRunning: false };
+      }
+    }
+  }
+
+  /**
+   * 检查指定会话是否在运行
+   */
+  isSessionRunning(sessionId: string): boolean {
+    const state = this.runningSessions.get(sessionId);
+    return state?.isRunning ?? false;
+  }
+
+  /**
+   * 获取运行中的会话 ID（返回第一个）
+   */
+  getRunningSessionId(): string | null {
+    for (const [sessionId, state] of this.runningSessions) {
+      if (state.isRunning) {
+        return sessionId;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 获取所有运行中的会话 ID
+   */
+  getAllRunningSessionIds(): string[] {
+    const ids: string[] = [];
+    for (const [sessionId, state] of this.runningSessions) {
+      if (state.isRunning) {
+        ids.push(sessionId);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * 设置当前活跃的会话（前端正在查看的会话）
+   */
+  setActiveSession(sessionId: string | null): void {
+    console.log(`[ClaudeHandler] Setting active session: ${sessionId}`);
+    this.activeSessionId = sessionId;
+
+    // 如果切回的会话正在运行且有待发送的累积内容，立即发送
+    if (sessionId && this.runningSessions.has(sessionId)) {
+      const state = this.runningSessions.get(sessionId);
+      if (state && state.ws && state.ws.readyState === 1 && (state.accumulatedContent || state.accumulatedThinking)) {
+        console.log(`[ClaudeHandler] Flushing accumulated content for active session: ${sessionId}, content length: ${state.accumulatedContent.length}`);
+        // 发送累积的内容，带上 replace 标志让前端替换而不是追加
+        state.ws.send(JSON.stringify({
+          type: 'claude_stream',
+          content: state.accumulatedContent,
+          thinking: state.accumulatedThinking,
+          done: false,
+          replace: true,  // 标志：替换前端最后一条消息的内容
+          sessionId: sessionId,
+          timestamp: Date.now()
+        }));
+        // 清空累积内容
+        state.accumulatedContent = '';
+        state.accumulatedThinking = '';
+      }
+    }
+  }
+
+  /**
+   * 获取当前活跃的会话 ID
+   */
+  getActiveSession(): string | null {
+    return this.activeSessionId;
+  }
+
+  /**
+   * 检查指定会话是否是活跃会话
+   */
+  isActiveSession(sessionId: string): boolean {
+    return this.activeSessionId === sessionId;
+  }
+
+  /**
+   * 更新运行中会话的 WebSocket（用于重连）
+   */
+  updateRunningWebSocket(ws: WebSocket): boolean {
+    // 更新所有运行中会话的 WebSocket
+    let updated = false;
+    for (const [sessionId, state] of this.runningSessions) {
+      if (state.isRunning) {
+        console.log(`[ClaudeHandler] Updating WebSocket for running session: ${sessionId}`);
+        state.ws = ws;
+        updated = true;
+      }
+    }
+
+    // 兼容旧接口
+    if (this.runningState.isRunning && this.runningState.sessionId) {
+      this.runningState.ws = ws;
+      return true;
+    }
+    return updated;
+  }
+
+  /**
+   * 更新指定会话的 WebSocket
+   */
+  updateSessionWebSocket(sessionId: string, ws: WebSocket): boolean {
+    const state = this.runningSessions.get(sessionId);
+    if (state) {
+      state.ws = ws;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 停止特定会话
+   */
+  stopSession(sessionId: string): boolean {
+    const state = this.runningSessions.get(sessionId);
+    if (state) {
+      console.log(`[ClaudeHandler] Stopping session: ${sessionId}`);
+      state.engine.stop();
+      state.isRunning = false;
+      this.runningSessions.delete(sessionId);
+
+      // 更新兼容状态
+      if (this.runningState.sessionId === sessionId) {
+        this.runningState = { sessionId: null, ws: null, isRunning: false };
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // 停止所有运行的 Claude CLI 进程
   stop(): boolean {
-    console.log('[ClaudeHandler] Stopping Claude CLI process...');
-    return this.engine.stop();
+    console.log('[ClaudeHandler] Stopping all Claude CLI processes...');
+    let stopped = false;
+    for (const [sessionId, state] of this.runningSessions) {
+      state.engine.stop();
+      state.isRunning = false;
+      stopped = true;
+    }
+    this.runningSessions.clear();
+    this.runningState = { sessionId: null, ws: null, isRunning: false };
+    return stopped || this.engine.stop();
   }
 
   async handleClaudeMessage(
@@ -37,6 +236,16 @@ export class ClaudeHandler {
       data: string;
     }>
   ): Promise<void> {
+    // 获取目标会话 ID
+    const targetSessionId = sessionId || this.sessionManager.getCurrent()?.id;
+
+    // 检查目标会话是否已在运行
+    if (targetSessionId && this.isSessionRunning(targetSessionId)) {
+      console.log(`[ClaudeHandler] Session ${targetSessionId} is already running, cannot send new message`);
+      sendError('SESSION_BUSY', '当前会话正在处理中，请等待完成或停止后再发送新消息');
+      return;
+    }
+
     // 检查是否是斜杠命令
     if (content.startsWith('/')) {
       const parsed = this.commandHandler.parseCommand(content);
@@ -122,13 +331,13 @@ export class ClaudeHandler {
     }
 
     // 获取当前会话
-    const currentSession = this.sessionManager.getCurrent();
-    const isNewSession = !currentSession;
+    const session = this.sessionManager.getCurrent();
+    const isNewSession = !session;
 
-    console.log(`[ClaudeHandler] Current session:`, currentSession?.id, 'messages:', currentSession?.messages?.length, 'cwd:', currentSession?.cwd);
+    console.log(`[ClaudeHandler] Current session:`, session?.id, 'messages:', session?.messages?.length, 'cwd:', session?.cwd);
 
     // 如果没有当前会话，先创建一个临时占位（会在收到 Claude CLI session ID 后更新）
-    if (!currentSession) {
+    if (!session) {
       console.log(`[ClaudeHandler] No current session, creating temporary...`);
       // 先创建临时会话，但不保存到存储
       this.sessionManager.createTemporary();
@@ -184,10 +393,57 @@ export class ClaudeHandler {
     // 获取历史消息用于 API 调用
     const messages = this.sessionManager.getMessagesForAPI();
 
+    // 获取当前会话信息（再次获取，因为可能已更新）
+    const sessionInfo = this.sessionManager.getCurrent();
+    // 使用前端传入的 targetSessionId 或从 sessionManager 获取的 ID
+    // 这样确保与前端期望的 sessionId 一致
+    const currentSessionId = targetSessionId || sessionInfo?.id || `temp-${Date.now()}`;
+    console.log(`[ClaudeHandler] Using sessionId: ${currentSessionId} (targetSessionId: ${targetSessionId}, sessionInfo?.id: ${sessionInfo?.id})`);
+
+    // 为每个会话创建独立的运行状态
+    let sessionState = this.runningSessions.get(currentSessionId);
+    if (!sessionState) {
+      sessionState = {
+        sessionId: currentSessionId,
+        engine: new ClaudeCodeEngine(),
+        ws: ws,
+        sessionManager: this.sessionManager,
+        isRunning: false,
+        accumulatedContent: '',
+        accumulatedThinking: ''
+      };
+      this.runningSessions.set(currentSessionId, sessionState);
+      console.log(`[ClaudeHandler] Created new session state for ${currentSessionId}`);
+    } else {
+      console.log(`[ClaudeHandler] Reusing existing session state for ${currentSessionId}, updating ws`);
+    }
+    sessionState.ws = ws;
+    sessionState.isRunning = true;
+    // 重置累积内容
+    sessionState.accumulatedContent = '';
+    sessionState.accumulatedThinking = '';
+
+    // 如果没有活跃会话，将当前会话设为活跃
+    if (!this.activeSessionId) {
+      this.activeSessionId = currentSessionId;
+      console.log(`[ClaudeHandler] Set active session to: ${currentSessionId}`);
+    }
+
+    // 更新兼容状态（用于重连等旧逻辑）
+    this.runningState = {
+      sessionId: currentSessionId,
+      ws: ws,
+      isRunning: true
+    };
+
+    // 保存 sessionId 到局部常量，确保闭包中不会改变
+    const sessionIdForCallbacks = currentSessionId;
+
     // 发送开始信号
     ws.send(JSON.stringify({
       type: 'claude_start',
       messageId: userMessage.id,
+      sessionId: currentSessionId,
       timestamp: Date.now()
     }));
 
@@ -197,15 +453,27 @@ export class ClaudeHandler {
       const claudeSessionId = session?.claudeSessionId;
       const cwd = session?.cwd;
 
+      // 使用会话独立的 engine
+      const sessionEngine = sessionState.engine;
+
       // 调用 Claude
-      const result = await this.engine.sendMessage(
+      const result = await sessionEngine.sendMessage(
         content,
         messages,
         (chunk, done, thinking, toolEvent) => {
+          // 使用会话独立的 WebSocket
+          const state = this.runningSessions.get(sessionIdForCallbacks);
+          const currentWs = state?.ws;
+          if (!currentWs || currentWs.readyState !== 1) return;
+
+          // 检查当前会话是否是活跃会话（前端正在查看的）
+          const isActive = this.isActiveSession(sessionIdForCallbacks);
+
           if (toolEvent) {
-            // 发送工具事件
+            // 工具事件：活跃会话直接发送，后台会话也发送（保持工具可见性）
             const toolData: any = {
               type: 'claude_tool',
+              sessionId: sessionIdForCallbacks,
               timestamp: Date.now()
             };
             if ('toolName' in toolEvent) {
@@ -217,25 +485,65 @@ export class ClaudeHandler {
               toolData.result = toolEvent.result;
               toolData.isError = toolEvent.isError;
             }
-            ws.send(JSON.stringify(toolData));
+            currentWs.send(JSON.stringify(toolData));
           } else {
-            ws.send(JSON.stringify({
-              type: 'claude_stream',
-              content: chunk,
-              thinking: thinking,
-              done,
-              timestamp: Date.now()
-            }));
+            // 内容流：活跃会话直接发送，后台会话累积内容
+            if (isActive) {
+              // 活跃会话：直接发送 + 清空累积内容
+              currentWs.send(JSON.stringify({
+                type: 'claude_stream',
+                content: chunk,
+                thinking: thinking,
+                done,
+                sessionId: sessionIdForCallbacks,
+                timestamp: Date.now()
+              }));
+              // 清空累积内容（如果有的话）
+              if (state) {
+                state.accumulatedContent = '';
+                state.accumulatedThinking = '';
+              }
+            } else {
+              // 后台会话：累积内容
+              if (state) {
+                if (chunk) state.accumulatedContent += chunk;
+                if (thinking) state.accumulatedThinking += thinking;
+
+                // done 时发送完整内容，带上 replace 标志
+                if (done) {
+                  console.log(`[ClaudeHandler] Background session ${sessionIdForCallbacks} completed, sending accumulated content with replace flag`);
+                  currentWs.send(JSON.stringify({
+                    type: 'claude_stream',
+                    content: state.accumulatedContent,
+                    thinking: state.accumulatedThinking,
+                    done: true,
+                    replace: true,  // 标志：替换前端最后一条消息的内容
+                    sessionId: sessionIdForCallbacks,
+                    timestamp: Date.now()
+                  }));
+                  state.accumulatedContent = '';
+                  state.accumulatedThinking = '';
+                }
+              }
+            }
           }
         },
         (log: LogMessage) => {
-          // 发送日志到前端
-          ws.send(JSON.stringify({
-            type: 'claude_log',
-            level: log.level,
-            message: log.message,
-            timestamp: log.timestamp
-          }));
+          // 使用会话独立的 WebSocket
+          const state = this.runningSessions.get(sessionIdForCallbacks);
+          const currentWs = state?.ws;
+          if (!currentWs || currentWs.readyState !== 1) return;
+
+          // 日志只发送给活跃会话
+          if (this.isActiveSession(sessionIdForCallbacks)) {
+            currentWs.send(JSON.stringify({
+              type: 'claude_log',
+              level: log.level,
+              message: log.message,
+              sessionId: sessionIdForCallbacks,
+              timestamp: log.timestamp
+            }));
+          }
         },
         claudeSessionId,
         cwd,
@@ -253,14 +561,24 @@ export class ClaudeHandler {
         this.sessionManager.updateSessionId(result.claudeSessionId);
         console.log(`[ClaudeHandler] Updated session ID to Claude CLI session: ${result.claudeSessionId}`);
 
+        // 只有当会话标题是默认值时才用消息内容更新标题
+        const sessionForTitle = this.sessionManager.getCurrent();
+        const shouldUpdateTitle = !sessionForTitle?.title || sessionForTitle.title === 'New Chat';
+        const newTitle = shouldUpdateTitle ? content.substring(0, 50) : sessionForTitle?.title;
+
         // 通知前端会话 ID 已更新
-        ws.send(JSON.stringify({
-          type: 'session_id_updated',
-          oldSessionId: session?.id,
-          newSessionId: result.claudeSessionId,
-          title: content.substring(0, 50),
-          timestamp: Date.now()
-        }));
+        const state = this.runningSessions.get(sessionIdForCallbacks);
+        const currentWs = state?.ws;
+        if (currentWs && currentWs.readyState === 1) {
+          currentWs.send(JSON.stringify({
+            type: 'session_id_updated',
+            oldSessionId: session?.id,
+            newSessionId: result.claudeSessionId,
+            title: newTitle,
+            sessionId: sessionIdForCallbacks,
+            timestamp: Date.now()
+          }));
+        }
       } else if (result.claudeSessionId && result.claudeSessionId !== claudeSessionId) {
         // 保存 Claude CLI session ID（用于下次恢复会话）
         this.sessionManager.setClaudeSessionId(result.claudeSessionId);
@@ -272,18 +590,41 @@ export class ClaudeHandler {
       this.sessionManager.addMessage(assistantMessage);
 
       // 发送完成信号
-      ws.send(JSON.stringify({
-        type: 'claude_done',
-        messageId: assistantMessage.id,
-        sessionId: this.sessionManager.getCurrent()?.id,
-        claudeSessionId: result.claudeSessionId,
-        timestamp: Date.now()
-      }));
+      const state = this.runningSessions.get(sessionIdForCallbacks);
+      const currentWs = state?.ws;
+      console.log(`[ClaudeHandler] Sending claude_done for session ${sessionIdForCallbacks}, ws exists: ${!!currentWs}, ws ready: ${currentWs?.readyState}`);
+      if (currentWs && currentWs.readyState === 1) {
+        currentWs.send(JSON.stringify({
+          type: 'claude_done',
+          messageId: assistantMessage.id,
+          sessionId: sessionIdForCallbacks,  // Use the actual session ID
+          claudeSessionId: result.claudeSessionId,
+          timestamp: Date.now()
+        }));
+        console.log(`[ClaudeHandler] claude_done sent for session ${sessionIdForCallbacks}`);
+      } else {
+        console.warn(`[ClaudeHandler] Cannot send claude_done for session ${sessionIdForCallbacks}: ws=${!!currentWs}, ready=${currentWs?.readyState}`);
+      }
 
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorCode = this.getErrorCode(errorMsg);
       sendError(errorCode, errorMsg);
+    } finally {
+      // 清除当前会话的运行状态
+      const state = this.runningSessions.get(sessionIdForCallbacks);
+      if (state) {
+        state.isRunning = false;
+        // 从 Map 中删除，表示会话已完成
+        this.runningSessions.delete(sessionIdForCallbacks);
+        console.log(`[ClaudeHandler] Session ${sessionIdForCallbacks} finished, removed from running sessions`);
+      }
+
+      // 更新兼容状态
+      if (this.runningState.sessionId === sessionIdForCallbacks) {
+        this.runningState.isRunning = false;
+        this.runningState.sessionId = null;
+      }
     }
   }
 
@@ -299,7 +640,7 @@ export class ClaudeHandler {
     switch (action) {
       case 'new':
         // 创建临时会话（不保存到存储，等待第一条消息时获取 Claude CLI 的 session ID）
-        const newSession = this.sessionManager.createTemporary();
+        const newSession = this.sessionManager.createTemporary(title);
         ws.send(JSON.stringify({
           type: 'session_created',
           session: {
@@ -333,9 +674,10 @@ export class ClaudeHandler {
         break;
 
       case 'list_by_project':
-        // 列出指定项目的会话
+        // 列出指定项目的会话（加载全部）
         if (projectId) {
-          const projectSessions = SessionStorage.listSessionsByProject(projectId);
+          const sessionLimit = limit || 1000;  // 默认加载全部会话
+          const projectSessions = SessionStorage.listSessionsByProject(projectId, sessionLimit);
           ws.send(JSON.stringify({
             type: 'session_list',
             projectId,
@@ -347,8 +689,8 @@ export class ClaudeHandler {
 
       case 'resume':
         if (sessionId) {
-          // 默认加载最后 20 条消息
-          const loadLimit = limit || 20;
+          // 默认加载最后 3 条消息
+          const loadLimit = limit || 3;
           let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
 
           if (projectId) {

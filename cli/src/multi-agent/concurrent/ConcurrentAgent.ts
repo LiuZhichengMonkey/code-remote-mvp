@@ -8,16 +8,20 @@
  */
 
 import {
-  AgentRole,
+  DebateRole,
   AgentConfig,
-  GlobalBlackboard
+  GlobalBlackboard,
+  AgentContext,
+  AgentResponse
 } from '../types';
 import { BaseAgent } from '../agents';
 import {
   EventBus,
   MessageQueue,
   AgentMessage,
-  MessageHandler
+  MessageHandler,
+  MessageSender,
+  MessageRecipient
 } from '../bus';
 
 /**
@@ -74,7 +78,7 @@ export abstract class ConcurrentAgent extends BaseAgent {
   connect(eventBus: EventBus): void {
     this.eventBus = eventBus;
     this.subscriberId = eventBus.register(
-      this.role,
+      this.role as DebateRole,
       this.createMessageHandler(),
       Array.from(this.topics)
     );
@@ -109,8 +113,8 @@ export abstract class ConcurrentAgent extends BaseAgent {
         return {
           id: `resp_${Date.now()}`,
           type: 'response',
-          from: this.role,
-          to: message.from as any, // 类型转换，确保响应发回发送者
+          from: this.role as MessageSender,
+          to: message.from as MessageRecipient,
           payload: { received: true },
           priority: 'normal',
           timestamp: Date.now(),
@@ -149,7 +153,7 @@ export abstract class ConcurrentAgent extends BaseAgent {
    * 发送消息
    */
   async send(
-    to: AgentRole | 'all' | 'broadcast',
+    to: DebateRole | 'all' | 'broadcast',
     payload: any,
     options?: {
       type?: AgentMessage['type'];
@@ -163,8 +167,8 @@ export abstract class ConcurrentAgent extends BaseAgent {
 
     return this.eventBus.publish({
       type: options?.type || 'event',
-      from: this.role,
-      to,
+      from: this.role as MessageSender,
+      to: to as MessageRecipient,
       topic: options?.topic,
       payload,
       priority: options?.priority || 'normal'
@@ -175,7 +179,7 @@ export abstract class ConcurrentAgent extends BaseAgent {
    * 发送请求并等待响应
    */
   async request(
-    to: AgentRole,
+    to: DebateRole,
     payload: any,
     timeout?: number
   ): Promise<AgentMessage | null> {
@@ -183,7 +187,7 @@ export abstract class ConcurrentAgent extends BaseAgent {
       throw new Error('Agent not connected to event bus');
     }
 
-    return this.eventBus.request(this.role, to, payload, timeout);
+    return this.eventBus.request(this.role as MessageSender, to as MessageRecipient, payload, timeout);
   }
 
   /**
@@ -238,33 +242,36 @@ export function createConcurrentAgent(
     constructor() {
       super({
         name: baseAgent.name,
-        role: baseAgent.role,
+        role: baseAgent.role as DebateRole,
         description: baseAgent.description,
         systemPrompt: baseAgent.systemPrompt,
         tools: baseAgent.tools,
         ...config
       });
 
-      // 复用baseAgent的generateSpeech
+      // 复用baseAgent的invoke方法
       this.handler = async (message: AgentMessage) => {
         const context = typeof message.payload === 'string'
           ? message.payload
           : JSON.stringify(message.payload);
 
-        // 调用原Agent的发言生成
-        const content = await baseAgent.generateSpeech(
-          {} as GlobalBlackboard, // 简化处理
-          context
-        );
+        // 调用原Agent的invoke方法
+        const response = await baseAgent.invoke({
+          blackboard: {} as GlobalBlackboard,
+          history: [],
+          currentStep: 'proposer',
+          round: 0,
+          customContext: { message: context }
+        });
 
         return {
           success: true,
           response: {
             id: `resp_${Date.now()}`,
             type: 'response',
-            from: this.role,
-            to: message.from as any, // 类型转换，确保响应发回发送者
-            payload: { content },
+            from: this.role as MessageSender,
+            to: message.from as MessageRecipient,
+            payload: { content: response.content },
             priority: 'normal',
             timestamp: Date.now(),
             correlationId: message.id
@@ -273,11 +280,8 @@ export function createConcurrentAgent(
       };
     }
 
-    async generateSpeech(
-      blackboard: GlobalBlackboard,
-      context?: string
-    ): Promise<string> {
-      return baseAgent.generateSpeech(blackboard, context);
+    async invoke(context: AgentContext): Promise<AgentResponse> {
+      return baseAgent.invoke(context);
     }
 
     protected async handleMessage(message: AgentMessage): Promise<MessageResult> {

@@ -251,6 +251,7 @@ export class ClaudeCodeEngine {
               // 处理 thinking 内容
               if (delta?.type === 'thinking_delta' && delta.thinking) {
                 const thinkingText = delta.thinking;
+                console.log('[Claude CLI] Thinking delta (length:', thinkingText.length, 'has newlines:', thinkingText.includes('\n') ? 'YES' : 'NO', ')');
                 // 不再每个 delta 都发送 log，避免刷屏
                 fullThinking += thinkingText;
                 // 发送 thinking 更新
@@ -261,7 +262,9 @@ export class ClaudeCodeEngine {
               // 处理文本内容
               else if (delta?.type === 'text_delta' && delta.text) {
                 const text = delta.text;
-                console.log('[Claude CLI] Stream text:', text);
+                // 检查换行符
+                const hasNewlines = text.includes('\n');
+                console.log('[Claude CLI] Stream text:', text.substring(0, 50), '| has newlines:', hasNewlines);
 
                 // 直接发送文本内容，不收集为工具结果
                 // Claude的解释文本应该作为普通内容显示
@@ -292,30 +295,41 @@ export class ClaudeCodeEngine {
               }
             }
             // 处理完整的 assistant 消息 (作为备用)
-            else if (json.type === 'assistant' && json.message?.content) {
-              for (const block of json.message.content) {
-                // 处理 thinking block
-                if (block.type === 'thinking' && block.thinking) {
-                  fullThinking += block.thinking;
-                  if (this.config.streamMode === 'realtime') {
-                    onChunk('', false, block.thinking);
+            else if (json.type === 'assistant') {
+              console.log('[Claude CLI] Assistant message received, has message:', !!json.message, 'has content:', !!json.message?.content);
+              if (json.message?.content) {
+                for (const block of json.message.content) {
+                  console.log('[Claude CLI] Assistant block type:', block.type);
+                  // 处理 thinking block - 只有在流式没有发送过时才发送
+                  if (block.type === 'thinking' && block.thinking) {
+                    const hasNewlines = block.thinking.includes('\n');
+                    console.log('[Claude CLI] Assistant thinking block: length=', block.thinking.length, 'has newlines:', hasNewlines, 'fullThinking length=', fullThinking.length);
+                    // 如果流式已经发送过 thinking，跳过完整消息中的 thinking
+                    if (!fullThinking) {
+                      fullThinking = block.thinking;
+                      if (this.config.streamMode === 'realtime') {
+                        onChunk('', false, block.thinking);
+                      }
+                    }
                   }
-                }
-                // 处理 text block
-                if (block.type === 'text' && block.text) {
-                  const text = block.text;
-                  // 检查文本是否包含 API 错误
-                  if (text.includes('API Error:') || text.includes('429')) {
-                    sendLog('error', `API Error in text: ${text.substring(0, 100)}`);
-                    reject(new Error(text));
-                    proc.kill();
-                    return;
-                  }
-                  // 只有在没有收到流式事件时才使用完整消息
-                  if (!fullResponse) {
-                    fullResponse = text;
-                    if (this.config.streamMode === 'realtime') {
-                      onChunk(text, false);
+                  // 处理 text block
+                  if (block.type === 'text' && block.text) {
+                    const text = block.text;
+                    const hasNewlines = text.includes('\n');
+                    console.log('[Claude CLI] Assistant text block: length=', text.length, 'has newlines:', hasNewlines, 'fullResponse length=', fullResponse.length);
+                    // 检查文本是否包含 API 错误
+                    if (text.includes('API Error:') || text.includes('429')) {
+                      sendLog('error', `API Error in text: ${text.substring(0, 100)}`);
+                      reject(new Error(text));
+                      proc.kill();
+                      return;
+                    }
+                    // 只有在没有收到流式事件时才使用完整消息
+                    if (!fullResponse) {
+                      fullResponse = text;
+                      if (this.config.streamMode === 'realtime') {
+                        onChunk(text, false);
+                      }
                     }
                   }
                 }
@@ -326,6 +340,14 @@ export class ClaudeCodeEngine {
               if (json.is_error) {
                 reject(new Error(json.result || 'Unknown error'));
                 return;
+              }
+              // 调试：检查 result 中的换行符
+              if (json.result) {
+                const hasNewlines = json.result.includes('\n');
+                console.log('[Claude CLI] Result type: length=', json.result.length, 'has newlines:', hasNewlines);
+                if (hasNewlines) {
+                  console.log('[Claude CLI] Result newlines count:', (json.result.match(/\n/g) || []).length);
+                }
               }
               // 提取 session ID
               if (json.session_id) {

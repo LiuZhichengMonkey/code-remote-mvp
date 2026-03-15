@@ -13,7 +13,8 @@ import {
   GlobalBlackboard,
   AgentSpeech,
   FinalReport,
-  AgentRole
+  AgentRole,
+  DebateRole
 } from './types';
 import { BlackboardManager, FluffDetector } from './blackboard';
 import {
@@ -26,6 +27,7 @@ import {
   AgentFactory
 } from './agents';
 import { LLMAdapter, LLMResult, createLLMAdapter, OpenAICompatibleAdapter } from './llm-adapter';
+import { AsyncLock } from './bus/LockManager';
 
 /**
  * Token 使用统计
@@ -57,11 +59,14 @@ export class DebateOrchestrator {
   private session: DebateSession;
   private blackboardManager: BlackboardManager;
   private config: DebateConfig;
-  private agents: Map<AgentRole, BaseAgent> = new Map();
+  private agents: Map<DebateRole, BaseAgent> = new Map();
   private eventHandlers: Set<(event: DebateEvent) => void> = new Set();
   private customExpert?: ExpertAgent;
   private llmAdapter?: LLMAdapter;
   private llmInvoker?: (prompt: string, systemPrompt: string) => Promise<string>;
+
+  // 黑板写入锁（并发保护）
+  private blackboardLock: AsyncLock = new AsyncLock();
 
   // Token 统计
   private tokenUsage: TokenUsage = {
@@ -231,6 +236,12 @@ export class DebateOrchestrator {
 
   /**
    * 运行一轮辩论
+   *
+   * 执行顺序：
+   * - Phase 1（并行）: Proposer + Expert 同时执行
+   * - Phase 2: Skeptic 执行（依赖 Phase 1 结果）
+   * - Phase 3（可选）: FactChecker 执行
+   * - Phase 4: Moderator 结算
    */
   async runRound(): Promise<GlobalBlackboard> {
     if (this.session.status !== 'running') {
@@ -240,23 +251,28 @@ export class DebateOrchestrator {
     const blackboard = this.blackboardManager.getState();
     const round = blackboard.round + 1;
 
-    // Step 1: 建构者发言
-    await this.runStep('proposer', round);
+    // Phase 1: Proposer 和 Expert 并行执行（无依赖）
+    const phase1Tasks: Promise<void>[] = [
+      this.runStep('proposer', round)
+    ];
 
-    // Step 2: 专家补充（如果有）
+    // 如果启用了专家，也并行执行
     if (this.config.enableExpert && this.customExpert) {
-      await this.runStep('expert', round);
+      phase1Tasks.push(this.runStep('expert', round));
     }
 
-    // Step 3: 破坏者质询
+    // 并行执行 Phase 1
+    await Promise.all(phase1Tasks);
+
+    // Phase 2: Skeptic 执行（依赖 Phase 1）
     await this.runStep('skeptic', round);
 
-    // Step 4: 查证员核查（如果有事实争议）
+    // Phase 3: FactChecker 执行（如果有事实争议）
     if (this.config.enableFactChecker && this.hasFactDispute()) {
       await this.runStep('fact-check', round);
     }
 
-    // Step 5: 结算
+    // Phase 4: 结算
     await this.runSettlement(round);
 
     // 更新黑板
@@ -339,21 +355,27 @@ export class DebateOrchestrator {
     // 记录发言（保存到 session 和 blackboard）
     const speech: AgentSpeech = {
       agentName: agent.name,
-      role: agent.role,
+      role: agent.role as DebateRole,  // 辩论场景下角色始终是 DebateRole
       content,
       timestamp: Date.now(),
       round,
       step
     };
 
-    // 保存到 session（持久化，不会被压缩）
-    this.session.speeches.push(speech);
+    // 获取黑板写入锁，确保并发安全
+    await this.blackboardLock.acquire();
+    try {
+      // 保存到 session（持久化，不会被压缩）
+      this.session.speeches.push(speech);
 
-    // 保存到 blackboard（会被压缩）
-    this.blackboardManager.recordSpeech(speech);
+      // 保存到 blackboard（会被压缩）
+      this.blackboardManager.recordSpeech(speech);
 
-    // 更新黑板
-    this.blackboardManager.updateAgentInsight(agent.name, this.extractInsight(content));
+      // 更新黑板
+      this.blackboardManager.updateAgentInsight(agent.name, this.extractInsight(content));
+    } finally {
+      this.blackboardLock.release();
+    }
 
     // 发送事件
     this.emit({
@@ -412,18 +434,24 @@ export class DebateOrchestrator {
     // 记录发言（保存到 session 和 blackboard）
     const speech: AgentSpeech = {
       agentName: moderator.name,
-      role: moderator.role,
+      role: moderator.role as DebateRole,  // moderator 角色始终是 DebateRole
       content,
       timestamp: Date.now(),
       round,
       step: 'settlement'
     };
 
-    // 保存到 session（持久化，不会被压缩）
-    this.session.speeches.push(speech);
+    // 获取黑板写入锁，确保并发安全
+    await this.blackboardLock.acquire();
+    try {
+      // 保存到 session（持久化，不会被压缩）
+      this.session.speeches.push(speech);
 
-    // 保存到 blackboard（会被压缩）
-    this.blackboardManager.recordSpeech(speech);
+      // 保存到 blackboard（会被压缩）
+      this.blackboardManager.recordSpeech(speech);
+    } finally {
+      this.blackboardLock.release();
+    }
 
     // 发送发言事件
     this.emit({
@@ -734,7 +762,7 @@ ${blackboard.historySummary || '首轮讨论，暂无历史'}
   /**
    * 注入人工干预
    */
-  injectHumanInput(input: string, targetRole?: AgentRole): void {
+  injectHumanInput(input: string, targetRole?: DebateRole): void {
     // 将人工干预作为特殊发言记录
     const speech: AgentSpeech = {
       agentName: 'Human',

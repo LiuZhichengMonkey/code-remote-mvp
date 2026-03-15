@@ -7,7 +7,7 @@
  * 3. 主题订阅(topic): 发送给订阅了特定主题的Agent
  */
 
-import { AgentRole } from '../types';
+import { DebateRole } from '../types';
 
 /**
  * 消息类型
@@ -26,12 +26,12 @@ export type MessagePriority = 'high' | 'normal' | 'low';
 /**
  * 消息接收者类型
  */
-export type MessageRecipient = AgentRole | 'all' | 'broadcast' | 'system' | 'user';
+export type MessageRecipient = DebateRole | 'all' | 'broadcast' | 'system' | 'user' | 'custom';
 
 /**
  * 消息发送者类型
  */
-export type MessageSender = AgentRole | 'system' | 'user';
+export type MessageSender = DebateRole | 'system' | 'user' | 'custom';
 
 /**
  * Agent消息结构
@@ -69,7 +69,7 @@ export type MessageHandler = (message: AgentMessage) => Promise<AgentMessage | v
  */
 interface Subscriber {
   id: string;
-  role: AgentRole;
+  role: DebateRole;
   handler: MessageHandler;
   topics: Set<string>;
 }
@@ -82,7 +82,7 @@ export interface MessageStats {
   totalDelivered: number;
   totalFailed: number;
   byType: Map<MessageType, number>;
-  byRole: Map<AgentRole, { sent: number; received: number }>;
+  byRole: Map<DebateRole, { sent: number; received: number }>;
 }
 
 /**
@@ -136,7 +136,7 @@ export class EventBus {
   /**
    * 注册Agent
    */
-  register(role: AgentRole, handler: MessageHandler, topics: string[] = []): string {
+  register(role: DebateRole, handler: MessageHandler, topics: string[] = []): string {
     const id = `${role}_${Date.now()}`;
 
     const subscriber: Subscriber = {
@@ -224,7 +224,7 @@ export class EventBus {
     this.stats.byType.set(message.type, typeCount + 1);
 
     // 发送者统计
-    if (message.from !== 'system' && message.from !== 'user') {
+    if (message.from !== 'system' && message.from !== 'user' && message.from !== 'custom') {
       const roleStats = this.stats.byRole.get(message.from);
       if (roleStats) {
         roleStats.sent++;
@@ -304,7 +304,7 @@ export class EventBus {
    */
   async request(
     from: MessageSender,
-    to: AgentRole,
+    to: MessageRecipient,
     payload: any,
     timeout: number = 30000
   ): Promise<AgentMessage | null> {
@@ -357,7 +357,7 @@ export class EventBus {
    * 发送事件通知
    */
   async emit(
-    from: AgentRole | 'system',
+    from: DebateRole | 'system',
     topic: string,
     payload: any
   ): Promise<AgentMessage[]> {
@@ -394,7 +394,7 @@ export class EventBus {
   /**
    * 获取所有订阅者
    */
-  getSubscribers(): AgentRole[] {
+  getSubscribers(): DebateRole[] {
     return Array.from(new Set(
       Array.from(this.subscribers.values()).map(s => s.role)
     ));

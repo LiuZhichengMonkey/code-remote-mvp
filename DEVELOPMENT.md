@@ -572,6 +572,120 @@ Session messages now support pagination to handle large conversations efficientl
 
 ---
 
+## Multi-Session Concurrent Streaming (2025-03-15)
+
+### Overview
+
+Implemented multi-session concurrent streaming with the following features:
+- Multiple Claude sessions can run simultaneously in the background
+- Active session streams in real-time, background sessions accumulate content
+- When switching back to a background session, accumulated content is flushed
+- Sidebar shows running status ("运行中" / "完成") for each session
+
+### Architecture
+
+```
+Frontend                          Backend
+   |                                 |
+   |── session_focus ──────────────>│  (switch active session)
+   |<── session_focus_ack ──────────│
+   |                                 |
+   |  [Session A running]            │
+   |<── claude_stream (A) ───────────│  (active session: stream directly)
+   |                                 |
+   |  [Session B starts while A runs]
+   |<── claude_stream (B, replace) ──│  (background: accumulate, flush on switch)
+   |                                 |
+   |  [User switches to B]
+   |── session_focus (B) ───────────>│
+   |<── claude_stream (B, replace) ──│  (flush accumulated content)
+```
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/handlers/claude.ts` | Added `runningSessions` Map, `activeSessionId`, content accumulation for background sessions, `setActiveSession()` method |
+| `cli/src/server.ts` | Added `session_focus` message type handling |
+| `chat-ui/src/App.tsx` | Added `runningSessions` Set, `completedSessions` Set, status badge UI, `session_focus` sync on session switch |
+
+### State Management
+
+```typescript
+// Backend: Per-session state
+interface SessionRunState {
+  sessionId: string;
+  engine: ClaudeCodeEngine;
+  ws: WebSocket;
+  isRunning: boolean;
+  accumulatedContent: string;   // For background sessions
+  accumulatedThinking: string;
+}
+
+// Frontend: Running/completed tracking
+const [runningSessions, setRunningSessions] = useState<Set<string>>(new Set());
+const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
+const runningSessionsRef = useRef<Set<string>>(new Set()); // For closure fix
+```
+
+### WebSocket Protocol Extensions
+
+```typescript
+// Switch active session (frontend -> backend)
+{ type: 'session_focus', sessionId: 'session-abc' }
+
+// Acknowledge (backend -> frontend)
+{ type: 'session_focus_ack', sessionId: 'session-abc' }
+
+// Stream with replace flag (for background session switch)
+{
+  type: 'claude_stream',
+  content: '...',
+  thinking: '...',
+  replace: true,  // Replace instead of append
+  sessionId: 'session-abc',
+  done: false
+}
+
+// Notify running sessions on reconnect
+{
+  type: 'running_session',
+  sessionId: 'session-abc'
+}
+```
+
+### UI: Session Status Badge
+
+Status badge shows in sidebar before session title:
+- `[运行中] 📄 会话标题...` - Yellow, pulsing animation
+- `[完成] 📄 会话标题...` - Green, static
+- Click session to clear "完成" status
+
+### Debugging
+
+1. **Check running sessions**:
+   ```typescript
+   // Frontend console
+   console.log('[RunningSessions]', Array.from(runningSessions));
+   ```
+
+2. **Backend logs**:
+   ```bash
+   # Look for these logs
+   [ClaudeHandler] Setting active session: session-abc
+   [ClaudeHandler] Flushing accumulated content for active session
+   ```
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| Background session content lost | Check `accumulatedContent` is flushed on `setActiveSession()` |
+| Status badge not showing | Check `runningSessions` Set is updated on stream start/done |
+| Switch session doesn't sync | Ensure `session_focus` is sent on session switch |
+
+---
+
 ## Code Block Syntax Highlighting (2025-03-11)
 
 ### Overview

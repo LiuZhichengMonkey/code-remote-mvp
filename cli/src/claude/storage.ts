@@ -578,8 +578,10 @@ export class SessionStorage {
 
   /**
    * 列出指定项目的会话信息
+   * @param projectId 项目ID
+   * @param limit 返回的最大会话数量，默认为1000（加载全部）
    */
-  static listSessionsByProject(projectId: string): SessionInfo[] {
+  static listSessionsByProject(projectId: string, limit: number = 1000): SessionInfo[] {
     const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
 
     if (!fs.existsSync(projectDir)) {
@@ -649,8 +651,8 @@ export class SessionStorage {
       }
     }
 
-    // 按创建时间排序（最新的在前）
-    return sessions.sort((a, b) => b.createdAt - a.createdAt);
+    // 按创建时间排序（最新的在前），然后限制数量
+    return sessions.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
   }
 
   /**

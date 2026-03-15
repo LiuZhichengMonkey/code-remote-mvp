@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
 import { ClaudeHandler } from './handlers/claude';
+import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
 
 export interface Client {
   id: string;
@@ -27,7 +28,7 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop';
+  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'session_focus';
   token?: string;
   content?: string;
   fileName?: string;
@@ -48,6 +49,12 @@ export interface ClientMessage {
     type: string;
     data: string;  // base64 encoded
   }>;
+  // 讨论配置
+  config?: {
+    maxRounds?: number;
+    messageTimeout?: number;
+  };
+  llmEnabled?: boolean;
 }
 
 export class CodeRemoteServer {
@@ -60,6 +67,7 @@ export class CodeRemoteServer {
   private connectionHandler?: (clientId: string) => void;
   private disconnectHandler?: (clientId: string) => void;
   private claudeHandler: ClaudeHandler;
+  private discussionHandler: DiscussionHandler;
   private workspaceRoot: string;
   private staticPath?: string;
   private imageConfig = {
@@ -75,6 +83,9 @@ export class CodeRemoteServer {
     this.workspaceRoot = workspaceRoot || process.cwd();
     this.staticPath = staticPath;
     this.claudeHandler = new ClaudeHandler(this.workspaceRoot);
+    this.discussionHandler = new DiscussionHandler();
+    // 将 ClaudeHandler 的 SessionManager 传递给 DiscussionHandler 用于持久化讨论消息
+    this.discussionHandler.setSessionManager(this.claudeHandler.getSessionManager());
 
     // Create HTTP server for static files and WebSocket
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -211,23 +222,50 @@ export class CodeRemoteServer {
         break;
 
       case 'stop':
-        // 停止当前运行的 Claude CLI 进程
-        console.log(chalk.yellow('⏹'), 'Received stop request');
-        const stopped = this.claudeHandler.stop();
+        // 停止指定的会话或所有运行中的 Claude CLI 进程
+        console.log(chalk.yellow('⏹'), 'Received stop request', message.sessionId ? `for session: ${message.sessionId}` : '(all)');
+        let stopped: boolean;
+        if (message.sessionId) {
+          // 停止特定会话
+          stopped = this.claudeHandler.stopSession(message.sessionId);
+        } else {
+          // 停止所有
+          stopped = this.claudeHandler.stop();
+        }
         if (stopped) {
           ws.send(JSON.stringify({
             type: 'stopped',
+            sessionId: message.sessionId,
             success: true,
             timestamp: Date.now()
           }));
         } else {
           ws.send(JSON.stringify({
             type: 'stopped',
+            sessionId: message.sessionId,
             success: false,
             error: 'No running process to stop',
             timestamp: Date.now()
           }));
         }
+        break;
+
+      case 'discussion':
+        // 处理多智能体讨论请求
+        console.log(chalk.magenta('💬'), 'Received discussion request');
+        this.discussionHandler.handleRequest(ws, message as any as DiscussionRequest);
+        break;
+
+      case 'session_focus':
+        // 前端切换会话时通知后端，用于优化后台会话的流式传输
+        console.log(chalk.blue('🔍'), `Session focus changed to: ${message.sessionId || 'none'}`);
+        this.claudeHandler.setActiveSession(message.sessionId || null);
+        // 响应确认
+        ws.send(JSON.stringify({
+          type: 'session_focus_ack',
+          sessionId: message.sessionId,
+          timestamp: Date.now()
+        }));
         break;
 
       default:
@@ -254,6 +292,41 @@ export class CodeRemoteServer {
       ws.send(JSON.stringify(response));
 
       console.log(chalk.green('✓'), `Client ${chalk.cyan(clientId)} authenticated`);
+
+      // 先清理无效的运行状态（进程已结束但状态残留）
+      this.claudeHandler.cleanupStaleSessions();
+
+      // 检查是否有运行中的会话，如果有则恢复消息流
+      // 先检查普通 Claude 会话
+      if (this.claudeHandler.isRunning()) {
+        const runningSessionId = this.claudeHandler.getRunningSessionId();
+        if (runningSessionId) {
+          console.log(chalk.yellow('🔄'), `Reconnecting to running session: ${runningSessionId}`);
+          this.claudeHandler.updateRunningWebSocket(ws);
+
+          // 通知客户端有运行中的会话
+          ws.send(JSON.stringify({
+            type: 'session_running',
+            sessionId: runningSessionId,
+            timestamp: Date.now()
+          }));
+        }
+      }
+      // 再检查讨论会话
+      else if (this.discussionHandler.isRunning()) {
+        const runningDiscussionId = this.discussionHandler.getRunningDiscussionId();
+        if (runningDiscussionId) {
+          console.log(chalk.yellow('🔄'), `Reconnecting to running discussion: ${runningDiscussionId}`);
+          this.discussionHandler.updateRunningWebSocket(ws);
+
+          // 通知客户端有运行中的讨论
+          ws.send(JSON.stringify({
+            type: 'discussion_running',
+            discussionId: runningDiscussionId,
+            timestamp: Date.now()
+          }));
+        }
+      }
 
       if (this.connectionHandler) {
         this.connectionHandler(clientId);
@@ -327,6 +400,7 @@ export class CodeRemoteServer {
           type: 'claude_error',
           error: errorMsg,
           code,
+          sessionId,  // Include sessionId so frontend can route correctly
           timestamp: Date.now()
         }));
       },

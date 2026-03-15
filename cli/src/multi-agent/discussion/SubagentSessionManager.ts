@@ -548,13 +548,23 @@ export class SubagentSessionManager {
    * 停止所有会话
    */
   stopAll(): void {
+    let stoppedCount = 0;
     for (const session of this.sessions.values()) {
-      if (session.process && session.status === 'running') {
-        session.process.kill();
-        session.status = 'error';
-        session.error = 'Stopped by user';
-        session.endTime = Date.now();
+      // 停止正在运行或待处理状态的进程
+      if (session.process && (session.status === 'running' || session.status === 'pending')) {
+        try {
+          session.process.kill();
+          session.status = 'error';
+          session.error = 'Stopped by cleanup';
+          session.endTime = Date.now();
+          stoppedCount++;
+        } catch (err) {
+          console.error(`[SubagentSessionManager] Failed to kill process for ${session.agentName}:`, err);
+        }
       }
+    }
+    if (stoppedCount > 0) {
+      console.log(`[SubagentSessionManager] Stopped ${stoppedCount} running processes`);
     }
   }
 
@@ -575,11 +585,28 @@ export class SubagentSessionManager {
 
   /**
    * 清理所有资源（包括会话映射）
+   * 会先停止所有正在运行的进程，然后清理数据
    */
   cleanupAll(): void {
+    // 先停止所有正在运行的进程
+    this.stopAll();
+
+    // 清理所有会话记录
+    for (const session of this.sessions.values()) {
+      if (session.process && session.status === 'running') {
+        // stopAll() 应该已经处理了，但双重检查确保进程被终止
+        try {
+          session.process.kill();
+        } catch {
+          // 忽略终止失败
+        }
+      }
+    }
+
     this.sessions.clear();
     this.agentSessionMap.clear();
     this.totalTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    console.log('[SubagentSessionManager] cleanupAll completed: sessions cleared, processes stopped');
   }
 
   /**

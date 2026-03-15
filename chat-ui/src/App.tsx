@@ -122,6 +122,7 @@ interface WSMessage {
   content?: string;
   thinking?: string;
   done?: boolean;
+  replace?: boolean;  // 后台会话切换回来时，替换而不是追加内容
   error?: string;
   code?: string;
   data?: any;
@@ -1338,13 +1339,33 @@ export default function App() {
   const currentSessionIdRef = useRef<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const isRefreshingRef = useRef(false);
+  const runningSessionsRef = useRef<Set<string>>(new Set()); // Track running sessions in ref for WebSocket callbacks
 
   // Chat state - start empty, will be populated from server
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [runningSessions, setRunningSessions] = useState<Set<string>>(new Set()); // Track running sessions by ID
+  const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set()); // Track completed sessions (for notification)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Keep runningSessionsRef in sync with runningSessions
+  useEffect(() => {
+    runningSessionsRef.current = runningSessions;
+  }, [runningSessions]);
+
+  // Debug: log runningSessions changes
+  useEffect(() => {
+    console.log('[RunningSessions] State changed:', Array.from(runningSessions));
+  }, [runningSessions]);
+
+  // Debug: log completedSessions changes
+  useEffect(() => {
+    console.log('[CompletedSessions] State changed:', Array.from(completedSessions));
+  }, [completedSessions]);
+
+  // Current session is generating only if it's in the running set
+  const isGenerating = currentSessionId ? runningSessions.has(currentSessionId) : false;
 
   // Server logs state
   const [serverLogs, setServerLogs] = useState<Array<{ level: string; message: string; timestamp: number }>>([]);
@@ -1561,8 +1582,9 @@ export default function App() {
         const msg: WSMessage = JSON.parse(event.data);
         console.log('Received:', msg.type, msg);
 
-        // Use ref to get latest sessionId
-        const activeSessionId = currentSessionIdRef.current;
+        // Use message's sessionId if available, otherwise fallback to active session
+        // This ensures messages go to the correct session even when running in background
+        const targetSessionId = msg.sessionId || currentSessionIdRef.current;
 
         if (msg.type === 'auth_success') {
           setIsConnected(true);
@@ -1593,14 +1615,15 @@ export default function App() {
             // 自动切换到运行中的会话
             setCurrentSessionId(msg.sessionId);
             currentSessionIdRef.current = msg.sessionId;
-            setIsGenerating(true);
+            setRunningSessions(prev => new Set(prev).add(msg.sessionId));
             console.log('Reconnected to running session:', msg.sessionId);
           }
         } else if (msg.type === 'discussion_running') {
           // 重连时发现有运行中的讨论
           console.log('Discussion running on server:', msg.discussionId);
           if (msg.discussionId) {
-            setIsGenerating(true);
+            const discussionSessionId = `discussion_${msg.discussionId}`;
+            setRunningSessions(prev => new Set(prev).add(discussionSessionId));
 
             // 如果当前没有选中会话，创建一个临时会话来接收讨论消息
             if (!currentSessionIdRef.current) {
@@ -1628,11 +1651,11 @@ export default function App() {
           // Handle tool use events
           console.log('Tool use:', msg.toolName);
           setSessions(prev => {
-            const targetSessionId = activeSessionId || prev[0]?.id;
-            if (!targetSessionId) return prev;
+            const sessionId = targetSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
             return prev.map(s => {
-              if (s.id !== targetSessionId) return s;
+              if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
 
@@ -1656,40 +1679,109 @@ export default function App() {
             });
           });
         } else if (msg.type === 'claude_stream') {
-          console.log('Stream chunk, activeSessionId:', activeSessionId);
+          console.log('Stream chunk, sessionId:', targetSessionId, 'replace:', msg.replace, 'done:', msg.done);
+
+          // 更新 sessions 状态
           setSessions(prev => {
-            const targetSessionId = activeSessionId || prev[0]?.id;
-            if (!targetSessionId) return prev;
+            const sessionId = targetSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
             return prev.map(s => {
-              if (s.id !== targetSessionId) return s;
+              if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
 
-              if (lastMsg && lastMsg.role === 'model') {
-                const updatedMsg = { ...lastMsg };
-                if (msg.content) {
-                  updatedMsg.content = (updatedMsg.content || '') + msg.content;
+              // 如果有内容需要处理
+              if (msg.content || msg.thinking) {
+                // 检查是否需要创建新的 model 消息
+                if (!lastMsg || lastMsg.role !== 'model') {
+                  // 创建新的 model 消息
+                  const newMsg: Message = {
+                    id: Date.now().toString(),
+                    role: 'model',
+                    content: msg.content || '',
+                    thinking: msg.thinking || '',
+                    timestamp: Date.now(),
+                    status: msg.done ? 'sent' : 'sending'
+                  };
+                  return { ...s, messages: [...messages, newMsg] };
+                } else {
+                  // 更新现有的 model 消息
+                  const updatedMsg = { ...lastMsg };
+                  if (msg.replace) {
+                    if (msg.content) updatedMsg.content = msg.content;
+                    if (msg.thinking) updatedMsg.thinking = msg.thinking;
+                  } else {
+                    if (msg.content) updatedMsg.content = (updatedMsg.content || '') + msg.content;
+                    if (msg.thinking) updatedMsg.thinking = (updatedMsg.thinking || '') + msg.thinking;
+                  }
+                  if (msg.done) updatedMsg.status = 'sent';
+                  return { ...s, messages: [...messages.slice(0, -1), updatedMsg] };
                 }
-                if (msg.thinking) {
-                  updatedMsg.thinking = (updatedMsg.thinking || '') + msg.thinking;
-                }
-                return { ...s, messages: [...messages.slice(0, -1), updatedMsg] };
               }
               return s;
             });
           });
+
+          // 如果 done 为 true，更新运行状态和 projectSessions
+          if (msg.done) {
+            const sessionId = targetSessionId;
+            if (sessionId) {
+              console.log('[RunningSessions] Stream done, removing session:', sessionId);
+              setRunningSessions(prev => {
+                const next = new Set(prev);
+                next.delete(sessionId);
+                return next;
+              });
+              // 标记为已完成
+              setCompletedSessions(prev => new Set(prev).add(sessionId));
+
+              // 更新 projectSessions（只在完成时更新，减少高频重渲染）
+              setProjectSessions(prev => {
+                for (const projectId of Object.keys(prev)) {
+                  const projectSessionList = prev[projectId];
+                  const session = projectSessionList.find(s => s.id === sessionId);
+                  if (session) {
+                    return {
+                      ...prev,
+                      [projectId]: projectSessionList.map(s => {
+                        if (s.id !== sessionId) return s;
+                        // 消息内容会通过 sessions 状态同步，这里只标记状态
+                        return { ...s };
+                      })
+                    };
+                  }
+                }
+                return prev;
+              });
+            }
+          }
         } else if (msg.type === 'claude_done' || msg.done) {
-          console.log('Claude done');
-          setIsGenerating(false);
+          console.log('Claude done, sessionId:', targetSessionId);
+          // Mark this session as done
+          const doneSessionId = targetSessionId;
+          if (doneSessionId) {
+            console.log('[RunningSessions] Removing session:', doneSessionId);
+            setRunningSessions(prev => {
+              console.log('[RunningSessions] Before:', Array.from(prev));
+              const next = new Set(prev);
+              next.delete(doneSessionId);
+              console.log('[RunningSessions] After:', Array.from(next));
+              return next;
+            });
+            // Mark as completed for notification
+            setCompletedSessions(prev => new Set(prev).add(doneSessionId));
+          } else {
+            console.warn('[RunningSessions] No sessionId in claude_done message!');
+          }
           // Clear logs when done
           setServerLogs([]);
           setSessions(prev => {
-            const targetSessionId = activeSessionId || prev[0]?.id;
-            if (!targetSessionId) return prev;
+            const sessionId = doneSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
             return prev.map(s => {
-              if (s.id !== targetSessionId) return s;
+              if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
 
@@ -1709,15 +1801,23 @@ export default function App() {
           }]);
         } else if (msg.type === 'claude_error') {
           console.log('Claude error:', msg.error);
-          setIsGenerating(false);
+          // Mark this session as done (error)
+          const errorSessionId = targetSessionId;
+          if (errorSessionId) {
+            setRunningSessions(prev => {
+              const next = new Set(prev);
+              next.delete(errorSessionId);
+              return next;
+            });
+          }
           // Clear logs when done
           setServerLogs([]);
           setSessions(prev => {
-            const targetSessionId = activeSessionId || prev[0]?.id;
-            if (!targetSessionId) return prev;
+            const sessionId = errorSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
             return prev.map(s => {
-              if (s.id !== targetSessionId) return s;
+              if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
 
@@ -1734,12 +1834,13 @@ export default function App() {
         } else if (msg.type === 'command_result') {
           console.log('Command result:', msg.command);
           // Handle command results
+          const cmdSessionId = targetSessionId;
           setSessions(prev => {
-            const targetSessionId = activeSessionId || prev[0]?.id;
-            if (!targetSessionId) return prev;
+            const sessionId = cmdSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
             return prev.map(s => {
-              if (s.id !== targetSessionId) return s;
+              if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
 
@@ -1769,7 +1870,24 @@ export default function App() {
               return s;
             });
           });
-          setIsGenerating(false);
+          // Mark session as done after command result
+          if (cmdSessionId) {
+            setRunningSessions(prev => {
+              const next = new Set(prev);
+              next.delete(cmdSessionId);
+              return next;
+            });
+          }
+        } else if (msg.type === 'stopped') {
+          // Handle stop response from server
+          console.log('Session stopped:', msg.sessionId, 'success:', msg.success);
+          if (msg.sessionId) {
+            setRunningSessions(prev => {
+              const next = new Set(prev);
+              next.delete(msg.sessionId);
+              return next;
+            });
+          }
         } else if (msg.type === 'project_list') {
           // Handle project list from server
           console.log('Received project list:', msg.projects);
@@ -1848,16 +1966,44 @@ export default function App() {
               messages: [],
               createdAt: msg.session.createdAt || Date.now()
             };
+
+            // Determine which project this session belongs to
+            // If we have a current project, add to that project's sessions
+            const targetProjectId = currentProjectId || (projects.length > 0 ? projects[0].id : null);
+            console.log('[session_created] targetProjectId:', targetProjectId, 'currentProjectId:', currentProjectId);
+
             setSessions(prev => {
               // Avoid duplicate sessions
               const exists = prev.find(s => s.id === newSession.id);
               if (exists) return prev;
               return [newSession, ...prev];
             });
+
+            // Also add to projectSessions if we have a project
+            if (targetProjectId) {
+              setProjectSessions(prev => {
+                const projectList = prev[targetProjectId] || [];
+                const exists = projectList.find(s => s.id === newSession.id);
+                if (exists) return prev;
+                return {
+                  ...prev,
+                  [targetProjectId]: [newSession, ...projectList]
+                };
+              });
+            }
+
             setCurrentSessionId(newSession.id);
             currentSessionIdRef.current = newSession.id;
             // Clear projectId when creating new session (always in current project)
             setCurrentProjectId(null);
+
+            // 通知后端切换活跃会话（用于后台会话优化）
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'session_focus',
+                sessionId: newSession.id
+              }));
+            }
 
             // If there's a pending host session (discussion record), send it now
             if (pendingHostSessionRef.current) {
@@ -1894,10 +2040,27 @@ export default function App() {
             setHasMoreMessages(msg.hasMore || false);
             setTotalMessages(msg.totalMessages || msg.session.messages?.length || 0);
 
-            // Always update sessions (for message stream handling)
+            // Check if this session is currently running (use ref for latest value)
+            const isSessionRunning = runningSessionsRef.current.has(resumedSession.id);
+            console.log('[session_resumed] Session:', resumedSession.id.substring(0, 12), 'isRunning:', isSessionRunning);
+
+            // Update sessions, but preserve any in-progress messages for running sessions
             setSessions(prev => {
               const exists = prev.find(s => s.id === resumedSession.id);
               if (exists) {
+                // Check if this session is currently running (has a model message with status 'sending')
+                const lastMsg = exists.messages[exists.messages.length - 1];
+                const hasRunningModel = lastMsg && lastMsg.role === 'model' && lastMsg.status === 'sending';
+
+                // If session is running and has content, preserve the running state
+                // Don't replace with server data which may be stale
+                if (isSessionRunning && hasRunningModel) {
+                  console.log('[session_resumed] Preserving running session messages, server messages will be merged via stream');
+                  // Keep existing messages, don't replace
+                  return prev;
+                }
+
+                // Not running, just replace with server data
                 return prev.map(s => s.id === resumedSession.id ? resumedSession : s);
               }
               return [resumedSession, ...prev];
@@ -1909,6 +2072,15 @@ export default function App() {
                 const projectSessionList = prev[msg.projectId!] || [];
                 const exists = projectSessionList.find(s => s.id === resumedSession.id);
                 if (exists) {
+                  // Similar logic for projectSessions
+                  const lastMsg = exists.messages[exists.messages.length - 1];
+                  const hasRunningModel = lastMsg && lastMsg.role === 'model' && lastMsg.status === 'sending';
+
+                  if (isSessionRunning && hasRunningModel) {
+                    console.log('[session_resumed] Preserving running projectSession messages');
+                    return prev;
+                  }
+
                   return {
                     ...prev,
                     [msg.projectId!]: projectSessionList.map(s => s.id === resumedSession.id ? resumedSession : s)
@@ -1926,6 +2098,15 @@ export default function App() {
             }
             setCurrentSessionId(resumedSession.id);
             currentSessionIdRef.current = resumedSession.id;
+
+            // 通知后端切换活跃会话（用于后台会话优化）
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'session_focus',
+                sessionId: resumedSession.id
+              }));
+            }
+
             // Scroll to bottom after loading messages
             setTimeout(() => {
               scrollRef.current?.scrollTo({
@@ -1951,6 +2132,40 @@ export default function App() {
             }
             return s;
           }));
+          // Update projectSessions as well
+          setProjectSessions(prev => {
+            const updated: Record<string, ChatSession[]> = {};
+            for (const [projectId, sessions] of Object.entries(prev)) {
+              updated[projectId] = sessions.map(s => {
+                if (s.id === msg.oldSessionId) {
+                  return { ...s, id: msg.newSessionId, title: msg.title || s.title };
+                }
+                return s;
+              });
+            }
+            return updated;
+          });
+          // Update runningSessions if the old session was running
+          setRunningSessions(prev => {
+            if (prev.has(msg.oldSessionId)) {
+              const next = new Set(prev);
+              next.delete(msg.oldSessionId);
+              next.add(msg.newSessionId);
+              console.log('[RunningSessions] Updated session ID:', msg.oldSessionId, '->', msg.newSessionId);
+              return next;
+            }
+            return prev;
+          });
+          // Update completedSessions as well
+          setCompletedSessions(prev => {
+            if (prev.has(msg.oldSessionId)) {
+              const next = new Set(prev);
+              next.delete(msg.oldSessionId);
+              next.add(msg.newSessionId);
+              return next;
+            }
+            return prev;
+          });
           if (currentSessionIdRef.current === msg.oldSessionId) {
             setCurrentSessionId(msg.newSessionId);
             currentSessionIdRef.current = msg.newSessionId;
@@ -2085,6 +2300,12 @@ export default function App() {
         msg.projectId = projectId;
       }
       wsRef.current.send(JSON.stringify(msg));
+
+      // 通知后端切换活跃会话（用于后台会话优化）
+      wsRef.current.send(JSON.stringify({
+        type: 'session_focus',
+        sessionId: sessionId
+      }));
     }
   };
 
@@ -2323,7 +2544,14 @@ export default function App() {
         };
       });
     }
-    setIsGenerating(true);
+    // Mark this session as running
+    console.log('[RunningSessions] Adding session:', sessionId);
+    setRunningSessions(prev => {
+      console.log('[RunningSessions] Before add:', Array.from(prev));
+      const next = new Set(prev).add(sessionId);
+      console.log('[RunningSessions] After add:', Array.from(next));
+      return next;
+    });
 
     console.log('Sending message to WebSocket, sessionId:', sessionId, 'projectId:', currentProjectId);
 
@@ -2354,16 +2582,24 @@ export default function App() {
   };
 
   const handleStop = () => {
+    const sessionIdToStop = currentSessionIdRef.current;
     // Send stop request to server to kill Claude CLI process
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'stop',
+        sessionId: sessionIdToStop,
         timestamp: Date.now()
       }));
-      console.log('[handleStop] Sent stop request');
+      console.log('[handleStop] Sent stop request for session:', sessionIdToStop);
     }
-    // Update UI
-    setIsGenerating(false);
+    // Update UI - mark this session as not running
+    if (sessionIdToStop) {
+      setRunningSessions(prev => {
+        const next = new Set(prev);
+        next.delete(sessionIdToStop);
+        return next;
+      });
+    }
   };
 
   const handleNewChat = () => {
@@ -2521,7 +2757,16 @@ export default function App() {
                               Loading...
                             </div>
                           ) : (
-                            (projectSessions[project.id] || []).map(session => (
+                            (projectSessions[project.id] || []).map(session => {
+                              const isRunning = runningSessions.has(session.id);
+                              const isCompleted = completedSessions.has(session.id);
+                              // Debug: always log for troubleshooting
+                              if (runningSessions.size > 0 || completedSessions.size > 0) {
+                                console.log('[Sidebar] Checking session:', session.id.substring(0, 12),
+                                  'running:', isRunning, 'completed:', isCompleted,
+                                  'runningSet:', Array.from(runningSessions).map(id => id.substring(0, 12)));
+                              }
+                              return (
                               <div
                                 key={session.id}
                                 className={cn(
@@ -2535,12 +2780,29 @@ export default function App() {
                                   onClick={() => {
                                     resumeSession(session.id, project.id);
                                     setIsSidebarOpen(false);
+                                    // Clear completed status when viewing the session
+                                    setCompletedSessions(prev => {
+                                      const next = new Set(prev);
+                                      next.delete(session.id);
+                                      return next;
+                                    });
                                   }}
-                                  className="flex-1 text-left text-xs"
+                                  className="flex-1 text-left text-xs min-w-0"
                                 >
-                                  <div className="truncate">
-                                    <FileText size={12} className="inline mr-1 opacity-50" />
-                                    {session.title}
+                                  <div className="flex items-center gap-2">
+                                    {isRunning ? (
+                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-yellow-500/20 text-yellow-400 flex-shrink-0 whitespace-nowrap animate-pulse">
+                                        运行中
+                                      </span>
+                                    ) : isCompleted ? (
+                                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-green-500/20 text-green-400 flex-shrink-0 whitespace-nowrap">
+                                        完成
+                                      </span>
+                                    ) : null}
+                                    <span className="truncate flex items-center gap-1 min-w-0 flex-1">
+                                      <FileText size={12} className="inline opacity-50 flex-shrink-0" />
+                                      <span className="truncate">{session.title}</span>
+                                    </span>
                                   </div>
                                   <div className="text-white/30 text-[10px] font-mono truncate mt-0.5">
                                     {session.id.substring(0, 8)}...
@@ -2557,7 +2819,8 @@ export default function App() {
                                   <Trash2 size={14} />
                                 </button>
                               </div>
-                            ))
+                            );
+                            })
                           )}
                           {projectSessions[project.id]?.length === 0 && !loadingProjects.has(project.id) && (
                             <div className="p-2 text-xs text-white/40 text-center">

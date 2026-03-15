@@ -3,9 +3,14 @@
  */
 
 /**
- * Agent 角色
+ * Agent 角色（辩论角色）
  */
-export type AgentRole = 'moderator' | 'proposer' | 'skeptic' | 'fact-checker' | 'expert';
+export type DebateRole = 'moderator' | 'proposer' | 'skeptic' | 'fact-checker' | 'expert';
+
+/**
+ * Agent 角色（包含自定义）
+ */
+export type AgentRole = DebateRole | 'custom';
 
 /**
  * Agent 配置
@@ -23,7 +28,7 @@ export interface AgentConfig {
  */
 export interface AgentSpeech {
   agentName: string;
-  role: AgentRole;
+  role: DebateRole;
   content: string;
   timestamp: number;
   round: number;
@@ -116,6 +121,97 @@ export interface ToolResult {
   output: string;
   success: boolean;
   timestamp: number;
+}
+
+/**
+ * 工具调用请求
+ */
+export interface ToolCall {
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Agent 执行上下文
+ */
+export interface AgentContext {
+  /** 当前黑板状态 */
+  blackboard: GlobalBlackboard;
+  /** 历史发言 */
+  history: AgentSpeech[];
+  /** 当前步骤 */
+  currentStep: DebateStep;
+  /** 当前轮次 */
+  round: number;
+  /** 自定义上下文 */
+  customContext?: Record<string, unknown>;
+}
+
+/**
+ * Agent 执行结果
+ */
+export interface AgentResponse {
+  /** 发言内容 */
+  content: string;
+  /** 工具调用 */
+  toolCalls?: ToolCall[];
+  /** 元数据 */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * 统一 Agent 接口
+ * 整合辩论角色和 @ 语法动态 Agent
+ */
+export interface UnifiedAgent {
+  /** Agent 唯一标识 */
+  id: string;
+  /** Agent 角色 */
+  role: AgentRole | 'custom';
+  /** Agent 名称 */
+  name: string;
+  /** 系统提示词 */
+  systemPrompt: string;
+  /** 可用工具列表 */
+  tools?: string[];
+  /** Agent 描述 */
+  description?: string;
+
+  /**
+   * 执行 Agent
+   * @param context 执行上下文
+   * @returns 执行结果
+   */
+  invoke(context: AgentContext): Promise<AgentResponse>;
+
+  /**
+   * 激活钩子（可选）
+   * Agent 被激活时调用
+   */
+  onActivate?(): Promise<void>;
+
+  /**
+   * 停用钩子（可选）
+   * Agent 被停用时调用
+   */
+  onDeactivate?(): Promise<void>;
+}
+
+/**
+ * Agent 能力描述
+ * 用于能力注册和发现
+ */
+export interface AgentCapability {
+  /** 能力名称 */
+  name: string;
+  /** 能力描述 */
+  description: string;
+  /** 输入 Schema */
+  inputSchema: Record<string, unknown>;
+  /** 输出 Schema */
+  outputSchema?: Record<string, unknown>;
+  /** 标签（用于搜索和分类） */
+  tags?: string[];
 }
 
 /**

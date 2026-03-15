@@ -8,7 +8,7 @@
  */
 
 import {
-  AgentRole,
+  DebateRole,
   GlobalBlackboard,
   AgentSpeech,
   DebateStep,
@@ -25,7 +25,7 @@ import { AsyncLock } from '../bus/LockManager';
  */
 export interface ParallelResult {
   /** Agent角色 */
-  role: AgentRole;
+  role: DebateRole;
   /** 执行状态 */
   status: 'fulfilled' | 'rejected';
   /** 发言内容 */
@@ -91,7 +91,7 @@ export class ParallelOrchestrator {
   private eventBus: EventBus;
   private blackboardManager: BlackboardManager;
   private config: ParallelOrchestratorConfig;
-  private agents: Map<AgentRole, ConcurrentAgent> = new Map();
+  private agents: Map<DebateRole, ConcurrentAgent> = new Map();
   private blackboardLock: AsyncLock;
   private eventHandlers: Set<(event: any) => void> = new Set();
 
@@ -109,7 +109,7 @@ export class ParallelOrchestrator {
   /**
    * 注册Agent
    */
-  registerAgent(role: AgentRole, agent: BaseAgent): void {
+  registerAgent(role: DebateRole, agent: BaseAgent): void {
     const concurrentAgent = createConcurrentAgent(agent);
     concurrentAgent.connect(this.eventBus);
     this.agents.set(role, concurrentAgent);
@@ -119,7 +119,7 @@ export class ParallelOrchestrator {
    * 使用默认Agent
    */
   useDefaultAgents(): void {
-    const defaultRoles: AgentRole[] = ['proposer', 'skeptic'];
+    const defaultRoles: DebateRole[] = ['proposer', 'skeptic'];
     for (const role of defaultRoles) {
       const agent = AgentFactory.getAgent(role);
       this.registerAgent(role, agent);
@@ -148,7 +148,7 @@ export class ParallelOrchestrator {
    * 核心：使用Promise.allSettled确保所有Agent都能执行
    */
   async runParallelRound(
-    roles: AgentRole[],
+    roles: DebateRole[],
     context: string
   ): Promise<RoundResult> {
     const startTime = Date.now();
@@ -219,7 +219,7 @@ export class ParallelOrchestrator {
    * 执行单个Agent (带超时)
    */
   private async executeAgentWithTimeout(
-    role: AgentRole,
+    role: DebateRole,
     context: string
   ): Promise<ParallelResult> {
     const agent = this.agents.get(role);
@@ -277,7 +277,7 @@ export class ParallelOrchestrator {
     const context = this.buildContext(round);
 
     // 确定要并行执行的Agent
-    const parallelRoles: AgentRole[] = ['proposer', 'skeptic'];
+    const parallelRoles: DebateRole[] = ['proposer', 'skeptic'];
 
     // 如果有专家，也并行执行
     if (this.config.enableExpert && this.agents.has('expert')) {
@@ -334,7 +334,7 @@ ${blackboard.historySummary || '首轮讨论'}
    * 获取统计信息
    */
   getStats(): {
-    agents: AgentRole[];
+    agents: DebateRole[];
     busStats: ReturnType<EventBus['getStats']>;
   } {
     return {

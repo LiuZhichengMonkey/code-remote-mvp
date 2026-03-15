@@ -30,8 +30,9 @@ export class SessionManager {
   }
 
   // 创建临时会话（不保存到存储，等待 Claude CLI session ID）
-  createTemporary(): ClaudeSession {
-    const session = createSession('New Chat');
+  createTemporary(title?: string): ClaudeSession {
+    const sessionTitle = title || 'New Chat';
+    const session = createSession(sessionTitle);
     this.currentSession = session;
     this.isTemporarySession = true;
     return session;

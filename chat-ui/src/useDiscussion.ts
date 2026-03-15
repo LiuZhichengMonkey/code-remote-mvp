@@ -376,6 +376,36 @@ export function useDiscussion(options: UseDiscussionOptions) {
               type: 'summary'
             });
 
+            // 创建主持人会话保存完整讨论记录
+            // 即使 session 状态丢失，也使用 result 中的数据创建记录
+            if (handlersRef.current.onCreateHostSession) {
+              const topic = result.messages?.[0]?.content || msg.sessionId || '讨论记录';
+              const title = `🎯 多智能体讨论: ${topic.substring(0, 30)}${topic.length > 30 ? '...' : ''}`;
+              // 使用 result 构建讨论记录
+              const fullRecord = formatDiscussionRecord(result, {
+                id: msg.sessionId || '',
+                agents: result.perspectives?.map(p => ({ id: p.agentName, name: p.agentName, role: p.role, avatar: '' })) || [],
+                messages: result.messages || [],
+                status: 'completed',
+                currentRound: result.totalRounds || 0,
+                maxRounds: 3,
+                mode: 'collaborate',
+                modeReason: '',
+                consensusScore: 0,
+                verifiedFacts: [],
+                coreClashes: result.disagreements || [],
+                agentInsights: {},
+                conclusion: result.conclusion,
+                originalInput: topic,
+                participants: [],
+                config: {} as any,
+                createdAt: Date.now(),
+                updatedAt: Date.now()
+              });
+              console.log('[Discussion] Creating host session for discussion record');
+              handlersRef.current.onCreateHostSession(title, fullRecord);
+            }
+
             // 获取当前 session 状态用于格式化记录
             setSession(prev => {
               if (!prev) return null;
@@ -385,16 +415,6 @@ export function useDiscussion(options: UseDiscussionOptions) {
                 conclusion: result.conclusion,
                 messages: result.messages
               };
-
-              // 创建主持人会话保存完整讨论记录
-              if (handlersRef.current.onCreateHostSession) {
-                const topic = updatedSession.messages[0]?.content || '讨论记录';
-                const title = `🎯 多智能体讨论: ${topic.substring(0, 30)}${topic.length > 30 ? '...' : ''}`;
-                const fullRecord = formatDiscussionRecord(result, updatedSession);
-                console.log('[Discussion] Creating host session for discussion record');
-                handlersRef.current.onCreateHostSession(title, fullRecord);
-              }
-
               return updatedSession;
             });
 
