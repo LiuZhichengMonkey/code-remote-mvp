@@ -176,6 +176,13 @@ interface WSMessage {
   messages?: Message[];
 }
 
+// --- Settings List Panel ---
+interface SettingsItem {
+  name: string;
+  model: string;
+  env: number;
+}
+
 // --- Connection Panel ---
 const ConnectionPanel = ({
   url,
@@ -185,7 +192,8 @@ const ConnectionPanel = ({
   onConnect,
   onDisconnect,
   isConnected,
-  isConnecting
+  isConnecting,
+  wsRef
 }: {
   url: string;
   token: string;
@@ -195,56 +203,176 @@ const ConnectionPanel = ({
   onDisconnect: () => void;
   isConnected: boolean;
   isConnecting: boolean;
-}) => (
-  <div className="p-4 bg-card border-b border-white/10">
-    <div className="flex items-center gap-2 mb-3">
-      {isConnected ? (
-        <Wifi size={16} className="text-green-400" />
-      ) : (
-        <WifiOff size={16} className="text-white/40" />
-      )}
-      <span className="text-xs font-medium text-white/60">
-        {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
-      </span>
-    </div>
+  wsRef: React.MutableRefObject<WebSocket | null>;
+}) => {
+  const [settingsList, setSettingsList] = useState<SettingsItem[]>([]);
+  const [selectedSettings, setSelectedSettings] = useState<string>('');
+  const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const [loadingSettings, setLoadingSettings] = useState(false);
 
-    <div className="flex flex-col gap-2">
-      <input
-        type="text"
-        value={url}
-        onChange={(e) => onUrlChange(e.target.value)}
-        placeholder="WebSocket URL (ws://...)"
-        className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-        disabled={isConnected}
-      />
-      <input
-        type="password"
-        value={token}
-        onChange={(e) => onTokenChange(e.target.value)}
-        placeholder="Token"
-        className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-        disabled={isConnected}
-      />
+  // 加载配置文件列表
+  const loadSettingsList = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log('[Settings] WS not ready, state:', wsRef.current?.readyState);
+      return;
+    }
 
-      {isConnected ? (
-        <button
-          onClick={onDisconnect}
-          className="w-full py-2 bg-red-500/20 text-red-400 rounded-lg text-sm font-medium hover:bg-red-500/30 transition-colors"
-        >
-          Disconnect
-        </button>
-      ) : (
-        <button
-          onClick={onConnect}
-          disabled={isConnecting || !url || !token}
-          className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/80 transition-colors disabled:opacity-50"
-        >
-          {isConnecting ? 'Connecting...' : 'Connect'}
-        </button>
+    setLoadingSettings(true);
+    console.log('[Settings] Loading settings list...');
+    wsRef.current.send(JSON.stringify({
+      type: 'settings',
+      action: 'list'
+    }));
+
+    // 设置一次性监听器
+    const handleSettingsMessage = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('[Settings] Received:', data.type);
+        if (data.type === 'settings_list') {
+          setSettingsList(data.settings || []);
+          setLoadingSettings(false);
+        } else if (data.type === 'settings_switched') {
+          alert(data.message);
+          // 重置选择
+          setSelectedSettings(data.settingsName);
+        } else if (data.type === 'settings_error') {
+          console.error('Settings error:', data.error);
+          setLoadingSettings(false);
+        }
+      } catch (e) {
+        console.error('[Settings] Parse error:', e);
+        setLoadingSettings(false);
+      }
+    };
+
+    wsRef.current.addEventListener('message', handleSettingsMessage);
+    return () => {
+      wsRef.current?.removeEventListener('message', handleSettingsMessage);
+    };
+  }, [wsRef]);
+
+  // 切换配置文件
+  const switchSettings = useCallback((settingsName: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'settings',
+      action: 'switch',
+      settingsName
+    }));
+    setShowSettingsDropdown(false);
+  }, [wsRef]);
+
+  // 当连接成功时不需要自动加载，用户点击时再加载
+  useEffect(() => {
+    // 连接断开时重置状态
+    if (!isConnected) {
+      setSettingsList([]);
+      setSelectedSettings('');
+      setShowSettingsDropdown(false);
+    }
+  }, [isConnected]);
+
+  return (
+    <div className="p-4 bg-card border-b border-white/10">
+      <div className="flex items-center gap-2 mb-3">
+        {isConnected ? (
+          <Wifi size={16} className="text-green-400" />
+        ) : (
+          <WifiOff size={16} className="text-white/40" />
+        )}
+        <span className="text-xs font-medium text-white/60">
+          {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
+        </span>
+      </div>
+
+      {/* Settings Config Selector */}
+      {isConnected && (
+        <div className="mb-3">
+          <label className="text-xs text-white/60 mb-1 block">Settings Config</label>
+          <div className="relative">
+            <button
+              onClick={() => {
+                if (settingsList.length === 0) {
+                  loadSettingsList();
+                }
+                setShowSettingsDropdown(!showSettingsDropdown);
+              }}
+              disabled={loadingSettings}
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white flex items-center justify-between hover:bg-white/10 transition-colors"
+            >
+              <span className={selectedSettings ? '' : 'text-white/40'}>
+                {loadingSettings ? 'Loading...' : selectedSettings || 'Select settings config...'}
+              </span>
+              <ChevronDown size={14} className="text-white/40" />
+            </button>
+
+            {showSettingsDropdown && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-white/10 rounded-lg overflow-hidden z-50 max-h-48 overflow-y-auto">
+                {settingsList.length === 0 ? (
+                  <div className="p-3 text-sm text-white/40 text-center">
+                    No settings found
+                  </div>
+                ) : (
+                  settingsList.map((settings) => (
+                    <button
+                      key={settings.name}
+                      onClick={() => {
+                        setSelectedSettings(settings.name);
+                        switchSettings(settings.name);
+                      }}
+                      className="w-full px-3 py-2 text-sm text-white hover:bg-white/10 flex items-center justify-between"
+                    >
+                      <span>{settings.name}</span>
+                      <span className="text-xs text-white/40">{settings.model}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => onUrlChange(e.target.value)}
+          placeholder="WebSocket URL (ws://...)"
+          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+          disabled={isConnected}
+        />
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => onTokenChange(e.target.value)}
+          placeholder="Token"
+          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+          disabled={isConnected}
+        />
+
+        {isConnected ? (
+          <button
+            onClick={onDisconnect}
+            className="w-full py-2 bg-red-500/20 text-red-400 rounded-lg text-sm font-medium hover:bg-red-500/30 transition-colors"
+          >
+            Disconnect
+          </button>
+        ) : (
+          <button
+            onClick={onConnect}
+            disabled={isConnecting || !url || !token}
+            className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/80 transition-colors disabled:opacity-50"
+          >
+            {isConnecting ? 'Connecting...' : 'Connect'}
+          </button>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // --- Components ---
 
@@ -289,7 +417,7 @@ const Header = ({
       />
     </div>
     <div className="flex items-center gap-1">
-      <button onClick={onSettingsClick} className="p-2 text-white/70 active:text-white">
+      <button onClick={onSettingsClick} className="settings-toggle-btn p-2 text-white/70 active:text-white">
         <Settings size={18} />
       </button>
       <button onClick={onNewChat} className="p-2 -mr-2 text-white/70 active:text-white">
@@ -1335,6 +1463,22 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(() => getStoredValue('coderemote_url', DEFAULT_WS_URL));
   const [token, setToken] = useState(() => getStoredValue('coderemote_token', DEFAULT_TOKEN));
   const [showSettings, setShowSettings] = useState(false);
+  const showSettingsRef = useRef(showSettings);
+  showSettingsRef.current = showSettings;
+
+  // 点击外部关闭设置面板
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // 使用 ref 获取最新值，避免闭包问题
+      // 排除设置面板和设置图标按钮本身
+      if (showSettingsRef.current && !target.closest('.settings-panel') && !target.closest('.settings-toggle-btn')) {
+        setShowSettings(false);
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
 
   // Refs for WebSocket callback to access latest state
   const currentSessionIdRef = useRef<string | null>(null);
@@ -1456,12 +1600,33 @@ export default function App() {
     },
     onCreateHostSession: (title, fullRecord) => {
       // 创建主持人会话保存完整讨论记录
-      console.log('[Discussion] Creating host session:', title);
+      console.log('[Discussion] onCreateHostSession called');
+      console.log('[Discussion]   title:', title);
+      console.log('[Discussion]   wsRef.current:', !!wsRef.current);
+      console.log('[Discussion]   wsRef.current.readyState:', wsRef.current?.readyState);
+      console.log('[Discussion]   isConnected:', isConnected);
+      // 保存讨论记录到 pendingHostSessionRef
+      pendingHostSessionRef.current = { title, fullRecord };
+      console.log('[Discussion]   pendingHostSessionRef.current set');
+
       if (wsRef.current && isConnected) {
-        // 保存讨论记录到 pendingHostSessionRef
-        pendingHostSessionRef.current = { title, fullRecord };
-        // 创建新会话
+        // WebSocket 已连接，直接创建新会话
+        console.log('[Discussion] WebSocket connected, creating new session');
         wsRef.current.send(JSON.stringify({ type: 'session', action: 'new', title }));
+      } else {
+        // WebSocket 未连接，等待连接后发送
+        console.log('[Discussion] WebSocket not connected, will send after connection');
+        // 等待 WebSocket 连接，然后发送
+        const checkAndSend = () => {
+          if (wsRef.current && isConnected) {
+            console.log('[Discussion] WebSocket now connected, creating new session');
+            wsRef.current.send(JSON.stringify({ type: 'session', action: 'new', title }));
+          } else {
+            // 继续等待，最多 5 秒
+            setTimeout(checkAndSend, 100);
+          }
+        };
+        setTimeout(checkAndSend, 100);
       }
     }
   });
@@ -2027,6 +2192,7 @@ export default function App() {
         } else if (msg.type === 'session_created') {
           // Handle new session creation
           console.log('Session created:', msg.session);
+          console.log('[session_created] pendingHostSessionRef.current:', pendingHostSessionRef.current ? 'HAS VALUE' : 'NULL');
           if (msg.session) {
             const newSession: ChatSession = {
               id: msg.session.id,
@@ -2744,7 +2910,7 @@ export default function App() {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden z-[55]"
+            className="overflow-hidden z-[55] settings-panel"
           >
             <ConnectionPanel
               url={serverUrl}
@@ -2755,6 +2921,7 @@ export default function App() {
               onDisconnect={disconnect}
               isConnected={isConnected}
               isConnecting={isConnecting}
+              wsRef={wsRef}
             />
           </motion.div>
         )}

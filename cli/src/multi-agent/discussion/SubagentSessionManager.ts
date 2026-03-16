@@ -128,12 +128,28 @@ export class SubagentSessionManager {
     try {
       // 检查是否有可复用的会话
       const existingClaudeSessionId = this.agentSessionMap.get(agent.id);
+      console.log(`[SubagentManager] Looking for session for agent.id=${agent.id}, name=${agent.name}, found: ${existingClaudeSessionId || 'none'}`);
+      console.log(`[SubagentManager] Current agentSessionMap: ${JSON.stringify(Array.from(this.agentSessionMap.entries()))}`);
+
+      if (existingClaudeSessionId) {
+        console.log(`[SubagentManager] Found existing session for ${agent.name} (${agent.id}): ${existingClaudeSessionId}`);
+        // 检查会话文件是否存在
+        const sessionExists = this.checkSessionFileExists(existingClaudeSessionId);
+        if (!sessionExists) {
+          console.warn(`[SubagentManager] Session file not found for ${agent.name}, clearing from map: ${existingClaudeSessionId}`);
+          this.agentSessionMap.delete(agent.id);
+          // 不使用 existingClaudeSessionId
+        }
+      } else {
+        console.log(`[SubagentManager] No existing session for ${agent.name} (${agent.id}), starting fresh`);
+      }
 
       // 构建完整的 prompt（根据是否复用会话决定是否包含完整上下文）
-      const fullPrompt = this.buildPrompt(agent, prompt, context, existingClaudeSessionId);
+      const sessionIdToUse = this.agentSessionMap.get(agent.id);
+      const fullPrompt = this.buildPrompt(agent, prompt, context, sessionIdToUse);
 
       // 启动 Claude CLI 进程
-      await this.spawnClaudeProcess(session, agent, fullPrompt, existingClaudeSessionId);
+      await this.spawnClaudeProcess(session, agent, fullPrompt, sessionIdToUse);
 
       return sessionId;
     } catch (error) {
@@ -227,7 +243,16 @@ export class SubagentSessionManager {
       if (existingSessionId) {
         args.push('--resume', existingSessionId);
         console.log(`[SubagentManager] Resuming session ${existingSessionId} for ${agent.name}`);
+        // 验证会话文件是否存在
+        const sessionFileExists = this.checkSessionFileExists(existingSessionId);
+        console.log(`[SubagentManager] Session file exists check: ${sessionFileExists}`);
+        if (!sessionFileExists) {
+          console.warn(`[SubagentManager] WARNING: Session file not found for resume: ${existingSessionId}`);
+        }
       }
+
+      // 打印完整命令用于调试
+      console.log(`[SubagentManager] Full args: ${JSON.stringify(args)}`);
 
       // 添加 MCP 配置
       if (this.config.mcpConfigPath) {
@@ -337,13 +362,18 @@ export class SubagentSessionManager {
       // 处理 stderr
       proc.stderr.on('data', (data) => {
         stderr += data.toString();
-        console.log(`[SubagentManager] ${agent.name} stderr:`, data.toString().substring(0, 100));
+        console.log(`[SubagentManager] ${agent.name} stderr:`, data.toString());
       });
 
       // 进程结束
       proc.on('close', (code) => {
         clearTimeout(timeout);
-        console.log(`[SubagentManager] ${agent.name} closed, code: ${code}, output length: ${fullOutput.length}`);
+        console.log(`[SubagentManager] ${agent.name} closed, code: ${code}, output length: ${fullOutput.length}, stderr length: ${stderr.length}`);
+
+        // 如果有 stderr 且进程失败，完整打印 stderr
+        if (code !== 0 && stderr.length > 0) {
+          console.error(`[SubagentManager] ${agent.name} stderr full output:\n${stderr}`);
+        }
 
         session.output = fullOutput;
         session.endTime = Date.now();
@@ -628,6 +658,30 @@ export class SubagentSessionManager {
     this.agentSessionMap.clear();
     this.totalTokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     console.log('[SubagentSessionManager] cleanupAll completed: sessions cleared, files deleted, agentSessionMap cleared');
+  }
+
+  /**
+   * 检查会话文件是否存在
+   */
+  private checkSessionFileExists(sessionId: string): boolean {
+    try {
+      const projectDirs = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+      for (const projectDir of projectDirs) {
+        const projectPath = path.join(CLAUDE_PROJECTS_DIR, projectDir);
+        if (!fs.statSync(projectPath).isDirectory()) continue;
+
+        const sessionFile = path.join(projectPath, `${sessionId}.jsonl`);
+        if (fs.existsSync(sessionFile)) {
+          console.log(`[SubagentSessionManager] Found session file: ${sessionFile}`);
+          return true;
+        }
+      }
+      console.log(`[SubagentSessionManager] Session file NOT found for ${sessionId}, searched ${projectDirs.length} project dirs`);
+      return false;
+    } catch (err) {
+      console.error('[SubagentSessionManager] Error checking session file:', err);
+      return false;
+    }
   }
 
   /**

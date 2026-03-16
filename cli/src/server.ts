@@ -1,6 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import { extname, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
@@ -28,14 +30,15 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'session_focus';
+  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'session_focus' | 'settings';
   token?: string;
   content?: string;
   fileName?: string;
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more';
+  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more' | 'list' | 'switch';
+  settingsName?: string;
   sessionId?: string;
   projectId?: string;
   title?: string;
@@ -268,8 +271,120 @@ export class CodeRemoteServer {
         }));
         break;
 
+      case 'settings':
+        // 获取或切换 settings 配置文件
+        console.log(chalk.blue('[Settings]'), 'Received settings request, action:', (message as any).action);
+        this.handleSettingsRequest(ws, message);
+        break;
+
       default:
         this.sendError(ws, 'Unknown message type');
+    }
+  }
+
+  private handleSettingsRequest(ws: WebSocket, message: ClientMessage) {
+    const action = (message as any).action || 'list';
+    const claudeDir = path.join(os.homedir(), '.claude');
+
+    if (action === 'list') {
+      // 列出所有可用的 settings 配置文件
+      try {
+        const files = readdirSync(claudeDir).filter(f =>
+          f.startsWith('settings_key') && f.endsWith('.json')
+        );
+
+        const settingsList = files.map(f => {
+          const filePath = path.join(claudeDir, f);
+          const content = readFileSync(filePath, 'utf-8');
+          const config = JSON.parse(content);
+          return {
+            name: f.replace('.json', ''),
+            // 提取一些关键配置用于显示
+            model: config.model || 'default',
+            env: config.env ? Object.keys(config.env).length : 0
+          };
+        });
+
+        ws.send(JSON.stringify({
+          type: 'settings_list',
+          settings: settingsList,
+          timestamp: Date.now()
+        }));
+      } catch (error) {
+        console.error(chalk.red('[Settings]'), 'Failed to list settings:', error);
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          error: 'Failed to list settings',
+          timestamp: Date.now()
+        }));
+      }
+    } else if (action === 'switch') {
+      // 切换到指定的 settings 配置文件
+      const settingsName = (message as any).settingsName;
+      if (!settingsName) {
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          error: 'Missing settingsName',
+          timestamp: Date.now()
+        }));
+        return;
+      }
+
+      const sourcePath = path.join(claudeDir, `${settingsName}.json`);
+      const targetPath = path.join(claudeDir, 'settings.json');
+
+      try {
+        if (!existsSync(sourcePath)) {
+          ws.send(JSON.stringify({
+            type: 'settings_error',
+            error: `Settings file not found: ${settingsName}`,
+            timestamp: Date.now()
+          }));
+          return;
+        }
+
+        // 备份当前的 settings.json
+        const backupPath = path.join(claudeDir, 'settings.json.backup');
+        if (existsSync(targetPath)) {
+          const currentContent = readFileSync(targetPath, 'utf-8');
+          // 只有内容不同时才备份
+          const newContent = readFileSync(sourcePath, 'utf-8');
+          if (currentContent !== newContent) {
+            // 读取当前文件时间戳作为备份文件名
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const timedBackup = path.join(claudeDir, `settings.json.${timestamp}.backup`);
+            // 不再创建带时间戳的备份，直接复制当前 settings.json
+            // 这里简单处理：复制新配置到 settings.json
+            console.log(chalk.blue('[Settings]'), `Switching to ${settingsName}.json`);
+          }
+        }
+
+        // 复制新配置到 settings.json
+        const newContent = readFileSync(sourcePath, 'utf-8');
+        // 备份当前 settings.json
+        if (existsSync(targetPath)) {
+          const backupContent = readFileSync(targetPath, 'utf-8');
+          writeFileSync(backupPath, backupContent, 'utf-8');
+          console.log(chalk.blue('[Settings]'), `Backed up current settings.json`);
+        }
+        // 写入新配置到 settings.json
+        writeFileSync(targetPath, newContent, 'utf-8');
+        console.log(chalk.green('[Settings]'), `Switched to ${settingsName}.json`);
+
+        ws.send(JSON.stringify({
+          type: 'settings_switched',
+          settingsName,
+          message: `配置已切换到 ${settingsName}，请重启 Claude Code 以应用新配置`,
+          timestamp: Date.now()
+        }));
+      } catch (error) {
+        console.error(chalk.red('[Settings]'), 'Failed to switch settings:', error);
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          error: 'Failed to switch settings',
+          timestamp: Date.now()
+        }));
+      }
     }
   }
 
@@ -365,6 +480,11 @@ export class CodeRemoteServer {
             timestamp: Date.now()
           }));
         }
+      } else {
+        // 讨论可能已完成但有缓存的结果需要发送
+        console.log(chalk.blue('[Discussion]'), 'No running discussion, checking for pending results...');
+        const hadPending = this.discussionHandler.updateRunningWebSocket(ws);
+        console.log(chalk.blue('[Discussion]'), `updateRunningWebSocket returned: ${hadPending}`);
       }
 
       if (this.connectionHandler) {

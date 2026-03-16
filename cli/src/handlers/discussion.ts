@@ -74,6 +74,10 @@ export class DiscussionHandler {
   private sessionManager?: SessionManager;
   /** 讨论会话到主会话 ID 的映射 */
   private discussionToMainSession: Map<string, string> = new Map();
+  /** 缓存最近的讨论结果（用于重连时发送） */
+  private pendingResults: Map<string, { result: DiscussionResult; hostSummary: string; timestamp: number }> = new Map();
+  /** 缓存过期时间（30分钟，给用户足够时间刷新页面） */
+  private readonly PENDING_RESULT_TTL = 30 * 60 * 1000;
 
   constructor() {
     this.orchestrator = createDiscussionOrchestrator({
@@ -241,9 +245,20 @@ export class DiscussionHandler {
       const hostSummary = this.generateHostSummary(result, templates);
       console.log(chalk.gray('[Discussion] Host summary generated, length:', hostSummary.length));
 
+      // 缓存结果（用于重连时发送）
+      this.pendingResults.set(session.id, {
+        result,
+        hostSummary,
+        timestamp: Date.now()
+      });
+      console.log(chalk.blue('[Discussion] Cached result for session:', session.id));
+
+      // 清理过期的缓存结果
+      this.cleanupPendingResults();
+
       // 发送结果
       console.log(chalk.blue('[Discussion] Sending discussion_result...'));
-      this.sendMessage(ws, {
+      const resultSent = this.sendMessage(ws, {
         type: 'discussion_result',
         sessionId: session.id,
         data: {
@@ -252,7 +267,7 @@ export class DiscussionHandler {
         },
         timestamp: Date.now()
       });
-      console.log(chalk.green('[Discussion] discussion_result sent'));
+      console.log(chalk.green('[Discussion] discussion_result sent, success:', resultSent));
 
       // 持久化讨论结论到会话存储
       if (this.sessionManager) {
@@ -287,9 +302,17 @@ export class DiscussionHandler {
         }
       }
 
-      // 清理
-      this.activeSessions.delete(session.id);
-      this.resultCallbacks.delete(session.id);
+      // 只有当结果成功发送时才清理 activeSessions
+      // 如果发送失败，保留 activeSessions 以便重连时能正确更新 WebSocket
+      if (resultSent) {
+        console.log(chalk.blue('[Discussion]'), `Cleaning up activeSession: ${session.id}, before: ${this.activeSessions.size}`);
+        this.activeSessions.delete(session.id);
+        this.resultCallbacks.delete(session.id);
+        console.log(chalk.blue('[Discussion]'), `After cleanup, activeSessions.size: ${this.activeSessions.size}, pendingResults.size: ${this.pendingResults.size}`);
+      } else {
+        console.log(chalk.yellow('[Discussion]'), `Result not sent (WebSocket closed), keeping activeSession for reconnect: ${session.id}`);
+        console.log(chalk.yellow('[Discussion]'), `Cached result in pendingResults, client needs to reconnect to receive it`);
+      }
 
       return result;
 
@@ -469,17 +492,43 @@ export class DiscussionHandler {
 
   /**
    * 发送消息
+   * @returns 是否发送成功
    */
-  private sendMessage(ws: WebSocket, message: DiscussionMessage): void {
+  private sendMessage(ws: WebSocket, message: DiscussionMessage): boolean {
     try {
       // 检查 WebSocket 状态
+      console.log(chalk.blue('[Discussion]'), `sendMessage called: type=${message.type}, ws.readyState=${ws.readyState}`);
       if (ws.readyState !== 1) {
         console.log(chalk.yellow('[Discussion]'), `WebSocket not ready (state: ${ws.readyState}), skipping message: ${message.type}`);
-        return;
+        return false;
       }
-      ws.send(JSON.stringify(message));
+      const messageStr = JSON.stringify(message);
+      ws.send(messageStr);
+      console.log(chalk.green('[Discussion]'), `Message sent successfully: type=${message.type}, length=${messageStr.length}`);
+      return true;
     } catch (error) {
       console.error(chalk.red('Failed to send discussion message:'), error);
+      return false;
+    }
+  }
+
+  /**
+   * 清理过期的缓存结果
+   */
+  private cleanupPendingResults(): void {
+    const now = Date.now();
+    const before = this.pendingResults.size;
+    for (const [sessionId, data] of this.pendingResults) {
+      const age = now - data.timestamp;
+      console.log(chalk.gray('[Discussion]'), `Checking pending result ${sessionId}, age: ${age}ms, TTL: ${this.PENDING_RESULT_TTL}ms`);
+      if (age > this.PENDING_RESULT_TTL) {
+        this.pendingResults.delete(sessionId);
+        console.log(chalk.gray('[Discussion] Cleaned up expired pending result for session:', sessionId));
+      }
+    }
+    const after = this.pendingResults.size;
+    if (before !== after) {
+      console.log(chalk.blue('[Discussion]'), `cleanupPendingResults: ${before} -> ${after}`);
     }
   }
 
@@ -521,6 +570,14 @@ export class DiscussionHandler {
    */
   updateRunningWebSocket(ws: WebSocket): boolean {
     const sessionIds = Array.from(this.activeSessions.keys());
+    console.log(chalk.blue('[Discussion]'), `updateRunningWebSocket called, activeSessions: ${sessionIds.length}, pendingResults: ${this.pendingResults.size}, ws.readyState: ${ws.readyState}`);
+
+    // 检查 WebSocket 状态
+    if (ws.readyState !== 1) {
+      console.log(chalk.yellow('[Discussion]'), `WebSocket not ready (state: ${ws.readyState}), cannot update or send pending results`);
+      return false;
+    }
+
     if (sessionIds.length > 0) {
       // 更新所有活跃讨论的 WebSocket
       for (const sessionId of sessionIds) {
@@ -529,6 +586,70 @@ export class DiscussionHandler {
       }
       return true;
     }
+
+    // 检查是否有待发送的讨论结果（客户端重连时讨论已完成）
+    this.cleanupPendingResults();
+    console.log(chalk.blue('[Discussion]'), `After cleanup, pendingResults: ${this.pendingResults.size}`);
+
+    if (this.pendingResults.size > 0) {
+      console.log(chalk.blue('[Discussion]'), `Found ${this.pendingResults.size} pending result(s) to send on reconnect`);
+
+      // 延迟发送缓存结果，等待前端 useDiscussion hook 注册消息监听器
+      // 前端在收到 auth_success 后才会更新 ws 状态，useDiscussion hook 才会注册监听器
+      // 这个延迟确保前端已经准备好接收消息
+      const wsRef = ws; // 保存引用，防止闭包问题
+      setTimeout(() => {
+        // 再次检查 WebSocket 状态
+        if (wsRef.readyState !== 1) {
+          console.log(chalk.yellow('[Discussion]'), `WebSocket closed after timeout, cannot send pending results`);
+          return;
+        }
+
+        for (const [sessionId, data] of this.pendingResults) {
+          console.log(chalk.blue('[Discussion]'), `Sending pending result for session: ${sessionId}`);
+
+          // 发送 discussion_result
+          const resultSent = this.sendMessage(wsRef, {
+            type: 'discussion_result',
+            sessionId,
+            data: {
+              ...data.result,
+              hostSummary: data.hostSummary
+            },
+            timestamp: Date.now()
+          });
+
+          if (!resultSent) {
+            console.log(chalk.red('[Discussion]'), `Failed to send pending result for session: ${sessionId}, keeping in cache`);
+            continue; // 不删除，保留到下次重连
+          }
+
+          // 发送 discussion_summary
+          const summarySent = this.sendMessage(wsRef, {
+            type: 'discussion_summary',
+            sessionId,
+            data: {
+              summary: data.hostSummary,
+              perspectives: data.result.perspectives,
+              recommendations: data.result.recommendations,
+              rawResult: data.result
+            },
+            timestamp: Date.now()
+          });
+
+          if (resultSent && summarySent) {
+            // 两个消息都发送成功才删除缓存
+            this.pendingResults.delete(sessionId);
+            console.log(chalk.green('[Discussion]'), `Pending result sent and removed for session: ${sessionId}`);
+          } else {
+            console.log(chalk.yellow('[Discussion]'), `Partial send for session: ${sessionId}, keeping in cache`);
+          }
+        }
+      }, 500); // 延迟 500ms，给前端时间注册监听器
+
+      return true;
+    }
+
     return false;
   }
 

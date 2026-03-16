@@ -357,6 +357,11 @@ export function useDiscussion(options: UseDiscussionOptions) {
             break;
 
           case 'discussion_result':
+            console.log('[Discussion] Received discussion_result');
+            console.log('[Discussion]   msg.sessionId:', msg.sessionId);
+            console.log('[Discussion]   handlersRef.current keys:', Object.keys(handlersRef.current));
+            console.log('[Discussion]   onCreateHostSession exists:', !!handlersRef.current.onCreateHostSession);
+            console.log('[Discussion]   onComplete exists:', !!handlersRef.current.onComplete);
             setIsRunning(false);
             sessionIdRef.current = null; // 清理 ref
             const result = msg.data as DiscussionResult;
