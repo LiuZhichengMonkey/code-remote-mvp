@@ -686,6 +686,167 @@ Status badge shows in sidebar before session title:
 
 ---
 
+## Discussion Reconnect Handling (2025-03-18)
+
+### Overview
+
+When users refresh the page during a multi-agent discussion, the discussion continues on the backend. After the frontend reconnects, it now actively requests cached results instead of relying on timing-based delays.
+
+### Problem
+
+Previously, when a user refreshed during discussion (especially in R3 phase), the discussion results were cached in `pendingResults` but never delivered to the reconnected client because:
+1. Backend used a fixed 500ms delay to send cached results
+2. Frontend might not have the message listener ready in time
+3. The cached results were lost
+
+### Solution
+
+Implemented a pull-based mechanism where frontend actively requests cached results:
+
+1. Frontend sends `discussion_get_pending` on WebSocket connect
+2. Backend responds with any cached `pendingResults`
+3. Results are delivered reliably regardless of timing
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/handlers/discussion.ts` | Added `sendPendingResultsOnRequest()` method; Modified `updateRunningWebSocket()` to always check `pendingResults`; Use latest WebSocket from `activeSessions` for result delivery |
+| `cli/src/server.ts` | Added `discussion_get_pending` message type |
+| `chat-ui/src/useDiscussion.ts` | Added `useEffect` to auto-request pending results on WebSocket connect |
+
+### WebSocket Protocol Extensions
+
+```typescript
+// Frontend -> Backend: Request cached results
+{ type: 'discussion_get_pending' }
+
+// Backend -> Frontend: Send cached result (if any)
+{
+  type: 'discussion_result',
+  sessionId: 'discussion-xxx',
+  data: { perspectives, consensus, recommendations },
+  timestamp: 1709900000000
+}
+```
+
+### Implementation Details
+
+```typescript
+// useDiscussion.ts - Auto-request pending on connect
+useEffect(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const timer = setTimeout(() => {
+      ws.send(JSON.stringify({ type: 'discussion_get_pending' }));
+    }, 100);
+    return () => clearTimeout(timer);
+  }
+}, [ws?.readyState]);
+
+// discussion.ts - Send pending results on request
+sendPendingResultsOnRequest(ws: WebSocket): boolean {
+  for (const [sessionId, data] of this.pendingResults) {
+    this.sendMessage(ws, { type: 'discussion_result', ... });
+    this.pendingResults.delete(sessionId);
+  }
+  return true;
+}
+```
+
+---
+
+## Session List Sorting by Last Activity (2025-03-18)
+
+### Overview
+
+Session list in the History sidebar is now sorted by last activity time (descending), so the most recently updated sessions appear first within each project.
+
+### Problem
+
+Previously, sessions were sorted by creation time (`createdAt`), which meant old sessions with recent messages would appear buried in the list.
+
+### Solution
+
+Added `lastActivity` field to `SessionInfo` and updated sorting logic:
+
+1. Track the latest message timestamp as `lastActivity`
+2. Sort sessions by `lastActivity` (descending) instead of `createdAt`
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/claude/types.ts` | Added `lastActivity?: number` to `SessionInfo` interface |
+| `cli/src/claude/storage.ts` | Modified `listSessionsByProject()` to track `lastActivity` and sort by it |
+
+### Implementation Details
+
+```typescript
+// storage.ts - Track last activity time
+let lastActivity = 0;
+for (const line of lines) {
+  const entry = JSON.parse(line);
+  if (entry.timestamp) {
+    const entryTime = new Date(entry.timestamp).getTime();
+    if (entryTime > lastActivity) {
+      lastActivity = entryTime;
+    }
+  }
+}
+
+// Sort by lastActivity (descending)
+return sessions.sort((a, b) =>
+  (b.lastActivity || b.createdAt) - (a.lastActivity || a.createdAt)
+).slice(0, limit);
+```
+
+---
+
+## Settings Menu Improvements (2025-03-18)
+
+### Overview
+
+Settings dropdown menu now shows configuration details and supports manual editing.
+
+### Features
+
+1. **Configuration Details**: Shows `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (masked), and `ANTHROPIC_MODEL` for each config
+2. **Manual Edit Mode**: Allows users to manually enter configuration values
+3. **Click-outside Close**: Dropdown closes when clicking outside
+4. **Improved Positioning**: Changed from `fixed` to `absolute` positioning
+
+### Key Files Modified
+
+| File | Changes |
+|------|---------|
+| `cli/src/server.ts` | Added `envDetails` to settings list response; Added `save` action for manual config |
+| `chat-ui/src/App.tsx` | Added settings dropdown with env details display; Manual edit form; Click-outside handler |
+
+### WebSocket Protocol Extensions
+
+```typescript
+// Get settings list with env details
+// Response now includes:
+{
+  type: 'settings_list',
+  settings: [{
+    name: 'settings_key1',
+    model: 'opus[1m]',
+    env: 3,
+    envDetails: {
+      ANTHROPIC_BASE_URL: 'https://...',
+      ANTHROPIC_AUTH_TOKEN: 'sk-...',
+      ANTHROPIC_MODEL: 'opus'
+    }
+  }]
+}
+
+// Save manual config
+{ type: 'settings', action: 'save', envDetails: { ... } }
+```
+
+---
+
 ## Code Block Syntax Highlighting (2025-03-11)
 
 ### Overview

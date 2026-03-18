@@ -30,15 +30,20 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'session_focus' | 'settings';
+  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'discussion_get_pending' | 'session_focus' | 'settings';
   token?: string;
   content?: string;
   fileName?: string;
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more' | 'list' | 'switch';
+  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more' | 'list' | 'switch' | 'save';
   settingsName?: string;
+  envDetails?: {
+    ANTHROPIC_BASE_URL?: string;
+    ANTHROPIC_AUTH_TOKEN?: string;
+    ANTHROPIC_MODEL?: string;
+  };
   sessionId?: string;
   projectId?: string;
   title?: string;
@@ -259,6 +264,12 @@ export class CodeRemoteServer {
         this.discussionHandler.handleRequest(ws, message as any as DiscussionRequest);
         break;
 
+      case 'discussion_get_pending':
+        // 前端请求缓存的讨论结果
+        console.log(chalk.blue('[Discussion]'), 'Received request for pending results');
+        this.discussionHandler.sendPendingResultsOnRequest(ws);
+        break;
+
       case 'session_focus':
         // 前端切换会话时通知后端，用于优化后台会话的流式传输
         console.log(chalk.blue('🔍'), `Session focus changed to: ${message.sessionId || 'none'}`);
@@ -297,11 +308,23 @@ export class CodeRemoteServer {
           const filePath = path.join(claudeDir, f);
           const content = readFileSync(filePath, 'utf-8');
           const config = JSON.parse(content);
+          // 提取关键的 env 配置
+          const envKeys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'];
+          const envDetails: Record<string, string> = {};
+          if (config.env) {
+            for (const key of envKeys) {
+              if (config.env[key]) {
+                envDetails[key] = config.env[key];
+              }
+            }
+          }
           return {
             name: f.replace('.json', ''),
             // 提取一些关键配置用于显示
             model: config.model || 'default',
-            env: config.env ? Object.keys(config.env).length : 0
+            env: config.env ? Object.keys(config.env).length : 0,
+            // 添加具体的 env 值
+            envDetails
           };
         });
 
@@ -382,6 +405,60 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           error: 'Failed to switch settings',
+          timestamp: Date.now()
+        }));
+      }
+    } else if (action === 'save') {
+      // 手动保存配置到 settings.json
+      const envDetails = (message as any).envDetails;
+      if (!envDetails) {
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          error: 'Missing envDetails',
+          timestamp: Date.now()
+        }));
+        return;
+      }
+
+      const targetPath = path.join(claudeDir, 'settings.json');
+      const backupPath = path.join(claudeDir, 'settings.json.backup');
+
+      try {
+        // 构建配置对象
+        const config = {
+          env: {
+            ANTHROPIC_BASE_URL: envDetails.ANTHROPIC_BASE_URL || '',
+            ANTHROPIC_AUTH_TOKEN: envDetails.ANTHROPIC_AUTH_TOKEN || '',
+            ANTHROPIC_MODEL: envDetails.ANTHROPIC_MODEL || ''
+          },
+          model: envDetails.ANTHROPIC_MODEL || 'opus[1m]',
+          permissions: {
+            defaultMode: 'bypassPermissions'
+          },
+          skipDangerousModePermissionPrompt: true
+        };
+
+        // 备份当前 settings.json
+        if (existsSync(targetPath)) {
+          const backupContent = readFileSync(targetPath, 'utf-8');
+          writeFileSync(backupPath, backupContent, 'utf-8');
+          console.log(chalk.blue('[Settings]'), `Backed up current settings.json`);
+        }
+
+        // 写入新配置到 settings.json
+        writeFileSync(targetPath, JSON.stringify(config, null, 2), 'utf-8');
+        console.log(chalk.green('[Settings]'), `Saved manual config to settings.json`);
+
+        ws.send(JSON.stringify({
+          type: 'settings_saved',
+          message: '配置已保存，请重启 Claude Code 以应用新配置',
+          timestamp: Date.now()
+        }));
+      } catch (error) {
+        console.error(chalk.red('[Settings]'), 'Failed to save settings:', error);
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          error: 'Failed to save settings',
           timestamp: Date.now()
         }));
       }

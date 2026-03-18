@@ -472,6 +472,18 @@ export function useDiscussion(options: UseDiscussionOptions) {
     return () => ws.removeEventListener('message', handleMessage);
   }, [ws, addDiscussionMessage]); // 移除 session?.id，因为现在使用 ref
 
+  // WebSocket 连接成功后自动请求缓存的讨论结果
+  useEffect(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // 延迟一点，确保消息监听器已注册
+      const timer = setTimeout(() => {
+        console.log('[Discussion] Requesting pending results on connect');
+        ws.send(JSON.stringify({ type: 'discussion_get_pending' }));
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [ws?.readyState]);
+
   // 开始讨论
   const startDiscussion = useCallback((input: string, config?: DiscussionConfig & { hostMode?: boolean }) => {
     console.log('[Discussion] startDiscussion called', { ws: ws?.readyState, input: input?.substring(0, 50), config });
@@ -508,6 +520,16 @@ export function useDiscussion(options: UseDiscussionOptions) {
     setIsRunning(false);
     setSession(prev => prev ? { ...prev, status: 'error' } : null);
   }, []);
+
+  // 请求缓存的讨论结果（重连后调用）
+  const requestPendingResults = useCallback(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.log('[Discussion] Cannot request pending results: WebSocket not ready');
+      return;
+    }
+    console.log('[Discussion] Requesting pending results...');
+    ws.send(JSON.stringify({ type: 'discussion_get_pending' }));
+  }, [ws]);
 
   // 重置
   const reset = useCallback(() => {
@@ -549,6 +571,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
     stopDiscussion,
     reset,
     restoreRunning,
+    requestPendingResults,
     consensusScore,
     discussionMode
   };

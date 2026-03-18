@@ -605,6 +605,7 @@ export class SessionStorage {
         const lines = content.trim().split('\n');
         let title = 'New Chat';
         let createdAt = Date.now();
+        let lastActivity = 0;  // 最后活动时间
         let messageCount = 0;
 
         for (const line of lines) {
@@ -614,8 +615,13 @@ export class SessionStorage {
 
             if (entry.timestamp) {
               const entryTime = new Date(entry.timestamp).getTime();
+              // createdAt 是最早的 timestamp
               if (entryTime < createdAt) {
                 createdAt = entryTime;
+              }
+              // lastActivity 是最新的 timestamp
+              if (entryTime > lastActivity) {
+                lastActivity = entryTime;
               }
             }
 
@@ -644,11 +650,16 @@ export class SessionStorage {
 
         // Only include sessions with at least one message
         if (messageCount > 0) {
+          // 如果没有 lastActivity，使用 createdAt
+          if (lastActivity === 0) {
+            lastActivity = createdAt;
+          }
           sessions.push({
             id: sessionId,
             title,
             createdAt,
-            messageCount
+            messageCount,
+            lastActivity
           });
         }
       } catch (err) {
@@ -656,8 +667,8 @@ export class SessionStorage {
       }
     }
 
-    // 按创建时间排序（最新的在前），然后限制数量
-    return sessions.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+    // 按最后活动时间排序（最新的在前），然后限制数量
+    return sessions.sort((a, b) => (b.lastActivity || b.createdAt) - (a.lastActivity || a.createdAt)).slice(0, limit);
   }
 
   /**

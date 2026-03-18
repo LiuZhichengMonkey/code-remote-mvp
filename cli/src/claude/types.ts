@@ -72,6 +72,7 @@ export interface SessionInfo {
   title: string;
   createdAt: number;
   messageCount: number;
+  lastActivity?: number;  // 最后活动时间，用于排序
 }
 
 export function createMessage(role: 'user' | 'assistant', content: string, images?: string[]): ClaudeMessage {

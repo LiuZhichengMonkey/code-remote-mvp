@@ -181,6 +181,7 @@ interface SettingsItem {
   name: string;
   model: string;
   env: number;
+  envDetails?: Record<string, string>;
 }
 
 // --- Connection Panel ---
@@ -209,6 +210,30 @@ const ConnectionPanel = ({
   const [selectedSettings, setSelectedSettings] = useState<string>('');
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(false);
+  // 手动编辑模式
+  const [isEditing, setIsEditing] = useState(false);
+  const [editForm, setEditForm] = useState({
+    ANTHROPIC_BASE_URL: '',
+    ANTHROPIC_AUTH_TOKEN: '',
+    ANTHROPIC_MODEL: ''
+  });
+
+  // 用于点击外部关闭下拉菜单
+  const settingsDropdownRef = useRef<HTMLDivElement>(null);
+  const showSettingsDropdownRef = useRef(showSettingsDropdown);
+  showSettingsDropdownRef.current = showSettingsDropdown;
+
+  // 点击外部关闭设置下拉菜单
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (showSettingsDropdownRef.current && settingsDropdownRef.current && !settingsDropdownRef.current.contains(target)) {
+        setShowSettingsDropdown(false);
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
 
   // 加载配置文件列表
   const loadSettingsList = useCallback(() => {
@@ -264,6 +289,37 @@ const ConnectionPanel = ({
     setShowSettingsDropdown(false);
   }, [wsRef]);
 
+  // 保存手动编辑的配置
+  const saveManualConfig = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(JSON.stringify({
+      type: 'settings',
+      action: 'save',
+      envDetails: editForm
+    }));
+
+    // 设置一次性监听器
+    const handleSettingsMessage = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'settings_saved') {
+          alert(data.message);
+          setIsEditing(false);
+          setSelectedSettings('(手动编辑)');
+        } else if (data.type === 'settings_error') {
+          console.error('Settings error:', data.error);
+          alert('保存失败: ' + data.error);
+        }
+      } catch {}
+    };
+
+    wsRef.current.addEventListener('message', handleSettingsMessage);
+    return () => {
+      wsRef.current?.removeEventListener('message', handleSettingsMessage);
+    };
+  }, [wsRef, editForm]);
+
   // 当连接成功时不需要自动加载，用户点击时再加载
   useEffect(() => {
     // 连接断开时重置状态
@@ -271,6 +327,8 @@ const ConnectionPanel = ({
       setSettingsList([]);
       setSelectedSettings('');
       setShowSettingsDropdown(false);
+      setIsEditing(false);
+      setEditForm({ ANTHROPIC_BASE_URL: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_MODEL: '' });
     }
   }, [isConnected]);
 
@@ -291,10 +349,11 @@ const ConnectionPanel = ({
       {isConnected && (
         <div className="mb-3">
           <label className="text-xs text-white/60 mb-1 block">Settings Config</label>
-          <div className="relative">
+          <div className="relative" ref={settingsDropdownRef}>
             <button
-              onClick={() => {
-                if (settingsList.length === 0) {
+              onClick={(e) => {
+                e.stopPropagation();
+                if (settingsList.length === 0 && !showSettingsDropdown) {
                   loadSettingsList();
                 }
                 setShowSettingsDropdown(!showSettingsDropdown);
@@ -305,11 +364,11 @@ const ConnectionPanel = ({
               <span className={selectedSettings ? '' : 'text-white/40'}>
                 {loadingSettings ? 'Loading...' : selectedSettings || 'Select settings config...'}
               </span>
-              <ChevronDown size={14} className="text-white/40" />
+              <ChevronDown size={14} className={`text-white/40 transition-transform ${showSettingsDropdown ? 'rotate-180' : ''}`} />
             </button>
 
             {showSettingsDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-white/10 rounded-lg overflow-hidden z-50 max-h-48 overflow-y-auto">
+              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-white/10 rounded-lg overflow-hidden z-[100] max-h-60 overflow-y-auto shadow-lg">
                 {settingsList.length === 0 ? (
                   <div className="p-3 text-sm text-white/40 text-center">
                     No settings found
@@ -318,17 +377,92 @@ const ConnectionPanel = ({
                   settingsList.map((settings) => (
                     <button
                       key={settings.name}
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setSelectedSettings(settings.name);
                         switchSettings(settings.name);
+                        setShowSettingsDropdown(false);
                       }}
-                      className="w-full px-3 py-2 text-sm text-white hover:bg-white/10 flex items-center justify-between"
+                      className="w-full px-3 py-2 text-sm text-white hover:bg-white/10 flex flex-col items-start"
                     >
-                      <span>{settings.name}</span>
-                      <span className="text-xs text-white/40">{settings.model}</span>
+                      <div className="flex items-center justify-between w-full">
+                        <span className="font-medium">{settings.name}</span>
+                        <span className="text-xs text-white/40">{settings.model}</span>
+                      </div>
+                      {/* 显示 env 详情 */}
+                      {settings.envDetails && (
+                        <div className="mt-1 text-xs text-white/50 w-full">
+                          {settings.envDetails.ANTHROPIC_BASE_URL && (
+                            <div className="truncate">URL: {settings.envDetails.ANTHROPIC_BASE_URL}</div>
+                          )}
+                          {settings.envDetails.ANTHROPIC_AUTH_TOKEN && (
+                            <div className="truncate">Token: {settings.envDetails.ANTHROPIC_AUTH_TOKEN.substring(0, 20)}...</div>
+                          )}
+                          {settings.envDetails.ANTHROPIC_MODEL && (
+                            <div>Model: {settings.envDetails.ANTHROPIC_MODEL}</div>
+                          )}
+                        </div>
+                      )}
                     </button>
                   ))
                 )}
+
+                {/* 分隔线 */}
+                <div className="border-t border-white/10" />
+
+                {/* 手动编辑按钮 */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!isEditing) {
+                      // 初始化编辑表单，使用当前选择的配置
+                      const current = settingsList.find(s => s.name === selectedSettings);
+                      setEditForm({
+                        ANTHROPIC_BASE_URL: current?.envDetails?.ANTHROPIC_BASE_URL || '',
+                        ANTHROPIC_AUTH_TOKEN: current?.envDetails?.ANTHROPIC_AUTH_TOKEN || '',
+                        ANTHROPIC_MODEL: current?.envDetails?.ANTHROPIC_MODEL || ''
+                      });
+                    }
+                    setIsEditing(!isEditing);
+                  }}
+                  className="w-full px-3 py-2 text-sm text-accent hover:bg-white/10 rounded-lg transition-colors"
+                >
+                  {isEditing ? '取消编辑' : '+ 手动编辑配置'}
+                </button>
+              </div>
+            )}
+
+            {/* 手动编辑表单 */}
+            {isEditing && (
+              <div className="mt-3 p-3 bg-white/5 rounded-lg space-y-2 border border-white/10">
+                <div className="text-xs text-white/60 mb-2">手动编辑配置</div>
+                <input
+                  type="text"
+                  value={editForm.ANTHROPIC_BASE_URL}
+                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_BASE_URL: e.target.value})}
+                  placeholder="ANTHROPIC_BASE_URL"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                />
+                <input
+                  type="password"
+                  value={editForm.ANTHROPIC_AUTH_TOKEN}
+                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_AUTH_TOKEN: e.target.value})}
+                  placeholder="ANTHROPIC_AUTH_TOKEN"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                />
+                <input
+                  type="text"
+                  value={editForm.ANTHROPIC_MODEL}
+                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_MODEL: e.target.value})}
+                  placeholder="ANTHROPIC_MODEL"
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                />
+                <button
+                  onClick={saveManualConfig}
+                  className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/80 transition-colors"
+                >
+                  保存并应用
+                </button>
               </div>
             )}
           </div>
