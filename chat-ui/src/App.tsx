@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo, useId } from 'react';
+﻿import React, { useState, useRef, useEffect, useCallback, useMemo, useId } from 'react';
 import {
   Menu,
   Plus,
@@ -40,6 +40,8 @@ import {
   ChatOption,
   MessageProcess,
   MessageProcessEvent,
+  ProcessPanelPreferences,
+  UiPreferences,
   Provider
 } from './types';
 import { cn } from './utils';
@@ -244,10 +246,11 @@ interface ProjectInfo {
 
 interface WSMessage {
   type: string;
+  action?: string;
   content?: string;
   thinking?: string;
   done?: boolean;
-  replace?: boolean;  // 后台会话切换回来时，替换而不是追加内容
+  replace?: boolean;  // Replace streamed content instead of appending when resuming a background session
   error?: string;
   code?: string;
   data?: any;
@@ -257,14 +260,14 @@ interface WSMessage {
   projectId?: string;
   provider?: Provider;
   discussionId?: string;
-  // 附件（图片）
+  // Attachments
   attachments?: Array<{
     id: string;
     name: string;
     type: string;
     data: string;  // base64 encoded
   }>;
-  // 工具事件
+  // Tool events
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
@@ -291,20 +294,77 @@ interface WSMessage {
     projectId?: string;
   }>;
   projects?: ProjectInfo[];
-  // 日志
+  // Logs
   level?: string;
   message?: string;
   timestamp?: number;
-  // 分页
+  // Pagination
   hasMore?: boolean;
   totalMessages?: number;
-  // 会话 ID 更新
+  // Session ID updates
   oldSessionId?: string;
   newSessionId?: string;
   title?: string;
-  // 消息加载
+  // Loaded messages
   messages?: Message[];
+  uiPreferences?: UiPreferences;
 }
+
+const DEFAULT_PROCESS_PANEL_PREFERENCES: ProcessPanelPreferences = {
+  showStatus: true,
+  showLog: true,
+  showTool: true
+};
+
+const DEFAULT_UI_PREFERENCES: UiPreferences = {
+  processPanel: DEFAULT_PROCESS_PANEL_PREFERENCES,
+  updatedAt: 0
+};
+
+const normalizeProcessPanelPreferences = (
+  value?: Partial<ProcessPanelPreferences> | null
+): ProcessPanelPreferences => ({
+  showStatus: value?.showStatus ?? DEFAULT_PROCESS_PANEL_PREFERENCES.showStatus,
+  showLog: value?.showLog ?? DEFAULT_PROCESS_PANEL_PREFERENCES.showLog,
+  showTool: value?.showTool ?? DEFAULT_PROCESS_PANEL_PREFERENCES.showTool
+});
+
+const normalizeUiPreferences = (value?: UiPreferences | null): UiPreferences => ({
+  processPanel: normalizeProcessPanelPreferences(value?.processPanel),
+  updatedAt: typeof value?.updatedAt === 'number' ? value.updatedAt : 0
+});
+
+const filterProcessForDisplay = (
+  process: MessageProcess | undefined,
+  preferences: ProcessPanelPreferences
+): MessageProcess | undefined => {
+  if (!process || process.events.length === 0) {
+    return undefined;
+  }
+
+  const visibleEvents = process.events.filter(event => {
+    switch (event.type) {
+      case 'status':
+        return preferences.showStatus;
+      case 'log':
+        return preferences.showLog;
+      case 'tool_use':
+      case 'tool_result':
+        return preferences.showTool;
+      default:
+        return true;
+    }
+  });
+
+  if (visibleEvents.length === 0) {
+    return undefined;
+  }
+
+  return {
+    ...process,
+    events: visibleEvents
+  };
+};
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   claude: 'Claude',
@@ -312,6 +372,34 @@ const PROVIDER_LABELS: Record<Provider, string> = {
 };
 
 const getProviderLabel = (provider?: Provider): string => PROVIDER_LABELS[provider || 'claude'];
+
+const LEGACY_MOJIBAKE_REPLACEMENTS: Array<[string, string]> = [
+  ['\u9983\ue639\u0020\u0054\u0068\u0069\u006e\u006b\u0069\u006e\u0067\u002e\u002e\u002e', 'Thinking...'],
+  ['\u9983\ue63b', '@'],
+  ['\u9983\u6561', '[Tool]'],
+  ['\u9983\u5e46', '[Discussion]'],
+  ['\u9983\u6427', '[DIR]'],
+  ['\u9983\u642b', '[FILE]'],
+  ['\u9983\u6533', '[Search]'],
+  ['\u95ab\u590b\u5ae8\u93c5\u9e3f\u5158\u6d63\u64c4\u7d19\u9359\ue21a\ue63f\u95ab\u591b\u7d1a', 'Choose agents (multi-select)'],
+  ['\u5a0c\u2103\u6e41\u93b5\u60e7\u57cc\u9356\u5f52\u53a4\u9428\u52ec\u6ae4\u9473\u6212\u7d8b', 'No matching agents found'],
+  ['\u6769\u612f\ue511\u6d93\u003f\u8def\u0020\u9410\u7470\u56ae\u93cc\u30e7\u6e45', 'Running · Tap to view'],
+  ['\u6769\u612f\ue511\u6d93\u003f', 'Running'],
+  ['\u7039\u5c7e\u579a', 'Completed'],
+  ['\u59dd\uff45\u6e6a\u6fb6\u52ed\u608a\u002e\u002e\u002e', 'Processing...'],
+  ['\u6fb6\u6c2d\u6ae4\u9473\u6212\u7d8b\u7481\u3128\ue191\u6769\u6d9c\ue511\u6d93\u003f\u002e\u002e', 'Multi-agent discussion in progress...']
+];
+
+const normalizeLegacyDisplayText = (value?: string | null): string => {
+  if (!value) {
+    return '';
+  }
+
+  return LEGACY_MOJIBAKE_REPLACEMENTS.reduce(
+    (result, [needle, replacement]) => result.replaceAll(needle, replacement),
+    value
+  );
+};
 
 const getProviderBadgeClass = (provider?: Provider): string => (
   provider === 'codex'
@@ -327,6 +415,36 @@ interface SettingsItem {
   envDetails?: Record<string, string>;
 }
 
+const PROCESS_PANEL_SETTING_OPTIONS: Array<{
+  key: keyof ProcessPanelPreferences;
+  title: string;
+  description: string;
+  badge: string;
+  accentClass: string;
+}> = [
+  {
+    key: 'showStatus',
+    title: 'Status',
+    description: 'Started, reasoning, completed and other lifecycle updates.',
+    badge: 'status',
+    accentClass: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+  },
+  {
+    key: 'showLog',
+    title: 'Log',
+    description: 'Commentary and runtime log lines emitted while the model works.',
+    badge: 'log',
+    accentClass: 'border-amber-400/20 bg-amber-500/10 text-amber-200'
+  },
+  {
+    key: 'showTool',
+    title: 'Tool',
+    description: 'Includes both tool calls and tool results in one switch.',
+    badge: 'tool_use + tool_result',
+    accentClass: 'border-sky-400/20 bg-sky-500/10 text-sky-200'
+  }
+];
+
 // --- Connection Panel ---
 const ConnectionPanel = ({
   url,
@@ -337,7 +455,11 @@ const ConnectionPanel = ({
   onDisconnect,
   isConnected,
   isConnecting,
-  wsRef
+  wsRef,
+  processPanelPreferences,
+  processPreferencesLoaded,
+  processPreferencesSaving,
+  onProcessPanelPreferenceChange
 }: {
   url: string;
   token: string;
@@ -348,12 +470,16 @@ const ConnectionPanel = ({
   isConnected: boolean;
   isConnecting: boolean;
   wsRef: React.MutableRefObject<WebSocket | null>;
+  processPanelPreferences: ProcessPanelPreferences;
+  processPreferencesLoaded: boolean;
+  processPreferencesSaving: boolean;
+  onProcessPanelPreferenceChange: (key: keyof ProcessPanelPreferences, value: boolean) => void;
 }) => {
   const [settingsList, setSettingsList] = useState<SettingsItem[]>([]);
   const [selectedSettings, setSelectedSettings] = useState<string>('');
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(false);
-  // 手动编辑模式
+  // Manual profile editing
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({
     ANTHROPIC_BASE_URL: '',
@@ -361,12 +487,12 @@ const ConnectionPanel = ({
     ANTHROPIC_MODEL: ''
   });
 
-  // 用于点击外部关闭下拉菜单
+  // Used to dismiss the dropdown on outside clicks
   const settingsDropdownRef = useRef<HTMLDivElement>(null);
   const showSettingsDropdownRef = useRef(showSettingsDropdown);
   showSettingsDropdownRef.current = showSettingsDropdown;
 
-  // 点击外部关闭设置下拉菜单
+  // Close the settings dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -378,7 +504,7 @@ const ConnectionPanel = ({
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
-  // 加载配置文件列表
+  // Load saved settings profiles
   const loadSettingsList = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       console.log('[Settings] WS not ready, state:', wsRef.current?.readyState);
@@ -392,7 +518,7 @@ const ConnectionPanel = ({
       action: 'list'
     }));
 
-    // 设置一次性监听器
+    // Temporary listener for settings responses
     const handleSettingsMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data);
@@ -402,7 +528,7 @@ const ConnectionPanel = ({
           setLoadingSettings(false);
         } else if (data.type === 'settings_switched') {
           alert(data.message);
-          // 重置选择
+          // Keep the selected profile in sync after switching
           setSelectedSettings(data.settingsName);
         } else if (data.type === 'settings_error') {
           console.error('Settings error:', data.error);
@@ -420,7 +546,7 @@ const ConnectionPanel = ({
     };
   }, [wsRef]);
 
-  // 切换配置文件
+  // Switch the active settings profile
   const switchSettings = useCallback((settingsName: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -432,7 +558,7 @@ const ConnectionPanel = ({
     setShowSettingsDropdown(false);
   }, [wsRef]);
 
-  // 保存手动编辑的配置
+  // Save the manual override form
   const saveManualConfig = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -442,17 +568,17 @@ const ConnectionPanel = ({
       envDetails: editForm
     }));
 
-    // 设置一次性监听器
+    // Temporary listener for save responses
     const handleSettingsMessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'settings_saved') {
           alert(data.message);
           setIsEditing(false);
-          setSelectedSettings('(手动编辑)');
+          setSelectedSettings('(Manual override)');
         } else if (data.type === 'settings_error') {
           console.error('Settings error:', data.error);
-          alert('保存失败: ' + data.error);
+          alert('Save failed: ' + data.error);
         }
       } catch {}
     };
@@ -463,9 +589,24 @@ const ConnectionPanel = ({
     };
   }, [wsRef, editForm]);
 
-  // 当连接成功时不需要自动加载，用户点击时再加载
+  const toggleManualEdit = useCallback((event?: React.MouseEvent<HTMLButtonElement>) => {
+    event?.stopPropagation();
+
+    if (!isEditing) {
+      const current = settingsList.find(settings => settings.name === selectedSettings);
+      setEditForm({
+        ANTHROPIC_BASE_URL: current?.envDetails?.ANTHROPIC_BASE_URL || '',
+        ANTHROPIC_AUTH_TOKEN: current?.envDetails?.ANTHROPIC_AUTH_TOKEN || '',
+        ANTHROPIC_MODEL: current?.envDetails?.ANTHROPIC_MODEL || ''
+      });
+    }
+
+    setIsEditing(prev => !prev);
+  }, [isEditing, selectedSettings, settingsList]);
+
+  // Reset local settings UI after disconnects
   useEffect(() => {
-    // 连接断开时重置状态
+    // Clear the cached profile state when the socket drops
     if (!isConnected) {
       setSettingsList([]);
       setSelectedSettings('');
@@ -475,24 +616,133 @@ const ConnectionPanel = ({
     }
   }, [isConnected]);
 
+  const selectedSettingsItem = settingsList.find(settings => settings.name === selectedSettings);
+  const connectionStatusLabel = isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected';
+  const processPreferencesStatusText = isConnected
+    ? (processPreferencesSaving
+      ? 'Syncing preferences to the current workspace...'
+      : (processPreferencesLoaded
+        ? 'Synced across devices for this workspace.'
+        : 'Using current values while sync finishes.'))
+    : 'Connect to load synced workspace preferences.';
+  const canToggleProcessPreferences = isConnected && !processPreferencesSaving;
+
   return (
-    <div className="p-4 bg-card border-b border-white/10">
-      <div className="flex items-center gap-2 mb-3">
-        {isConnected ? (
-          <Wifi size={16} className="text-green-400" />
-        ) : (
-          <WifiOff size={16} className="text-white/40" />
-        )}
-        <span className="text-xs font-medium text-white/60">
-          {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
-        </span>
+    <div className="space-y-3 border-b border-white/10 bg-card p-4">
+      <div className="rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.02))] p-4 shadow-[0_18px_48px_rgba(0,0,0,0.18)]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div
+              className={cn(
+                'flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border',
+                isConnected
+                  ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                  : 'border-white/10 bg-black/20 text-white/40'
+              )}
+            >
+              {isConnected ? <Wifi size={18} /> : <WifiOff size={18} />}
+            </div>
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Bridge Connection</div>
+              <div className="mt-1 text-sm font-medium text-white">Local CLI transport for Claude and Codex sessions</div>
+              <div className="mt-1 text-[11px] leading-5 text-white/45">
+                This connection also carries synced UI preferences for the current workspace.
+              </div>
+            </div>
+          </div>
+          <span
+            className={cn(
+              'inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em]',
+              isConnected
+                ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                : (isConnecting
+                  ? 'border-amber-400/20 bg-amber-500/10 text-amber-200'
+                  : 'border-white/10 bg-white/5 text-white/40')
+            )}
+          >
+            {connectionStatusLabel}
+          </span>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <div className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-white/45">
+            URL {url ? 'ready' : 'missing'}
+          </div>
+          <div className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-white/45">
+            Token {token ? 'ready' : 'missing'}
+          </div>
+        </div>
+
+        <div className="mt-3 space-y-2">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">WebSocket URL</span>
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => onUrlChange(e.target.value)}
+              placeholder="WebSocket URL (ws://...)"
+              className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
+              disabled={isConnected}
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">Token</span>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => onTokenChange(e.target.value)}
+              placeholder="Token"
+              className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
+              disabled={isConnected}
+            />
+          </label>
+        </div>
+
+        <div className="mt-3">
+          {isConnected ? (
+            <button
+              onClick={onDisconnect}
+              className="w-full rounded-xl bg-red-500/20 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/30"
+            >
+              Disconnect
+            </button>
+          ) : (
+            <button
+              onClick={onConnect}
+              disabled={isConnecting || !url || !token}
+              className="w-full rounded-xl bg-accent py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+            >
+              {isConnecting ? 'Connecting...' : 'Connect'}
+            </button>
+          )}
+        </div>
+
       </div>
 
-      {/* Settings Config Selector */}
       {isConnected && (
-        <div className="mb-3">
-          <label className="text-xs text-white/60 mb-1 block">Settings Config</label>
-          <div className="relative" ref={settingsDropdownRef}>
+        <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Runtime Profile</div>
+              <div className="mt-1 text-sm font-medium text-white">Switch saved backend settings or override them manually</div>
+              <div className="mt-1 text-[11px] leading-5 text-white/45">
+                Use a saved profile for quick switching, or open the manual editor for one-off values.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={toggleManualEdit}
+              className={cn(
+                'inline-flex shrink-0 items-center rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
+                isEditing
+                  ? 'border-accent/40 bg-accent/15 text-accent'
+                  : 'border-white/10 bg-white/5 text-white/65 hover:bg-white/10'
+              )}
+            >
+              {isEditing ? 'Close editor' : 'Manual override'}
+            </button>
+          </div>
+          <div className="relative mt-3" ref={settingsDropdownRef}>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -502,18 +752,27 @@ const ConnectionPanel = ({
                 setShowSettingsDropdown(!showSettingsDropdown);
               }}
               disabled={loadingSettings}
-              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white flex items-center justify-between hover:bg-white/10 transition-colors"
+              className="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-black/20 px-3 py-3 text-left transition-colors hover:bg-white/[0.08]"
             >
-              <span className={selectedSettings ? '' : 'text-white/40'}>
-                {loadingSettings ? 'Loading...' : selectedSettings || 'Select settings config...'}
-              </span>
-              <ChevronDown size={14} className={`text-white/40 transition-transform ${showSettingsDropdown ? 'rotate-180' : ''}`} />
+              <div className="min-w-0">
+                <div className={cn('truncate text-sm font-medium', selectedSettings ? 'text-white' : 'text-white/40')}>
+                  {loadingSettings ? 'Loading profiles...' : selectedSettings || 'Select settings profile'}
+                </div>
+                <div className="mt-1 text-[11px] text-white/40">
+                  {selectedSettingsItem
+                    ? (selectedSettingsItem.model || 'Unknown model') + (selectedSettingsItem.env ? ' · ' + selectedSettingsItem.env + ' env vars' : '')
+                    : 'Load a saved profile and apply it to the CLI bridge'}
+                </div>
+              </div>
+              <div className="ml-3 flex shrink-0 items-center gap-2">
+                {loadingSettings && <RefreshCw size={14} className="animate-spin text-white/35" />}
+                <ChevronDown size={14} className={cn('text-white/40 transition-transform', showSettingsDropdown && 'rotate-180')} />
+              </div>
             </button>
-
             {showSettingsDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-white/10 rounded-lg overflow-hidden z-[100] max-h-60 overflow-y-auto shadow-lg">
+              <div className="absolute left-0 right-0 top-full z-[100] mt-2 max-h-72 overflow-y-auto rounded-2xl border border-white/10 bg-card p-1 shadow-2xl">
                 {settingsList.length === 0 ? (
-                  <div className="p-3 text-sm text-white/40 text-center">
+                  <div className="p-4 text-center text-sm text-white/40">
                     No settings found
                   </div>
                 ) : (
@@ -526,126 +785,188 @@ const ConnectionPanel = ({
                         switchSettings(settings.name);
                         setShowSettingsDropdown(false);
                       }}
-                      className="w-full px-3 py-2 text-sm text-white hover:bg-white/10 flex flex-col items-start"
+                      className={cn(
+                        'w-full rounded-xl px-3 py-2.5 text-left text-sm text-white transition-colors hover:bg-white/10',
+                        selectedSettings === settings.name && 'bg-white/[0.08]'
+                      )}
                     >
-                      <div className="flex items-center justify-between w-full">
-                        <span className="font-medium">{settings.name}</span>
-                        <span className="text-xs text-white/40">{settings.model}</span>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="truncate font-medium">{settings.name}</span>
+                        <span className="shrink-0 text-[11px] text-white/40">{settings.model}</span>
                       </div>
-                      {/* 显示 env 详情 */}
                       {settings.envDetails && (
-                        <div className="mt-1 text-xs text-white/50 w-full">
+                        <div className="mt-1.5 space-y-1 text-[11px] text-white/45">
                           {settings.envDetails.ANTHROPIC_BASE_URL && (
                             <div className="truncate">URL: {settings.envDetails.ANTHROPIC_BASE_URL}</div>
                           )}
-                          {settings.envDetails.ANTHROPIC_AUTH_TOKEN && (
-                            <div className="truncate">Token: {settings.envDetails.ANTHROPIC_AUTH_TOKEN.substring(0, 20)}...</div>
-                          )}
                           {settings.envDetails.ANTHROPIC_MODEL && (
-                            <div>Model: {settings.envDetails.ANTHROPIC_MODEL}</div>
+                            <div className="truncate">Model: {settings.envDetails.ANTHROPIC_MODEL}</div>
+                          )}
+                          {settings.envDetails.ANTHROPIC_AUTH_TOKEN && (
+                            <div>Auth token configured</div>
                           )}
                         </div>
                       )}
                     </button>
                   ))
                 )}
-
-                {/* 分隔线 */}
-                <div className="border-t border-white/10" />
-
-                {/* 手动编辑按钮 */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!isEditing) {
-                      // 初始化编辑表单，使用当前选择的配置
-                      const current = settingsList.find(s => s.name === selectedSettings);
-                      setEditForm({
-                        ANTHROPIC_BASE_URL: current?.envDetails?.ANTHROPIC_BASE_URL || '',
-                        ANTHROPIC_AUTH_TOKEN: current?.envDetails?.ANTHROPIC_AUTH_TOKEN || '',
-                        ANTHROPIC_MODEL: current?.envDetails?.ANTHROPIC_MODEL || ''
-                      });
-                    }
-                    setIsEditing(!isEditing);
-                  }}
-                  className="w-full px-3 py-2 text-sm text-accent hover:bg-white/10 rounded-lg transition-colors"
-                >
-                  {isEditing ? '取消编辑' : '+ 手动编辑配置'}
-                </button>
-              </div>
-            )}
-
-            {/* 手动编辑表单 */}
-            {isEditing && (
-              <div className="mt-3 p-3 bg-white/5 rounded-lg space-y-2 border border-white/10">
-                <div className="text-xs text-white/60 mb-2">手动编辑配置</div>
-                <input
-                  type="text"
-                  value={editForm.ANTHROPIC_BASE_URL}
-                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_BASE_URL: e.target.value})}
-                  placeholder="ANTHROPIC_BASE_URL"
-                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-                />
-                <input
-                  type="password"
-                  value={editForm.ANTHROPIC_AUTH_TOKEN}
-                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_AUTH_TOKEN: e.target.value})}
-                  placeholder="ANTHROPIC_AUTH_TOKEN"
-                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-                />
-                <input
-                  type="text"
-                  value={editForm.ANTHROPIC_MODEL}
-                  onChange={(e) => setEditForm({...editForm, ANTHROPIC_MODEL: e.target.value})}
-                  placeholder="ANTHROPIC_MODEL"
-                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-                />
-                <button
-                  onClick={saveManualConfig}
-                  className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/80 transition-colors"
-                >
-                  保存并应用
-                </button>
               </div>
             )}
           </div>
+          {selectedSettingsItem?.envDetails && (
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {selectedSettingsItem.envDetails.ANTHROPIC_BASE_URL && (
+                <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Base URL</div>
+                  <div className="mt-1 truncate text-xs text-white/75">{selectedSettingsItem.envDetails.ANTHROPIC_BASE_URL}</div>
+                </div>
+              )}
+              {selectedSettingsItem.envDetails.ANTHROPIC_MODEL && (
+                <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Model</div>
+                  <div className="mt-1 truncate text-xs text-white/75">{selectedSettingsItem.envDetails.ANTHROPIC_MODEL}</div>
+                </div>
+              )}
+              {selectedSettingsItem.envDetails.ANTHROPIC_AUTH_TOKEN && (
+                <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Auth</div>
+                  <div className="mt-1 text-xs text-white/75">Token configured</div>
+                </div>
+              )}
+            </div>
+          )}
+          {isEditing && (
+            <div className="mt-3 rounded-2xl border border-accent/15 bg-white/[0.04] p-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Manual Override</div>
+              <div className="mt-1 text-[11px] leading-5 text-white/45">
+                Save a temporary endpoint override and apply it immediately.
+              </div>
+              <div className="mt-3 space-y-2">
+                <label className="block">
+                  <span className="mb-1 block text-[11px] text-white/45">Base URL</span>
+                  <input
+                    type="text"
+                    value={editForm.ANTHROPIC_BASE_URL}
+                    onChange={(e) => setEditForm({ ...editForm, ANTHROPIC_BASE_URL: e.target.value })}
+                    placeholder="ANTHROPIC_BASE_URL"
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] text-white/45">Auth Token</span>
+                  <input
+                    type="password"
+                    value={editForm.ANTHROPIC_AUTH_TOKEN}
+                    onChange={(e) => setEditForm({ ...editForm, ANTHROPIC_AUTH_TOKEN: e.target.value })}
+                    placeholder="ANTHROPIC_AUTH_TOKEN"
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] text-white/45">Model</span>
+                  <input
+                    type="text"
+                    value={editForm.ANTHROPIC_MODEL}
+                    onChange={(e) => setEditForm({ ...editForm, ANTHROPIC_MODEL: e.target.value })}
+                    placeholder="ANTHROPIC_MODEL"
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
+                  />
+                </label>
+              </div>
+              <button
+                onClick={saveManualConfig}
+                className="mt-3 w-full rounded-xl bg-accent py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80"
+              >
+                Save and apply
+              </button>
+            </div>
+          )}
         </div>
       )}
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Process Panel</div>
+            <div className="mt-1 text-sm font-medium text-white">Choose which process channels are visible</div>
+            <div className="mt-1 text-[11px] leading-5 text-white/45">
+              {processPreferencesStatusText}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {isConnected && processPreferencesSaving ? (
+              <Loader2 size={14} className="animate-spin text-white/40" />
+            ) : (
+              <Check size={14} className={cn('text-white/25', processPreferencesLoaded && isConnected && 'text-emerald-300')} />
+            )}
+            <span
+              className={cn(
+                'inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em]',
+                isConnected
+                  ? (processPreferencesLoaded
+                    ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                    : 'border-amber-400/20 bg-amber-500/10 text-amber-200')
+                  : 'border-white/10 bg-white/5 text-white/40'
+              )}
+            >
+              {isConnected ? (processPreferencesLoaded ? 'Workspace synced' : 'Pending sync') : 'Offline'}
+            </span>
+          </div>
+        </div>
 
-      <div className="flex flex-col gap-2">
-        <input
-          type="text"
-          value={url}
-          onChange={(e) => onUrlChange(e.target.value)}
-          placeholder="WebSocket URL (ws://...)"
-          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-          disabled={isConnected}
-        />
-        <input
-          type="password"
-          value={token}
-          onChange={(e) => onTokenChange(e.target.value)}
-          placeholder="Token"
-          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50"
-          disabled={isConnected}
-        />
+        <div className="mt-3 space-y-2">
+          {PROCESS_PANEL_SETTING_OPTIONS.map((option) => {
+            const enabled = processPanelPreferences[option.key];
 
-        {isConnected ? (
-          <button
-            onClick={onDisconnect}
-            className="w-full py-2 bg-red-500/20 text-red-400 rounded-lg text-sm font-medium hover:bg-red-500/30 transition-colors"
-          >
-            Disconnect
-          </button>
-        ) : (
-          <button
-            onClick={onConnect}
-            disabled={isConnecting || !url || !token}
-            className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/80 transition-colors disabled:opacity-50"
-          >
-            {isConnecting ? 'Connecting...' : 'Connect'}
-          </button>
-        )}
+            return (
+              <button
+                key={option.key}
+                type="button"
+                role="switch"
+                aria-checked={enabled}
+                disabled={!canToggleProcessPreferences}
+                onClick={() => onProcessPanelPreferenceChange(option.key, !enabled)}
+                className={cn(
+                  'w-full rounded-2xl border px-3 py-3 text-left transition-all',
+                  enabled
+                    ? 'border-white/15 bg-white/[0.07]'
+                    : 'border-white/10 bg-black/15 hover:bg-white/[0.05]',
+                  !canToggleProcessPreferences && 'cursor-not-allowed opacity-60'
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-white">{option.title}</span>
+                      <span
+                        className={cn(
+                          'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]',
+                          enabled ? option.accentClass : 'border-white/10 bg-white/5 text-white/40'
+                        )}
+                      >
+                        {option.badge}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] leading-5 text-white/45">{option.description}</div>
+                  </div>
+                  <div
+                    className={cn(
+                      'inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em]',
+                      enabled
+                        ? 'border-white/20 bg-white/10 text-white'
+                        : 'border-white/10 bg-black/20 text-white/35'
+                    )}
+                  >
+                    {enabled ? 'On' : 'Off'}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] leading-5 text-white/45">
+          `Status` covers lifecycle updates. `Log` covers commentary and runtime logs. `Tool` combines both `tool_use` and `tool_result`.
+        </div>
       </div>
     </div>
   );
@@ -733,7 +1054,7 @@ const Header = ({
   </header>
 );
 
-// 格式化工具调用为 Claude CLI 风格
+// Format tool calls in a compact CLI-style summary
 const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): string => {
   if (!toolInput) return toolName;
 
@@ -1041,7 +1362,7 @@ const ProcessPanel = ({
                     </div>
                     {summary && (
                       <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-white/80">
-                        {summary}
+                        {normalizeLegacyDisplayText(summary)}
                       </div>
                     )}
                     {showToolInput && (
@@ -1051,7 +1372,7 @@ const ProcessPanel = ({
                     )}
                     {showToolResult && (
                       <pre className="mt-2 max-h-56 overflow-auto rounded-lg bg-black/30 p-3 text-[12px] text-white/60 whitespace-pre-wrap">
-                        {event.result}
+                        {normalizeLegacyDisplayText(event.result)}
                       </pre>
                     )}
                   </div>
@@ -1071,7 +1392,8 @@ const ChatBubble = React.memo(({
   onRetry,
   onCopy,
   onRegenerate,
-  onOptionClick
+  onOptionClick,
+  processPanelPreferences
 }: {
   message: Message;
   isStreaming?: boolean;
@@ -1079,19 +1401,26 @@ const ChatBubble = React.memo(({
   onCopy?: (text: string) => void;
   onRegenerate?: () => void;
   onOptionClick?: (option: string) => void;
+  processPanelPreferences: ProcessPanelPreferences;
 }) => {
   const isUser = message.role === 'user';
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
   const [isAgentExpanded, setIsAgentExpanded] = useState(false);
 
-  let thinkingContent = message.thinking || '';
-  let displayContent = message.content;
-  const hasProcess = !!message.process?.events?.length;
+  let thinkingContent = normalizeLegacyDisplayText(message.thinking || '');
+  let displayContent = normalizeLegacyDisplayText(message.content);
+  const visibleProcess = filterProcessForDisplay(message.process, processPanelPreferences);
+  const hasProcess = !!visibleProcess?.events?.length;
+  const processPanelPreferenceKey = [
+    processPanelPreferences.showStatus ? '1' : '0',
+    processPanelPreferences.showLog ? '1' : '0',
+    processPanelPreferences.showTool ? '1' : '0'
+  ].join('');
 
-  // Detect if this is an Agent discussion message (format: "🔍 **代码审查** (Code Reviewer) *R1*\n\n内容")
+  // Detect agent discussion messages rendered from the discussion bridge.
   const agentMessageMatch = displayContent.match(/^([^\s]+)\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)(?:\s+\*R(\d+)\*)?\n\n([\s\S]*)$/);
   const isAgentMessage = !isUser && agentMessageMatch !== null && !isStreaming;
-  const agentIcon = agentMessageMatch?.[1] || '🤖';
+  const agentIcon = agentMessageMatch?.[1] || '@';
   const agentName = agentMessageMatch?.[2] || 'Agent';
   const agentRole = agentMessageMatch?.[3] || '';
   const agentRound = agentMessageMatch?.[4] ? `R${agentMessageMatch[4]}` : '';
@@ -1137,7 +1466,7 @@ const ChatBubble = React.memo(({
 
   // Pattern for letter options only (A. B. C.)
   // Number lists (1. 2. 3.) are treated as steps and displayed normally
-  const optionPattern = /^[A-Z][\.\)、]\s+(.+)$/;
+  const optionPattern = /^[A-Z][\.\)]\s+(.+)$/;
 
   if (!isStreaming) {
     const lines = tempContent.split('\n');
@@ -1286,7 +1615,8 @@ const ChatBubble = React.memo(({
 
           {!isUser && (
             <ProcessPanel
-              process={message.process}
+              key={`process-${message.id}-${processPanelPreferenceKey}`}
+              process={visibleProcess}
               isStreaming={isStreaming}
             />
           )}
@@ -1299,7 +1629,7 @@ const ChatBubble = React.memo(({
                   key={idx}
                   className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded-lg text-xs"
                 >
-                  <span className="text-blue-400">🔧</span>
+                  <span className="text-blue-400 font-semibold">Tool</span>
                   <span className="text-blue-300 font-medium">{tool.toolName}</span>
                   {tool.toolInput && (
                     <span className="text-white/40 truncate max-w-[200px]">
@@ -1413,7 +1743,7 @@ const ChatBubble = React.memo(({
                     </code>
                   );
                 },
-                // 处理段落，保留换行
+                // Preserve paragraph spacing while rendering markdown
                 p: renderMarkdownParagraph
               }}
             >
@@ -1524,31 +1854,31 @@ const InputArea = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 技能列表
+  // Slash-command suggestions
   const skills = [
-    { id: 'git-commit', name: 'Git Commit', description: '提交代码并推送到 GitHub', trigger: '/git-workflow' },
-    { id: 'create-readme', name: 'Create README', description: '为项目创建 README 文档', trigger: '/create-readme' },
-    { id: 'simplify', name: 'Simplify Code', description: '简化并优化代码', trigger: '/simplify' },
-    { id: 'brainstorm', name: 'Brainstorm', description: '头脑风暴新功能创意', trigger: '/brainstorming' },
+    { id: 'git-commit', name: 'Git Commit', description: 'Create and push a git commit', trigger: '/git-workflow' },
+    { id: 'create-readme', name: 'Create README', description: 'Generate a project README', trigger: '/create-readme' },
+    { id: 'simplify', name: 'Simplify Code', description: 'Refactor and simplify code', trigger: '/simplify' },
+    { id: 'brainstorm', name: 'Brainstorm', description: 'Explore ideas for a new feature', trigger: '/brainstorming' },
   ];
 
-  // Agent 列表
+  // Mentionable review agents
   const agents = [
-    { id: 'code-reviewer', name: '代码审查', alias: 'code-reviewer', icon: '🔍', color: '#4CAF50', description: '代码质量、bug、最佳实践' },
-    { id: 'architect', name: '架构师', alias: 'architect', icon: '🏗️', color: '#2196F3', description: '系统架构、设计模式' },
-    { id: 'tester', name: '测试专家', alias: 'tester', icon: '🧪', color: '#FF9800', description: '测试覆盖、边缘情况' },
-    { id: 'security', name: '安全专家', alias: 'security', icon: '🔒', color: '#F44336', description: '安全漏洞、认证授权' },
-    { id: 'performance', name: '性能专家', alias: 'performance', icon: '⚡', color: '#9C27B0', description: '性能瓶颈、优化' },
-    { id: 'product', name: '产品经理', alias: 'product', icon: '📊', color: '#00BCD4', description: '产品需求、用户体验' },
-    { id: 'devops', name: '运维专家', alias: 'devops', icon: '🚀', color: '#607D8B', description: '部署、监控、CI/CD' },
+    { id: 'code-reviewer', name: 'Code Reviewer', alias: 'code-reviewer', icon: 'CR', color: '#4CAF50', description: 'Code quality, bugs, and best practices' },
+    { id: 'architect', name: 'Architect', alias: 'architect', icon: 'AR', color: '#2196F3', description: 'System design and architecture decisions' },
+    { id: 'tester', name: 'Tester', alias: 'tester', icon: 'TS', color: '#FF9800', description: 'Coverage, edge cases, and validation' },
+    { id: 'security', name: 'Security', alias: 'security', icon: 'SEC', color: '#F44336', description: 'Security risks and authentication flows' },
+    { id: 'performance', name: 'Performance', alias: 'performance', icon: 'PF', color: '#9C27B0', description: 'Performance bottlenecks and optimization' },
+    { id: 'product', name: 'Product', alias: 'product', icon: 'PM', color: '#00BCD4', description: 'Requirements and user experience' },
+    { id: 'devops', name: 'DevOps', alias: 'devops', icon: 'OP', color: '#607D8B', description: 'Deployment, monitoring, and CI/CD' },
   ];
 
-  // 过滤技能
+  // Filter slash-command suggestions
   const filteredSkills = skillFilter
     ? skills.filter(s => s.name.toLowerCase().includes(skillFilter.toLowerCase()) || s.description.toLowerCase().includes(skillFilter.toLowerCase()))
     : skills;
 
-  // 过滤 Agent
+  // Filter agent suggestions
   const filteredAgents = agentFilter
     ? agents.filter(a =>
         a.name.includes(agentFilter) ||
@@ -1561,7 +1891,7 @@ const InputArea = ({
     const value = e.target.value;
     setInput(value);
 
-    // 检测是否输入了 /
+    // Open slash-command suggestions when the input starts with /
     if (value === '/') {
       setShowSkills(true);
       setSkillFilter('');
@@ -1573,10 +1903,10 @@ const InputArea = ({
       setSkillFilter('');
     }
 
-    // 检测是否输入了 @ - Agent 选择
+    // Open agent suggestions when the user is typing a mention
     const lastAtIndex = value.lastIndexOf('@');
     if (lastAtIndex !== -1) {
-      // 检查 @ 后面是否有空格（如果有空格，说明 @ 提及已结束）
+      // Stop suggesting once the mention has been terminated
       const textAfterAt = value.slice(lastAtIndex + 1);
       if (!textAfterAt.includes(' ') && !textAfterAt.includes('@')) {
         setShowAgents(true);
@@ -1596,7 +1926,7 @@ const InputArea = ({
     }
   };
 
-  // 选择技能 - 自动发送
+  // Selecting a slash command can send it immediately
   const handleSelectSkill = (skill: typeof skills[0]) => {
     const skillMessage = skill.trigger + ' ';
     console.log('[handleSelectSkill] skill:', skill.name, 'message:', skillMessage, 'isConnected:', isConnected, 'isGenerating:', isGenerating);
@@ -1604,7 +1934,7 @@ const InputArea = ({
     setShowSkills(false);
     setSkillFilter('');
 
-    // 自动发送技能消息
+    // Auto-send while the bridge is ready
     if (isConnected && !isGenerating) {
       console.log('[handleSelectSkill] Calling onSend...');
       onSend(skillMessage, []);
@@ -1613,10 +1943,10 @@ const InputArea = ({
     }
   };
 
-  // 选择 Agent - 插入 @提及
+  // Insert the selected agent mention into the input
   const handleSelectAgent = (agent: typeof agents[0]) => {
     const value = input;
-    // 替换 @ 后面的文字为选中的 agent 名称
+    // Replace the current mention filter with the selected agent name
     const beforeAt = value.slice(0, agentStartPos);
     const afterFilter = value.slice(agentStartPos + 1 + agentFilter.length);
     const newValue = beforeAt + '@' + agent.name + ' ' + afterFilter;
@@ -1624,21 +1954,21 @@ const InputArea = ({
     setShowAgents(false);
     setAgentFilter('');
 
-    // 聚焦回输入框
+    // Restore focus to the textarea
     setTimeout(() => {
       textareaRef.current?.focus();
-      // 移动光标到末尾
+      // Move the caret to the end of the inserted mention
       textareaRef.current?.setSelectionRange(newValue.length, newValue.length);
     }, 0);
   };
 
-  // 关闭技能弹窗
+  // Close the slash-command popup
   const closeSkillsPopup = () => {
     setShowSkills(false);
     setSkillFilter('');
   };
 
-  // 关闭 Agent 弹窗
+  // Close the agent popup
   const closeAgentsPopup = () => {
     setShowAgents(false);
     setAgentFilter('');
@@ -1775,11 +2105,11 @@ const InputArea = ({
           {showSkills && (
             <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
               <div className="p-2 border-b border-white/10">
-                <span className="text-xs text-white/50">选择技能</span>
+                <span className="text-xs text-white/50">Select a skill</span>
               </div>
               <div className="max-h-[200px] overflow-y-auto">
                 {filteredSkills.length === 0 ? (
-                  <div className="p-3 text-xs text-white/40">没有找到匹配的技能</div>
+                  <div className="p-3 text-xs text-white/40">No matching skills found</div>
                 ) : (
                   filteredSkills.map(skill => (
                     <button
@@ -1799,15 +2129,15 @@ const InputArea = ({
             </div>
           )}
 
-          {/* Agent 选择弹框 */}
+          {/* Agent picker */}
           {showAgents && (
             <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
               <div className="p-2 border-b border-white/10">
-                <span className="text-xs text-white/50">🤖 选择智能体（可多选）</span>
+                <span className="text-xs text-white/50">@ Choose agents (multi-select)</span>
               </div>
               <div className="max-h-[280px] overflow-y-auto">
                 {filteredAgents.length === 0 ? (
-                  <div className="p-3 text-xs text-white/40">没有找到匹配的智能体</div>
+                  <div className="p-3 text-xs text-white/40">No matching agents found</div>
                 ) : (
                   filteredAgents.map(agent => (
                     <button
@@ -2065,12 +2395,12 @@ export default function App() {
   const showSettingsRef = useRef(showSettings);
   showSettingsRef.current = showSettings;
 
-  // 点击外部关闭设置面板
+  // Close the settings panel on outside clicks
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      // 使用 ref 获取最新值，避免闭包问题
-      // 排除设置面板和设置图标按钮本身
+      // Read the latest visibility state from a ref to avoid stale closures.
+      // Ignore clicks inside the panel and on the toggle button itself.
       if (showSettingsRef.current && !target.closest('.settings-panel') && !target.closest('.settings-toggle-btn')) {
         setShowSettings(false);
       }
@@ -2120,6 +2450,94 @@ export default function App() {
 
   // Server logs state
   const [serverLogs, setServerLogs] = useState<Array<{ level: string; message: string; timestamp: number }>>([]);
+  const [uiPreferences, setUiPreferences] = useState<UiPreferences>(DEFAULT_UI_PREFERENCES);
+  const [processPreferencesLoaded, setProcessPreferencesLoaded] = useState(false);
+  const [processPreferencesSaving, setProcessPreferencesSaving] = useState(false);
+  const lastSavedUiPreferencesRef = useRef<UiPreferences>(DEFAULT_UI_PREFERENCES);
+  const pendingUiPreferencesRollbackRef = useRef<UiPreferences | null>(null);
+  const uiPreferencesRequestRef = useRef<'load' | 'save' | null>(null);
+  const uiPreferencesTimeoutRef = useRef<number | null>(null);
+
+  const clearUiPreferencesTimeout = useCallback(() => {
+    if (uiPreferencesTimeoutRef.current !== null) {
+      window.clearTimeout(uiPreferencesTimeoutRef.current);
+      uiPreferencesTimeoutRef.current = null;
+    }
+    uiPreferencesRequestRef.current = null;
+  }, []);
+
+  const startUiPreferencesTimeout = useCallback((mode: 'load' | 'save') => {
+    clearUiPreferencesTimeout();
+    uiPreferencesRequestRef.current = mode;
+    uiPreferencesTimeoutRef.current = window.setTimeout(() => {
+      const timedOutMode = uiPreferencesRequestRef.current;
+      uiPreferencesRequestRef.current = null;
+      uiPreferencesTimeoutRef.current = null;
+
+      if (timedOutMode === 'save') {
+        setUiPreferences(pendingUiPreferencesRollbackRef.current || lastSavedUiPreferencesRef.current);
+        pendingUiPreferencesRollbackRef.current = null;
+        setProcessPreferencesSaving(false);
+        setProcessPreferencesLoaded(true);
+        alert('Saving process panel preferences timed out. Restart the backend so it picks up the new UI preferences API.');
+        return;
+      }
+
+      setUiPreferences(normalizeUiPreferences(lastSavedUiPreferencesRef.current));
+      setProcessPreferencesSaving(false);
+      setProcessPreferencesLoaded(true);
+    }, 5000);
+  }, [clearUiPreferencesTimeout]);
+
+  const requestUiPreferences = useCallback((socket?: WebSocket | null) => {
+    const target = socket || wsRef.current;
+    if (!target || target.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    setProcessPreferencesLoaded(false);
+    startUiPreferencesTimeout('load');
+    target.send(JSON.stringify({
+      type: 'settings',
+      action: 'get_ui_preferences'
+    }));
+  }, [startUiPreferencesTimeout]);
+
+  const handleProcessPanelPreferenceChange = useCallback((
+    key: keyof ProcessPanelPreferences,
+    value: boolean
+  ) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      alert('Connect to the server before changing synced process panel preferences.');
+      return;
+    }
+
+    const previousPreferences = uiPreferences;
+    const nextPreferences = normalizeUiPreferences({
+      ...uiPreferences,
+      processPanel: {
+        ...uiPreferences.processPanel,
+        [key]: value
+      }
+    });
+
+    pendingUiPreferencesRollbackRef.current = previousPreferences;
+    setUiPreferences(nextPreferences);
+    setProcessPreferencesSaving(true);
+    startUiPreferencesTimeout('save');
+
+    wsRef.current.send(JSON.stringify({
+      type: 'settings',
+      action: 'save_ui_preferences',
+      uiPreferences: nextPreferences
+    }));
+  }, [startUiPreferencesTimeout, uiPreferences]);
+
+  useEffect(() => {
+    if (showSettings && isConnected && !processPreferencesSaving) {
+      requestUiPreferences();
+    }
+  }, [isConnected, processPreferencesSaving, requestUiPreferences, showSettings]);
 
   // Multi-project History state
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -2134,17 +2552,17 @@ export default function App() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const isLoadingMoreRef = useRef(false);
 
-  // Discussion state - 将讨论消息添加到主聊天
+  // Discussion state helpers that also mirror messages into the current chat
   const addMessageToChat = useCallback((message: Message) => {
     const sessionId = currentSessionIdRef.current;
     if (!sessionId) return;
 
-    // 添加到 sessions
+    // Append to the top-level session list
     setSessions(prev => prev.map(s =>
       s.id === sessionId ? { ...s, messages: [...s.messages, message] } : s
     ));
 
-    // 添加到 projectSessions
+    // Append to the active project's session list
     if (currentProjectId) {
       setProjectSessions(prev => {
         const projectList = prev[currentProjectId];
@@ -2164,10 +2582,10 @@ export default function App() {
     onAddMessage: addMessageToChat,
     onComplete: (result) => {
       console.log('[Discussion] Complete:', result.conclusion?.substring(0, 100));
-      // 从运行中会话集合中移除讨论会话
+      // Remove temporary discussion sessions from the running set
       setRunningSessions(prev => {
         const next = new Set(prev);
-        // 移除所有 discussion_ 开头的会话
+        // Discussion sessions use a synthetic discussion_* session ID
         for (const id of next) {
           if (id.startsWith('discussion_')) {
             next.delete(id);
@@ -2175,13 +2593,13 @@ export default function App() {
         }
         return next;
       });
-      // 同时清理 runningSessionsRef
+      // Keep the mutable ref aligned with the React state
       runningSessionsRef.current = new Set(Array.from(runningSessionsRef.current).filter(id => !id.startsWith('discussion_')));
     },
     onError: (error) => {
       console.error('[Discussion] Error:', error);
       discussionMainSessionRef.current = null;
-      // 从运行中会话集合中移除讨论会话
+      // Remove temporary discussion sessions from the running set
       setRunningSessions(prev => {
         const next = new Set(prev);
         for (const id of next) {
@@ -2191,16 +2609,16 @@ export default function App() {
         }
         return next;
       });
-      // 同时清理 runningSessionsRef
+      // Keep the mutable ref aligned with the React state
       runningSessionsRef.current = new Set(Array.from(runningSessionsRef.current).filter(id => !id.startsWith('discussion_')));
     },
     onSendToMainSession: (summary, rawResult) => {
-      // 讨论结束后，将结果发送到主会话（Claude）
+      // Forward the discussion summary into the main session after completion
       console.log('[Discussion] Sending to main session, summary length:', summary.length);
-      // 延迟发送，确保讨论消息已经显示完成
+      // Delay slightly so the discussion UI has time to settle
       setTimeout(() => {
-        // 自动发送总结到主会话，让 Claude 可以参与互动
-        const summaryMessage = `请基于以下多智能体讨论结果，帮我进行分析和互动：\n\n${summary}`;
+        // Let the primary provider continue from the discussion result.
+        const summaryMessage = `Please continue from the following multi-agent discussion result:\n\n${summary}`;
         const targetSession = discussionMainSessionRef.current;
         console.log('[Discussion] Main session target:', targetSession);
 
@@ -2220,31 +2638,31 @@ export default function App() {
       }, 500);
     },
     onCreateHostSession: (title, fullRecord) => {
-      // 创建主持人会话保存完整讨论记录
+      // Create a host session that stores the full discussion record
       console.log('[Discussion] onCreateHostSession called');
       console.log('[Discussion]   title:', title);
       console.log('[Discussion]   wsRef.current:', !!wsRef.current);
       console.log('[Discussion]   wsRef.current.readyState:', wsRef.current?.readyState);
       console.log('[Discussion]   isConnected:', isConnected);
       const provider = currentSession?.provider || newSessionProvider;
-      // 保存讨论记录到 pendingHostSessionRef
+      // Stash the discussion record until the host session exists
       pendingHostSessionRef.current = { title, fullRecord, provider };
       console.log('[Discussion]   pendingHostSessionRef.current set');
 
       if (wsRef.current && isConnected) {
-        // WebSocket 已连接，直接创建新会话
+        // Create the host session immediately when the socket is ready
         console.log('[Discussion] WebSocket connected, creating new session');
         createNewSession(provider, title);
       } else {
-        // WebSocket 未连接，等待连接后发送
+        // Otherwise retry after the connection is restored
         console.log('[Discussion] WebSocket not connected, will send after connection');
-        // 等待 WebSocket 连接，然后发送
+        // Poll until the socket becomes available again
         const checkAndSend = () => {
           if (wsRef.current && isConnected) {
             console.log('[Discussion] WebSocket now connected, creating new session');
             createNewSession(provider, title);
           } else {
-            // 继续等待，最多 5 秒
+            // Keep retrying with a short backoff
             setTimeout(checkAndSend, 100);
           }
         };
@@ -2316,6 +2734,41 @@ export default function App() {
     return null;
   }, [projectSessions, sessions]);
 
+  const sessionHasRenderableResult = useCallback((
+    sessionId?: string | null,
+    projectId?: string | null,
+    fallbackSession?: ChatSession | null
+  ): boolean => {
+    const session = findLocalSession(sessionId, projectId) || fallbackSession || null;
+    if (!session || session.messages.length === 0) {
+      return false;
+    }
+
+    return session.messages.some(message => {
+      if (message.role !== 'model') {
+        return false;
+      }
+
+      if (message.status === 'error') {
+        return true;
+      }
+
+      if (typeof message.content === 'string' && message.content.trim() !== '') {
+        return true;
+      }
+
+      if (message.options && message.options.length > 0) {
+        return true;
+      }
+
+      if (message.attachments && message.attachments.length > 0) {
+        return true;
+      }
+
+      return false;
+    });
+  }, [findLocalSession]);
+
   const resolveSessionProvider = useCallback((
     sessionId?: string | null,
     projectId?: string | null,
@@ -2385,21 +2838,21 @@ export default function App() {
   }, [ws, currentSessionId, currentProjectId, currentSession?.provider, hasMoreMessages, totalMessages]);
 
   // Handle scroll to detect when user scrolls to top
-  // 使用防抖来防止滚动事件触发太频繁
+  // Debounce the scroll handler to avoid over-triggering pagination
   const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    // 清除之前的定时器
+    // Clear the previous debounce timer
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current);
     }
 
-    // 设置新的定时器，300ms 后才触发加载
+    // Only check for pagination after scrolling has paused briefly
     scrollTimeoutRef.current = setTimeout(() => {
       const target = e.target as HTMLDivElement;
       const { scrollTop } = target;
 
-      // 当滚动到顶部附近时（100px内），加载更多消息
+      // Load older messages when the user scrolls near the top
       if (scrollTop < 100 && hasMoreMessages && !isLoadingMoreRef.current) {
         loadMoreMessages();
       }
@@ -2418,6 +2871,11 @@ export default function App() {
     }
 
     setIsConnecting(true);
+    setProcessPreferencesLoaded(false);
+    setProcessPreferencesSaving(false);
+    setUiPreferences(DEFAULT_UI_PREFERENCES);
+    lastSavedUiPreferencesRef.current = DEFAULT_UI_PREFERENCES;
+    pendingUiPreferencesRollbackRef.current = null;
     const newWs = new WebSocket(serverUrl);
 
     newWs.onopen = () => {
@@ -2448,6 +2906,7 @@ export default function App() {
           }
           // Request project list from server
           newWs.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
+          requestUiPreferences(newWs);
         } else if (msg.type === 'ping') {
           // Respond to server heartbeat ping
           newWs.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
@@ -2456,8 +2915,38 @@ export default function App() {
           setIsConnecting(false);
           console.error('Auth failed');
           newWs.close();
+        } else if (msg.type === 'ui_preferences') {
+          clearUiPreferencesTimeout();
+          const nextPreferences = normalizeUiPreferences(msg.uiPreferences);
+          setUiPreferences(nextPreferences);
+          setProcessPreferencesLoaded(true);
+          setProcessPreferencesSaving(false);
+          lastSavedUiPreferencesRef.current = nextPreferences;
+          pendingUiPreferencesRollbackRef.current = null;
+        } else if (msg.type === 'ui_preferences_saved') {
+          clearUiPreferencesTimeout();
+          const nextPreferences = normalizeUiPreferences(msg.uiPreferences);
+          setUiPreferences(nextPreferences);
+          setProcessPreferencesLoaded(true);
+          setProcessPreferencesSaving(false);
+          lastSavedUiPreferencesRef.current = nextPreferences;
+          pendingUiPreferencesRollbackRef.current = null;
+        } else if (msg.type === 'settings_error' && (msg.action === 'get_ui_preferences' || msg.action === 'save_ui_preferences')) {
+          clearUiPreferencesTimeout();
+          console.error('UI preferences error:', msg.error);
+          if (msg.action === 'save_ui_preferences') {
+            setUiPreferences(pendingUiPreferencesRollbackRef.current || lastSavedUiPreferencesRef.current);
+            setProcessPreferencesSaving(false);
+            pendingUiPreferencesRollbackRef.current = null;
+            alert(`Failed to save process panel preferences: ${msg.error || 'Unknown error'}`);
+          } else {
+            const fallbackPreferences = normalizeUiPreferences(lastSavedUiPreferencesRef.current);
+            setUiPreferences(fallbackPreferences);
+            setProcessPreferencesLoaded(true);
+            setProcessPreferencesSaving(false);
+          }
         } else if (msg.type === 'running_sessions') {
-          // 重连时收到所有运行中会话的信息
+          // Rehydrated list of running sessions after reconnecting
           console.log('Running sessions on server:', msg.sessions);
           if (msg.sessions && Array.isArray(msg.sessions)) {
             const newRunningSet = new Set<string>();
@@ -2470,13 +2959,17 @@ export default function App() {
               }
 
               newRunningSet.add(runningSessionId);
-              newInfoMap.set(runningSessionId, { title: s.title, projectId: s.projectId, provider: s.provider });
+              newInfoMap.set(runningSessionId, {
+                title: normalizeLegacyDisplayText(s.title),
+                projectId: s.projectId,
+                provider: s.provider
+              });
             });
 
             setRunningSessions(newRunningSet);
             setRunningSessionsInfo(newInfoMap);
 
-            // 如果有运行中的会话，自动切换到第一个
+            // Focus the first running session after reconnecting
             if (msg.sessions.length > 0) {
               const firstSession = msg.sessions[0];
               const firstRunningSessionId = firstSession.sessionId || firstSession.id;
@@ -2489,7 +2982,7 @@ export default function App() {
             }
           }
         } else if (msg.type === 'session_running') {
-          // 兼容旧格式：单个运行中会话
+          // Backward-compatible single-session running event
           console.log('Session running on server:', msg.sessionId);
           if (msg.sessionId) {
             setCurrentSessionId(msg.sessionId);
@@ -2506,18 +2999,18 @@ export default function App() {
             console.log('Reconnected to running session:', msg.sessionId);
           }
         } else if (msg.type === 'discussion_running') {
-          // 重连时发现有运行中的讨论
+          // Rehydrated running discussion after reconnecting
           console.log('Discussion running on server:', msg.discussionId);
           if (msg.discussionId) {
             const discussionSessionId = `discussion_${msg.discussionId}`;
             setRunningSessions(prev => new Set(prev).add(discussionSessionId));
 
-            // 如果当前没有选中会话，创建一个临时会话来接收讨论消息
+            // Create a temporary session to host discussion updates if nothing is focused
             if (!currentSessionIdRef.current) {
               const tempSessionId = `discussion_${msg.discussionId}`;
               const tempSession: ChatSession = {
                 id: tempSessionId,
-                title: '🎯 多智能体讨论进行中...',
+                title: 'Multi-agent discussion in progress...',
                 messages: [],
                 createdAt: Date.now(),
                 provider: currentProvider
@@ -2528,7 +3021,7 @@ export default function App() {
               console.log('[Discussion] Created temp session for running discussion:', tempSessionId);
             }
 
-            // 恢复讨论状态
+            // Restore the running discussion state
             discussion.restoreRunning(msg.discussionId);
             console.log('Reconnected to running discussion:', msg.discussionId);
           }
@@ -2601,7 +3094,7 @@ export default function App() {
           console.log('Stream chunk, sessionId:', targetSessionId, 'replace:', msg.replace, 'done:', msg.done);
           const streamTimestamp = msg.timestamp || Date.now();
 
-          // 更新 sessions 状态
+          // Apply streamed model updates to the session list
           setSessions(prev => {
             const sessionId = targetSessionId || prev[0]?.id;
             if (!sessionId) return prev;
@@ -2613,11 +3106,11 @@ export default function App() {
               const messages = nextMessages;
               const lastMsg = messages[messages.length - 1];
 
-              // 如果有内容需要处理
+              // Handle streamed content or thinking deltas
               if (msg.content || msg.thinking) {
-                // 检查是否需要创建新的 model 消息
+                // Create a new model message when there is no active one
                 if (!lastMsg || lastMsg.role !== 'model') {
-                  // 创建新的 model 消息
+                  // Start a new streamed model message
                   const newMsg: Message = {
                     id: Date.now().toString(),
                     role: 'model',
@@ -2628,7 +3121,7 @@ export default function App() {
                   };
                   return { ...s, messages: [...messages, newMsg] };
                 } else {
-                  // 更新现有的 model 消息
+                  // Update the existing streamed model message
                   const updatedMsg = { ...lastMsg };
                   updatedMsg.timestamp = streamTimestamp;
                   if (msg.replace) {
@@ -2661,7 +3154,7 @@ export default function App() {
             });
           });
 
-          // 如果 done 为 true，更新运行状态和 projectSessions
+          // When streaming finishes, clear running state and refresh project sessions
           if (msg.done) {
             const sessionId = targetSessionId;
             if (sessionId) {
@@ -2671,16 +3164,16 @@ export default function App() {
                 next.delete(sessionId);
                 return next;
               });
-              // 同时清除运行中会话的信息
+              // Remove stale running-session metadata
               setRunningSessionsInfo(prev => {
                 const next = new Map(prev);
                 next.delete(sessionId);
                 return next;
               });
-              // 标记为已完成
+              // Mark the session as completed for the sidebar badge
               setCompletedSessions(prev => new Set(prev).add(sessionId));
 
-              // 更新 projectSessions（只在完成时更新，减少高频重渲染）
+              // Project sessions only need a lightweight refresh on completion
               setProjectSessions(prev => {
                 for (const projectId of Object.keys(prev)) {
                   const projectSessionList = prev[projectId];
@@ -2690,7 +3183,7 @@ export default function App() {
                       ...prev,
                       [projectId]: projectSessionList.map(s => {
                         if (s.id !== sessionId) return s;
-                        // 消息内容会通过 sessions 状态同步，这里只标记状态
+                        // Message content is synchronized via sessions; keep the identity stable here
                         return { ...s };
                       })
                     };
@@ -2713,7 +3206,7 @@ export default function App() {
               console.log('[RunningSessions] After:', Array.from(next));
               return next;
             });
-            // 同时清除运行中会话的信息
+            // Remove the cached running-session metadata as well
             setRunningSessionsInfo(prev => {
               const next = new Map(prev);
               next.delete(doneSessionId);
@@ -2857,17 +3350,17 @@ export default function App() {
               if (lastMsg && lastMsg.role === 'model') {
                 let content = '';
                 if (msg.command === 'ls' && msg.data?.items) {
-                  content = '📁 ' + (msg.data.path || '.') + '\n\n';
+                  content = '[DIR] ' + (msg.data.path || '.') + '\n\n';
                   msg.data.items.forEach((item: any) => {
-                    const icon = item.type === 'dir' ? '📁' : '📄';
+                    const icon = item.type === 'dir' ? '[DIR]' : '[FILE]';
                     content += `${icon} ${item.name}\n`;
                   });
                 } else if (msg.command === 'read' && msg.data?.content) {
-                  content = '📄 ' + msg.data.path + '\n\n```\n' + msg.data.content + '\n```';
+                  content = '[FILE] ' + msg.data.path + '\n\n```\n' + msg.data.content + '\n```';
                 } else if (msg.command === 'glob') {
-                  content = '🔍 Found ' + (msg.data?.length || 0) + ' files:\n\n';
+                  content = '[Search] Found ' + (msg.data?.length || 0) + ' files:\n\n';
                   msg.data?.forEach((file: string) => {
-                    content += `📄 ${file}\n`;
+                    content += `[FILE] ${file}\n`;
                   });
                 } else if (msg.command === 'help') {
                   content = msg.data || '';
@@ -2923,7 +3416,7 @@ export default function App() {
             if (msg.sessions && msg.sessions.length > 0) {
               const serverSessions: ChatSession[] = msg.sessions.map(s => ({
                 id: s.id,
-                title: s.summary || s.title || 'Untitled',
+                title: normalizeLegacyDisplayText(s.summary || s.title || 'Untitled'),
                 messages: [],
                 createdAt: s.createdAt || Date.now(),
                 provider: s.provider || msg.provider || 'claude'
@@ -2942,7 +3435,7 @@ export default function App() {
             // Legacy: current project sessions (no projectId)
             const serverSessions: ChatSession[] = msg.sessions.map(s => ({
               id: s.id,
-              title: s.title,
+              title: normalizeLegacyDisplayText(s.title),
               messages: [],
               createdAt: s.createdAt,
               provider: s.provider || msg.provider || 'claude'
@@ -2981,7 +3474,7 @@ export default function App() {
             const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
             const newSession: ChatSession = {
               id: msg.session.id,
-              title: msg.session.title || 'New Chat',
+              title: normalizeLegacyDisplayText(msg.session.title || 'New Chat'),
               messages: [],
               createdAt: msg.session.createdAt || Date.now(),
               provider: sessionProvider
@@ -3017,7 +3510,7 @@ export default function App() {
             setCurrentProjectId(targetProjectId);
             syncNewSessionProvider(sessionProvider);
 
-            // 通知后端切换活跃会话（用于后台会话优化）
+            // Let the backend know which session is currently focused
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({
                 type: 'session_focus',
@@ -3052,7 +3545,7 @@ export default function App() {
             const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
             const resumedSession: ChatSession = {
               id: msg.session.id,
-              title: msg.session.summary || msg.session.title || 'Untitled',
+              title: normalizeLegacyDisplayText(msg.session.summary || msg.session.title || 'Untitled'),
               messages: msg.session.messages || [],
               createdAt: msg.session.createdAt || Date.now(),
               provider: sessionProvider
@@ -3121,7 +3614,7 @@ export default function App() {
             currentSessionIdRef.current = resumedSession.id;
             syncNewSessionProvider(sessionProvider);
 
-            // 通知后端切换活跃会话（用于后台会话优化）
+            // Let the backend know which session is currently focused
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(JSON.stringify({
                 type: 'session_focus',
@@ -3287,29 +3780,38 @@ export default function App() {
     };
 
     newWs.onclose = () => {
+      clearUiPreferencesTimeout();
       setIsConnected(false);
       setIsConnecting(false);
+      setProcessPreferencesLoaded(false);
+      setProcessPreferencesSaving(false);
       console.log('WebSocket disconnected');
     };
 
     newWs.onerror = (error) => {
+      clearUiPreferencesTimeout();
       console.error('WebSocket error:', error);
       setIsConnecting(false);
       setIsConnected(false);
+      setProcessPreferencesLoaded(false);
+      setProcessPreferencesSaving(false);
     };
 
     wsRef.current = newWs;
     setWs(newWs);
-  }, [serverUrl, token]);
+  }, [clearUiPreferencesTimeout, requestUiPreferences, serverUrl, token, ws]);
 
   const disconnect = useCallback(() => {
+    clearUiPreferencesTimeout();
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
       setWs(null);
     }
     setIsConnected(false);
-  }, []);
+    setProcessPreferencesLoaded(false);
+    setProcessPreferencesSaving(false);
+  }, [clearUiPreferencesTimeout]);
 
   // Auto-connect on mount if URL and token are available
   useEffect(() => {
@@ -3366,7 +3868,7 @@ export default function App() {
       console.log('[resumeSession] Sending resume message:', msg);
       wsRef.current.send(JSON.stringify(msg));
 
-      // 通知后端切换活跃会话（用于后台会话优化）
+      // Let the backend know which session is currently focused
       wsRef.current.send(JSON.stringify({
         type: 'session_focus',
         sessionId: sessionId
@@ -3584,20 +4086,20 @@ export default function App() {
     if (checkForDiscussion(text)) {
       console.log('[handleSend] Detected @ mentions, starting discussion...');
 
-      // 如果没有当前 session，先创建一个
+      // Ensure there is a host session before starting the discussion flow
       if (!currentSessionIdRef.current) {
         console.log('[handleSend] No current session for discussion, creating one...');
         pendingMessageRef.current = { text, attachments: [] };
         createNewSession(newSessionProvider);
-        // session 创建后会重新触发 handleSend（通过 pendingMessageRef）
-        // 但这次我们需要特殊处理，所以存储一个标记
+        // The pending message will be re-sent once the session is created.
+        // Returning here avoids double-sending before that session exists.
         return;
       }
 
       const sessionId = currentSessionIdRef.current;
       const provider = resolveSessionProvider(sessionId, currentProjectId, currentProvider);
 
-      // 先添加用户消息到聊天
+      // Optimistically add the user message to the UI
       const userMessage: Message = {
         id: Date.now().toString(),
         role: 'user',
@@ -3606,7 +4108,7 @@ export default function App() {
         status: 'sent'
       };
 
-      // 更新 sessions
+      // Update the top-level session list
       setSessions(prev => {
         const sessionExists = prev.find(s => s.id === sessionId);
         if (sessionExists) {
@@ -3623,7 +4125,7 @@ export default function App() {
         }, ...prev];
       });
 
-      // 更新 projectSessions
+      // Update the active project's session list
       if (currentProjectId) {
         setProjectSessions(prev => {
           const projectList = prev[currentProjectId] || [];
@@ -3649,7 +4151,7 @@ export default function App() {
         });
       }
 
-      // 滚动到底部
+      // Scroll to the latest message after appending
       setTimeout(() => {
         scrollRef.current?.scrollTo({
           top: scrollRef.current.scrollHeight,
@@ -3657,7 +4159,7 @@ export default function App() {
         });
       }, 100);
 
-      // 启动讨论
+      // Start the discussion workflow
       discussionMainSessionRef.current = {
         sessionId,
         projectId: currentProjectId,
@@ -3819,7 +4321,7 @@ export default function App() {
     ));
   };
 
-  // 发送重命名请求到后端
+  // Persist title changes back to the server
   const handleTitleBlur = (newTitle: string) => {
     if (!currentSessionId || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -3871,22 +4373,32 @@ export default function App() {
       <AnimatePresence>
         {showSettings && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden z-[55] settings-panel"
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed inset-x-0 top-[50px] bottom-0 z-[55] overflow-hidden border-b border-white/10 bg-black/55 backdrop-blur-xl settings-panel"
           >
-            <ConnectionPanel
-              url={serverUrl}
-              token={token}
-              onUrlChange={setServerUrl}
-              onTokenChange={setToken}
-              onConnect={connect}
-              onDisconnect={disconnect}
-              isConnected={isConnected}
-              isConnecting={isConnecting}
-              wsRef={wsRef}
-            />
+            <div
+              className="h-full overflow-y-auto overscroll-contain pb-[calc(env(safe-area-inset-bottom)+12px)] touch-pan-y"
+              style={{ WebkitOverflowScrolling: 'touch' }}
+            >
+              <ConnectionPanel
+                url={serverUrl}
+                token={token}
+                onUrlChange={setServerUrl}
+                onTokenChange={setToken}
+                onConnect={connect}
+                onDisconnect={disconnect}
+                isConnected={isConnected}
+                isConnecting={isConnecting}
+                wsRef={wsRef}
+                processPanelPreferences={uiPreferences.processPanel}
+                processPreferencesLoaded={processPreferencesLoaded}
+                processPreferencesSaving={processPreferencesSaving}
+                onProcessPanelPreferenceChange={handleProcessPanelPreferenceChange}
+              />
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3975,11 +4487,12 @@ export default function App() {
                           ) : (
                             (projectSessions[project.id] || []).map(session => {
                               const isRunning = runningSessions.has(session.id);
-                              const isCompleted = completedSessions.has(session.id);
+                              const hasRenderableResult = sessionHasRenderableResult(session.id, project.id, session);
+                              const isCompleted = completedSessions.has(session.id) && hasRenderableResult;
                               // Debug: always log for troubleshooting
                               if (runningSessions.size > 0 || completedSessions.size > 0) {
                                 console.log('[Sidebar] Checking session:', session.id.substring(0, 12),
-                                  'running:', isRunning, 'completed:', isCompleted,
+                                  'running:', isRunning, 'completed:', isCompleted, 'hasResult:', hasRenderableResult,
                                   'runningSet:', Array.from(runningSessions).map(id => id.substring(0, 12)));
                               }
                               return (
@@ -4008,16 +4521,16 @@ export default function App() {
                                   <div className="flex items-center gap-2">
                                     {isRunning ? (
                                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-yellow-500/20 text-yellow-400 flex-shrink-0 whitespace-nowrap animate-pulse">
-                                        运行中
+                                        Running
                                       </span>
                                     ) : isCompleted ? (
                                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-green-500/20 text-green-400 flex-shrink-0 whitespace-nowrap">
-                                        完成
+                                        Completed
                                       </span>
                                     ) : null}
                                     <span className="truncate flex items-center gap-1 min-w-0 flex-1">
                                       <FileText size={12} className="inline opacity-50 flex-shrink-0" />
-                                      <span className="truncate">{session.title}</span>
+                                      <span className="truncate">{normalizeLegacyDisplayText(session.title)}</span>
                                     </span>
                                   </div>
                                   <div className="text-white/30 text-[10px] font-mono truncate mt-0.5">
@@ -4094,24 +4607,24 @@ export default function App() {
         )}
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center px-8 text-center">
-            {/* 运行中的任务列表 */}
+            {/* Running task list */}
             {runningSessions.size > 0 && (
               <div className="w-full max-w-md mb-6 space-y-2">
                 {Array.from(runningSessions).map(sessionId => {
-                  // 优先使用 runningSessionsInfo，否则从 sessions/projectSessions 查找
+                  // Prefer the live running-session metadata, then fall back to cached sessions
                   const infoFromMap = runningSessionsInfo.get(sessionId);
                   let title = infoFromMap?.title;
                   let projectId = infoFromMap?.projectId;
                   let provider = infoFromMap?.provider;
 
-                  // 如果 infoFromMap 中没有 title 或 projectId，从其他来源查找
+                  // Recover missing title or project info from the session caches
                   if (!title || !projectId) {
                     const sessionInfo = sessions.find(s => s.id === sessionId);
                     if (sessionInfo) {
                       if (!title) title = sessionInfo.title;
                       if (!provider) provider = sessionInfo.provider;
                     }
-                    // 在 projectSessions 中查找 projectId 和 title
+                    // Search project sessions for the missing project ID or title
                     if (!projectId || !title) {
                       for (const [pid, sessionList] of Object.entries(projectSessions)) {
                         const found = sessionList.find(s => s.id === sessionId);
@@ -4125,8 +4638,8 @@ export default function App() {
                     }
                   }
 
-                  // 最终使用 ID 前缀作为备用标题
-                  const displayTitle = title || sessionId.substring(0, 12);
+                  // Fall back to a shortened session ID when no title is available
+                  const displayTitle = normalizeLegacyDisplayText(title || sessionId.substring(0, 12));
 
                   return (
                     <motion.div
@@ -4136,10 +4649,10 @@ export default function App() {
                       className="flex items-center gap-3 p-3 bg-gradient-to-r from-accent/10 to-purple-500/10 rounded-xl border border-accent/20 cursor-pointer hover:border-accent/40 transition-colors"
                       onClick={() => {
                         console.log('[RunningTaskCard] Clicked session:', sessionId, 'projectId:', projectId);
-                        // 恢复会话
+                        // Resume the selected running session
                         resumeSession(sessionId, projectId, provider);
                         setIsSidebarOpen(false);
-                        // 清除完成状态
+                        // Clear the completed badge once the session is opened
                         setCompletedSessions(prev => {
                           const next = new Set(prev);
                           next.delete(sessionId);
@@ -4163,7 +4676,7 @@ export default function App() {
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-white/50">运行中 · 点击查看</div>
+                        <div className="text-xs text-white/50">Running · Tap to view</div>
                       </div>
                       <ChevronRight size={16} className="text-white/30" />
                     </motion.div>
@@ -4193,25 +4706,27 @@ export default function App() {
         ) : (
           messages
             .filter((msg) => {
-              // 正在流式传输的消息总是显示（可能有 thinking 但还没有 content）
+              // Always keep the actively streaming message visible
               if (msg.status === 'sending') return true;
 
-              // 过滤空消息（既没有 content 也没有 thinking）
-              const hasContent = msg.content && msg.content.trim() !== '';
-              const hasThinking = msg.thinking && msg.thinking.trim() !== '';
-              const hasProcess = !!msg.process?.events?.length;
+              // Drop empty messages that contain neither content nor thinking
+              const normalizedContent = normalizeLegacyDisplayText(msg.content);
+              const normalizedThinking = normalizeLegacyDisplayText(msg.thinking);
+              const hasContent = normalizedContent.trim() !== '';
+              const hasThinking = normalizedThinking.trim() !== '';
+              const hasProcess = !!filterProcessForDisplay(msg.process, uiPreferences.processPanel)?.events?.length;
 
-              // 检查 content 中是否包含 thinking 标签
-              const hasThinkingInContent = msg.content && (
-                msg.content.includes('<thinking>') ||
-                msg.content.includes('🤔 Thinking...')
+              // Detect legacy thinking text embedded directly into content
+              const hasThinkingInContent = (
+                normalizedContent.includes('<thinking>') ||
+                normalizedContent.includes('Thinking...')
               );
 
               if (!hasContent && !hasThinking && !hasThinkingInContent && !hasProcess) return false;
 
-              // 过滤只包含闭合的 thinking 标签的消息（已完成的 thinking）
+              // Hide messages that only contain a closed thinking block and no process data
               const thinkingRegex = /^<thinking>[\s\S]*<\/thinking>\s*$/;
-              if (thinkingRegex.test(msg.content?.trim() || '') && !hasProcess) return false;
+              if (thinkingRegex.test(normalizedContent.trim()) && !hasProcess) return false;
 
               return true;
             })
@@ -4231,6 +4746,7 @@ export default function App() {
                 }
               }}
               onOptionClick={(option) => handleSend(option, [])}
+              processPanelPreferences={uiPreferences.processPanel}
             />
           ))
         )}
@@ -4250,10 +4766,10 @@ export default function App() {
                   <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
                 </div>
                 <div className="flex flex-col flex-1">
-                  <span className="text-sm font-medium text-white">{getProviderLabel(currentProvider)} 正在处理...</span>
+                  <span className="text-sm font-medium text-white">{getProviderLabel(currentProvider)} is processing...</span>
                   {serverLogs.length > 0 && (
                     <span className="text-xs text-white/50 truncate">
-                      {serverLogs[serverLogs.length - 1].message}
+                      {normalizeLegacyDisplayText(serverLogs[serverLogs.length - 1].message)}
                     </span>
                   )}
                 </div>

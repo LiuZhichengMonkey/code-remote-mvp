@@ -10,6 +10,7 @@ import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
 import { ClaudeHandler } from './handlers/claude';
 import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
 import { Provider } from './session/provider';
+import { UiPreferences, UiPreferencesStorage } from './uiPreferences';
 
 export interface Client {
   id: string;
@@ -39,8 +40,21 @@ export interface ClientMessage {
   mimeType?: string;
   size?: number;
   timestamp?: number;
-  action?: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more' | 'switch' | 'save';
+  action?:
+    | 'new'
+    | 'resume'
+    | 'list'
+    | 'delete'
+    | 'list_projects'
+    | 'list_by_project'
+    | 'rename'
+    | 'load_more'
+    | 'switch'
+    | 'save'
+    | 'get_ui_preferences'
+    | 'save_ui_preferences';
   settingsName?: string;
+  uiPreferences?: UiPreferences;
   envDetails?: {
     ANTHROPIC_BASE_URL?: string;
     ANTHROPIC_AUTH_TOKEN?: string;
@@ -76,6 +90,7 @@ export class CodeRemoteServer {
   private disconnectHandler?: (clientId: string) => void;
   private claudeHandler: ClaudeHandler;
   private discussionHandler: DiscussionHandler;
+  private uiPreferencesStorage: UiPreferencesStorage;
   private workspaceRoot: string;
   private staticPath?: string;
   private imageConfig = {
@@ -92,6 +107,7 @@ export class CodeRemoteServer {
     this.staticPath = staticPath;
     this.claudeHandler = new ClaudeHandler(this.workspaceRoot);
     this.discussionHandler = new DiscussionHandler();
+    this.uiPreferencesStorage = new UiPreferencesStorage(this.workspaceRoot);
     this.discussionHandler.setSessionManager(this.claudeHandler.getSessionManager());
 
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -278,6 +294,46 @@ export class CodeRemoteServer {
     const action = (message as any).action || 'list';
     const claudeDir = path.join(os.homedir(), '.claude');
 
+    if (action === 'get_ui_preferences') {
+      try {
+        const uiPreferences = this.uiPreferencesStorage.load();
+        ws.send(JSON.stringify({
+          type: 'ui_preferences',
+          uiPreferences,
+          timestamp: Date.now()
+        }));
+      } catch (error) {
+        console.error(chalk.red('[Settings]'), 'Failed to load UI preferences:', error);
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          action,
+          error: 'Failed to load UI preferences',
+          timestamp: Date.now()
+        }));
+      }
+      return;
+    }
+
+    if (action === 'save_ui_preferences') {
+      try {
+        const uiPreferences = this.uiPreferencesStorage.save(message.uiPreferences);
+        ws.send(JSON.stringify({
+          type: 'ui_preferences_saved',
+          uiPreferences,
+          timestamp: Date.now()
+        }));
+      } catch (error) {
+        console.error(chalk.red('[Settings]'), 'Failed to save UI preferences:', error);
+        ws.send(JSON.stringify({
+          type: 'settings_error',
+          action,
+          error: 'Failed to save UI preferences',
+          timestamp: Date.now()
+        }));
+      }
+      return;
+    }
+
     if (action === 'list') {
       try {
         const files = readdirSync(claudeDir).filter(file =>
@@ -316,6 +372,7 @@ export class CodeRemoteServer {
         console.error(chalk.red('[Settings]'), 'Failed to list settings:', error);
         ws.send(JSON.stringify({
           type: 'settings_error',
+          action,
           error: 'Failed to list settings',
           timestamp: Date.now()
         }));
@@ -328,6 +385,7 @@ export class CodeRemoteServer {
       if (!settingsName) {
         ws.send(JSON.stringify({
           type: 'settings_error',
+          action,
           error: 'Missing settingsName',
           timestamp: Date.now()
         }));
@@ -341,6 +399,7 @@ export class CodeRemoteServer {
         if (!existsSync(sourcePath)) {
           ws.send(JSON.stringify({
             type: 'settings_error',
+            action,
             error: `Settings file not found: ${settingsName}`,
             timestamp: Date.now()
           }));
@@ -376,6 +435,7 @@ export class CodeRemoteServer {
         console.error(chalk.red('[Settings]'), 'Failed to switch settings:', error);
         ws.send(JSON.stringify({
           type: 'settings_error',
+          action,
           error: 'Failed to switch settings',
           timestamp: Date.now()
         }));
@@ -388,6 +448,7 @@ export class CodeRemoteServer {
       if (!envDetails) {
         ws.send(JSON.stringify({
           type: 'settings_error',
+          action,
           error: 'Missing envDetails',
           timestamp: Date.now()
         }));
@@ -429,6 +490,7 @@ export class CodeRemoteServer {
         console.error(chalk.red('[Settings]'), 'Failed to save settings:', error);
         ws.send(JSON.stringify({
           type: 'settings_error',
+          action,
           error: 'Failed to save settings',
           timestamp: Date.now()
         }));

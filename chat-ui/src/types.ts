@@ -16,6 +16,17 @@ export interface ToolUse {
 
 export type Provider = 'claude' | 'codex';
 
+export interface ProcessPanelPreferences {
+  showStatus: boolean;
+  showLog: boolean;
+  showTool: boolean;
+}
+
+export interface UiPreferences {
+  processPanel: ProcessPanelPreferences;
+  updatedAt: number;
+}
+
 export type MessageProcessState = 'running' | 'completed' | 'error';
 
 export type MessageProcessEvent =
