@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo, useId } from 'react';
 import {
   Menu,
   Plus,
@@ -33,7 +33,15 @@ import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { Message, Attachment, ChatSession, ChatOption } from './types';
+import {
+  Message,
+  Attachment,
+  ChatSession,
+  ChatOption,
+  MessageProcess,
+  MessageProcessEvent,
+  Provider
+} from './types';
 import { cn } from './utils';
 import { useDiscussion } from './useDiscussion';
 
@@ -77,6 +85,23 @@ const highlightCode = (code: string, language: string): string => {
   return highlighted;
 };
 
+const MERMAID_DIAGRAM_START = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|sankey-beta|block-beta|packet-beta|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/i;
+
+const getWholeMessageMermaidSource = (content: string): string | null => {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.startsWith('```')) {
+    return null;
+  }
+
+  return MERMAID_DIAGRAM_START.test(trimmed) ? trimmed : null;
+};
+
+const isMermaidBlock = (language: string | undefined, code: string): boolean => {
+  return (language || '').toLowerCase() === 'mermaid' || getWholeMessageMermaidSource(code) !== null;
+};
+
+let mermaidConfigured = false;
+
 // Code Block Component with Copy Button
 const CodeBlock = ({ code, language }: { code: string; language: string }) => {
   const [copied, setCopied] = useState(false);
@@ -110,12 +135,111 @@ const CodeBlock = ({ code, language }: { code: string; language: string }) => {
   );
 };
 
+const MermaidBlock = ({ code }: { code: string }) => {
+  const [copied, setCopied] = useState(false);
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const renderId = useId().replace(/:/g, '');
+
+  useEffect(() => {
+    let active = true;
+
+    const renderDiagram = async () => {
+      try {
+        const mermaid = (await import('mermaid')).default;
+
+        if (!mermaidConfigured) {
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: 'base',
+            themeVariables: {
+              background: 'transparent',
+              primaryColor: '#0f172a',
+              primaryTextColor: '#e2e8f0',
+              primaryBorderColor: '#475569',
+              lineColor: '#94a3b8',
+              secondaryColor: '#111827',
+              tertiaryColor: '#172033',
+            }
+          });
+          mermaidConfigured = true;
+        }
+
+        const { svg: renderedSvg } = await mermaid.render(`mermaid-${renderId}-${Date.now()}`, code);
+        if (active) {
+          setSvg(renderedSvg);
+          setError(null);
+        }
+      } catch (e) {
+        if (active) {
+          setSvg('');
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    };
+
+    renderDiagram();
+
+    return () => {
+      active = false;
+    };
+  }, [code, renderId]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.error('Copy failed', e);
+    }
+  };
+
+  return (
+    <div className="relative group/mycode">
+      <div className="flex items-center justify-between px-3 py-2 bg-black/30 rounded-t-lg border-b border-white/10 text-xs">
+        <span className="text-white/50 font-mono">mermaid</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1 text-white/50 hover:text-white transition-colors"
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          <span>{copied ? 'Copied' : 'Copy'}</span>
+        </button>
+      </div>
+      <div className="overflow-x-auto rounded-b-lg border border-t-0 border-white/10 bg-black/20 p-4">
+        {error ? (
+          <div className="space-y-3">
+            <div className="text-xs text-red-300">
+              Mermaid render failed: {error}
+            </div>
+            <pre className="whitespace-pre-wrap text-sm text-white/70">{code}</pre>
+          </div>
+        ) : svg ? (
+          <div
+            className="[&_svg]:h-auto [&_svg]:max-w-full [&_svg]:min-w-[320px]"
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        ) : (
+          <div className="text-sm text-white/50">Rendering diagram...</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const renderMarkdownParagraph = ({ children }: any) => (
+  <p className="whitespace-pre-wrap">{children}</p>
+);
+
 // --- WebSocket Connection Types ---
 interface ProjectInfo {
   id: string;
   displayName: string;
   sessionCount: number;
   lastActivity: number;
+  provider: Provider;
 }
 
 interface WSMessage {
@@ -131,6 +255,8 @@ interface WSMessage {
   success?: boolean;
   sessionId?: string;
   projectId?: string;
+  provider?: Provider;
+  discussionId?: string;
   // 附件（图片）
   attachments?: Array<{
     id: string;
@@ -151,14 +277,18 @@ interface WSMessage {
     createdAt?: number;
     messageCount?: number;
     messages?: Message[];
+    provider?: Provider;
   };
   sessions?: Array<{
-    id: string;
+    id?: string;
+    sessionId?: string;
     title: string;
     summary?: string;
-    createdAt: number;
-    messageCount: number;
+    createdAt?: number;
+    messageCount?: number;
     messages?: Message[];
+    provider?: Provider;
+    projectId?: string;
   }>;
   projects?: ProjectInfo[];
   // 日志
@@ -175,6 +305,19 @@ interface WSMessage {
   // 消息加载
   messages?: Message[];
 }
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  claude: 'Claude',
+  codex: 'Codex'
+};
+
+const getProviderLabel = (provider?: Provider): string => PROVIDER_LABELS[provider || 'claude'];
+
+const getProviderBadgeClass = (provider?: Provider): string => (
+  provider === 'codex'
+    ? 'border-sky-400/20 bg-sky-500/15 text-sky-200'
+    : 'border-orange-400/20 bg-orange-500/15 text-orange-200'
+);
 
 // --- Settings List Panel ---
 interface SettingsItem {
@@ -517,7 +660,10 @@ const Header = ({
   onTitleChange,
   onTitleBlur,
   onSettingsClick,
-  isConnected
+  isConnected,
+  currentProvider,
+  newSessionProvider,
+  onNewSessionProviderChange
 }: {
   onMenuClick: () => void;
   onNewChat: () => void;
@@ -526,6 +672,9 @@ const Header = ({
   onTitleBlur: (newTitle: string) => void;
   onSettingsClick: () => void;
   isConnected: boolean;
+  currentProvider: Provider;
+  newSessionProvider: Provider;
+  onNewSessionProviderChange: (provider: Provider) => void;
 }) => (
   <header className="fixed top-0 left-0 right-0 h-[50px] z-50 flex items-center justify-between px-4 bg-black/60 backdrop-blur-xl border-b border-white/5">
     <button onClick={onMenuClick} className="p-2 -ml-2 text-white/70 active:text-white">
@@ -537,6 +686,12 @@ const Header = ({
       ) : (
         <WifiOff size={14} className="text-red-400" />
       )}
+      <span className={cn(
+        'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium',
+        getProviderBadgeClass(currentProvider)
+      )}>
+        {getProviderLabel(currentProvider)}
+      </span>
       <input
         value={title}
         onChange={(e) => onTitleChange(e.target.value)}
@@ -550,7 +705,24 @@ const Header = ({
         placeholder="New Chat"
       />
     </div>
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-2">
+      <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-1">
+        {(['claude', 'codex'] as Provider[]).map(provider => (
+          <button
+            key={provider}
+            onClick={() => onNewSessionProviderChange(provider)}
+            className={cn(
+              'rounded-md px-2 py-1 text-[11px] font-medium transition-colors',
+              newSessionProvider === provider
+                ? 'bg-white text-black'
+                : 'text-white/60 hover:text-white hover:bg-white/10'
+            )}
+            title={`New ${getProviderLabel(provider)} session`}
+          >
+            {getProviderLabel(provider)}
+          </button>
+        ))}
+      </div>
       <button onClick={onSettingsClick} className="settings-toggle-btn p-2 text-white/70 active:text-white">
         <Settings size={18} />
       </button>
@@ -618,6 +790,281 @@ const formatToolCall = (toolName: string, toolInput?: Record<string, unknown>): 
   }
 };
 
+const createMessageProcess = (
+  provider: Provider = 'claude',
+  state: MessageProcess['state'] = 'running',
+  events: MessageProcessEvent[] = []
+): MessageProcess => ({
+  provider,
+  state,
+  events
+});
+
+const ensureMessageProcess = (process: MessageProcess | undefined, provider: Provider): MessageProcess => (
+  process
+    ? {
+        provider: process.provider || provider,
+        state: process.state,
+        events: [...process.events]
+      }
+    : createMessageProcess(provider)
+);
+
+const appendMessageProcessEvent = (
+  process: MessageProcess | undefined,
+  provider: Provider,
+  event: MessageProcessEvent,
+  state?: MessageProcess['state']
+): MessageProcess => {
+  const next = ensureMessageProcess(process, provider);
+  return {
+    ...next,
+    provider,
+    state: state || next.state,
+    events: [...next.events, event]
+  };
+};
+
+const setMessageProcessState = (
+  process: MessageProcess | undefined,
+  provider: Provider,
+  state: MessageProcess['state']
+): MessageProcess => {
+  const next = ensureMessageProcess(process, provider);
+  return {
+    ...next,
+    provider,
+    state
+  };
+};
+
+const createStreamingModelMessage = (provider: Provider, timestamp: number): Message => ({
+  id: `${provider}-${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+  role: 'model',
+  content: '',
+  timestamp,
+  status: 'sending'
+});
+
+const updateRunningModelMessage = (
+  messages: Message[],
+  provider: Provider,
+  timestamp: number,
+  updater: (message: Message) => Message
+): Message[] => {
+  const lastMessage = messages[messages.length - 1];
+
+  if (lastMessage && lastMessage.role === 'model' && lastMessage.status === 'sending') {
+    return [...messages.slice(0, -1), updater(lastMessage)];
+  }
+
+  return [...messages, updater(createStreamingModelMessage(provider, timestamp))];
+};
+
+const upsertToolRecord = (
+  tools: Message['tools'] | undefined,
+  event: Pick<WSMessage, 'toolName' | 'toolInput' | 'toolUseId' | 'result' | 'isError'>,
+  timestamp: number
+): Message['tools'] | undefined => {
+  const nextTools = tools ? [...tools] : [];
+
+  if (event.toolName) {
+    nextTools.push({
+      toolName: event.toolName,
+      toolInput: event.toolInput,
+      toolUseId: event.toolUseId,
+      timestamp
+    });
+    return nextTools;
+  }
+
+  const existingIndex = nextTools.findIndex(tool => tool.toolUseId && tool.toolUseId === event.toolUseId);
+  if (existingIndex !== -1) {
+    nextTools[existingIndex] = {
+      ...nextTools[existingIndex],
+      result: event.result,
+      isError: event.isError
+    };
+    return nextTools;
+  }
+
+  if (event.toolUseId || event.result) {
+    nextTools.push({
+      toolName: 'Tool',
+      toolUseId: event.toolUseId,
+      result: event.result,
+      isError: event.isError,
+      timestamp
+    });
+  }
+
+  return nextTools.length > 0 ? nextTools : undefined;
+};
+
+const PROCESS_STATE_LABELS: Record<MessageProcess['state'], string> = {
+  running: 'Running',
+  completed: 'Completed',
+  error: 'Error'
+};
+
+const getProcessStateBadgeClass = (state: MessageProcess['state']): string => (
+  state === 'error'
+    ? 'border-red-400/20 bg-red-500/10 text-red-200'
+    : state === 'completed'
+      ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+      : 'border-sky-400/20 bg-sky-500/10 text-sky-200'
+);
+
+const getProcessEventDotClass = (event: MessageProcessEvent): string => {
+  switch (event.type) {
+    case 'status':
+      return 'bg-sky-300';
+    case 'log':
+      return event.level === 'error'
+        ? 'bg-red-300'
+        : event.level === 'warn'
+          ? 'bg-amber-300'
+          : 'bg-white/40';
+    case 'tool_use':
+      return 'bg-violet-300';
+    case 'tool_result':
+      return event.isError ? 'bg-red-300' : 'bg-emerald-300';
+    default:
+      return 'bg-white/30';
+  }
+};
+
+const getProcessEventLabel = (event: MessageProcessEvent): string => {
+  switch (event.type) {
+    case 'status':
+      return 'Status';
+    case 'log':
+      return event.level === 'debug' ? 'Debug' : event.level === 'warn' ? 'Warning' : event.level === 'error' ? 'Error' : 'Log';
+    case 'tool_use':
+      return 'Tool';
+    case 'tool_result':
+      return event.isError ? 'Tool Error' : 'Tool Result';
+    default:
+      return 'Process';
+  }
+};
+
+const getProcessEventSummary = (event: MessageProcessEvent): string => {
+  switch (event.type) {
+    case 'status':
+      return event.label;
+    case 'log':
+      return event.message;
+    case 'tool_use':
+      return formatToolCall(event.toolName, event.toolInput);
+    case 'tool_result':
+      return event.isError ? 'Tool returned an error' : 'Tool returned output';
+    default:
+      return '';
+  }
+};
+
+const ProcessPanel = ({
+  process,
+  isStreaming
+}: {
+  process?: MessageProcess;
+  isStreaming?: boolean;
+}) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const eventCount = process?.events.length || 0;
+
+  useEffect(() => {
+    if (isStreaming && eventCount > 0) {
+      setIsExpanded(true);
+    }
+  }, [eventCount, isStreaming]);
+
+  if (!process || eventCount === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 overflow-hidden">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-2 text-[11px] font-bold text-white/30 hover:text-white/50 transition-colors uppercase tracking-[0.1em] mb-2 group/process"
+      >
+        <div className="w-5 h-5 rounded-full bg-sky-500/10 flex items-center justify-center group-hover/process:bg-sky-500/20 transition-colors">
+          <Sparkles size={12} className="text-sky-300" />
+        </div>
+        <span>Process</span>
+        <span className={cn(
+          'rounded-full border px-2 py-0.5 text-[9px]',
+          getProcessStateBadgeClass(process.state)
+        )}>
+          {PROCESS_STATE_LABELS[process.state]}
+        </span>
+        <span className="text-white/20">{eventCount}</span>
+        <motion.div
+          animate={{ rotate: isExpanded ? 180 : 0 }}
+          transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+        >
+          <ChevronDown size={14} />
+        </motion.div>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{
+              height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
+              opacity: { duration: 0.2 }
+            }}
+            className="overflow-hidden"
+          >
+            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3 space-y-2">
+              {process.events.map((event, index) => {
+                const summary = getProcessEventSummary(event);
+                const showToolInput = event.type === 'tool_use' && event.toolInput && Object.keys(event.toolInput).length > 0;
+                const showToolResult = event.type === 'tool_result' && typeof event.result === 'string' && event.result.trim() !== '';
+                const eventKey = ('toolUseId' in event && event.toolUseId)
+                  ? `${event.type}-${event.toolUseId}-${event.timestamp}`
+                  : `${event.type}-${event.timestamp}-${index}`;
+
+                return (
+                  <div
+                    key={eventKey}
+                    className="rounded-lg border border-white/5 bg-black/10 p-3"
+                  >
+                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/35">
+                      <span className={cn('inline-flex h-2 w-2 rounded-full', getProcessEventDotClass(event))} />
+                      <span>{getProcessEventLabel(event)}</span>
+                    </div>
+                    {summary && (
+                      <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-white/80">
+                        {summary}
+                      </div>
+                    )}
+                    {showToolInput && (
+                      <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-black/30 p-3 text-[12px] text-white/60 whitespace-pre-wrap">
+                        {JSON.stringify(event.toolInput, null, 2)}
+                      </pre>
+                    )}
+                    {showToolResult && (
+                      <pre className="mt-2 max-h-56 overflow-auto rounded-lg bg-black/30 p-3 text-[12px] text-white/60 whitespace-pre-wrap">
+                        {event.result}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
 const ChatBubble = React.memo(({
   message,
   isStreaming,
@@ -639,6 +1086,7 @@ const ChatBubble = React.memo(({
 
   let thinkingContent = message.thinking || '';
   let displayContent = message.content;
+  const hasProcess = !!message.process?.events?.length;
 
   // Detect if this is an Agent discussion message (format: "🔍 **代码审查** (Code Reviewer) *R1*\n\n内容")
   const agentMessageMatch = displayContent.match(/^([^\s]+)\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)(?:\s+\*R(\d+)\*)?\n\n([\s\S]*)$/);
@@ -741,6 +1189,13 @@ const ChatBubble = React.memo(({
     .replace(/\[OPTIONS\][\s\S]*?\[\/OPTIONS\]/, '')
     .trim();
 
+  const standaloneAgentMermaid = !isStreaming ? getWholeMessageMermaidSource(agentContent) : null;
+  const standaloneDisplayMermaid = !isStreaming ? getWholeMessageMermaidSource(displayContent) : null;
+  const hasAgentContent = agentContent.trim() !== '';
+  const hasDisplayContent = displayContent.trim() !== '';
+  const shouldRenderAgentMessage = isAgentMessage && hasAgentContent;
+  const shouldRenderNormalMessage = !isAgentMessage && (hasDisplayContent || (isStreaming && !thinkingContent && !hasProcess));
+
   const groupedOptions = message.options?.reduce((acc, opt) => {
     const cat = opt.category || 'Suggestions';
     if (!acc[cat]) acc[cat] = [];
@@ -829,6 +1284,13 @@ const ChatBubble = React.memo(({
             </div>
           )}
 
+          {!isUser && (
+            <ProcessPanel
+              process={message.process}
+              isStreaming={isStreaming}
+            />
+          )}
+
           {/* Tool Use Section - Hidden for now */}
           {false && !isUser && message.tools && message.tools.length > 0 && (
             <div className="mb-3 space-y-2">
@@ -851,7 +1313,7 @@ const ChatBubble = React.memo(({
           )}
 
           {/* Agent Discussion Message - Collapsible */}
-          {isAgentMessage && (
+          {shouldRenderAgentMessage && (
             <div className="mb-1">
               <button
                 onClick={() => setIsAgentExpanded(!isAgentExpanded)}
@@ -887,31 +1349,34 @@ const ChatBubble = React.memo(({
                     className="overflow-hidden"
                   >
                     <div className="markdown-body mt-2 pl-3 border-l-2 border-white/10">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkBreaks]}
-                        components={{
-                          code({ className, children, inline, ...props }: any) {
-                            const match = /language-(\w+)/.exec(className || '');
-                            const codeString = String(children).replace(/\n$/, '');
-                            const isCodeBlock = match || codeString.includes('\n');
-                            if (isCodeBlock && !inline) {
+                      {standaloneAgentMermaid ? (
+                        <MermaidBlock code={standaloneAgentMermaid} />
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkBreaks]}
+                          components={{
+                            code({ className, children, inline, ...props }: any) {
+                              const match = /language-([\w-]+)/.exec(className || '');
+                              const codeString = String(children).replace(/\n$/, '');
+                              const language = match ? match[1] : undefined;
+                              const isCodeBlock = match || codeString.includes('\n');
+                              if (isCodeBlock && !inline) {
+                                return !isStreaming && isMermaidBlock(language, codeString)
+                                  ? <MermaidBlock code={codeString} />
+                                  : <CodeBlock code={codeString} language={language || 'text'} />;
+                              }
                               return (
-                                <CodeBlock
-                                  code={codeString}
-                                  language={match ? match[1] : 'text'}
-                                />
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
                               );
-                            }
-                            return (
-                              <code className={className} {...props}>
-                                {children}
-                              </code>
-                            );
-                          }
-                        }}
-                      >
-                        {agentContent}
-                      </ReactMarkdown>
+                            },
+                            p: renderMarkdownParagraph
+                          }}
+                        >
+                          {agentContent}
+                        </ReactMarkdown>
+                      )}
                     </div>
                   </motion.div>
                 )}
@@ -920,25 +1385,26 @@ const ChatBubble = React.memo(({
           )}
 
           {/* Normal Message Content (not Agent message) */}
-          {!isAgentMessage && (
+          {shouldRenderNormalMessage && (
           <div className="markdown-body">
+            {standaloneDisplayMermaid ? (
+              <MermaidBlock code={standaloneDisplayMermaid} />
+            ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkBreaks]}
               components={{
                 code({ className, children, inline, ...props }: any) {
-                  const match = /language-(\w+)/.exec(className || '');
+                  const match = /language-([\w-]+)/.exec(className || '');
                   const codeString = String(children).replace(/\n$/, '');
+                  const language = match ? match[1] : undefined;
 
                   // Check if it's a code block (has language or multiple lines) vs inline code
                   const isCodeBlock = match || codeString.includes('\n');
 
                   if (isCodeBlock && !inline) {
-                    return (
-                      <CodeBlock
-                        code={codeString}
-                        language={match ? match[1] : 'text'}
-                      />
-                    );
+                    return !isStreaming && isMermaidBlock(language, codeString)
+                      ? <MermaidBlock code={codeString} />
+                      : <CodeBlock code={codeString} language={language || 'text'} />;
                   }
 
                   return (
@@ -948,13 +1414,12 @@ const ChatBubble = React.memo(({
                   );
                 },
                 // 处理段落，保留换行
-                p({ children }: any) {
-                  return <p className="whitespace-pre-wrap">{children}</p>;
-                }
+                p: renderMarkdownParagraph
               }}
             >
               {displayContent}
             </ReactMarkdown>
+            )}
             {!isUser && isStreaming && (
               <span className="inline-block w-1.5 h-4 ml-1 bg-accent animate-pulse align-middle" />
             )}
@@ -1624,10 +2089,16 @@ export default function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [runningSessions, setRunningSessions] = useState<Set<string>>(new Set()); // Track running sessions by ID
-  const [runningSessionsInfo, setRunningSessionsInfo] = useState<Map<string, { title: string; projectId?: string }>>(new Map()); // Store session info
+  const [runningSessionsInfo, setRunningSessionsInfo] = useState<Map<string, { title: string; projectId?: string; provider?: Provider }>>(new Map()); // Store session info
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set()); // Track completed sessions (for notification)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [newSessionProvider, setNewSessionProvider] = useState<Provider>('claude');
+  const syncNewSessionProvider = useCallback((provider?: Provider) => {
+    if (provider) {
+      setNewSessionProvider(provider);
+    }
+  }, []);
 
   // Keep runningSessionsRef in sync with runningSessions
   useEffect(() => {
@@ -1709,6 +2180,7 @@ export default function App() {
     },
     onError: (error) => {
       console.error('[Discussion] Error:', error);
+      discussionMainSessionRef.current = null;
       // 从运行中会话集合中移除讨论会话
       setRunningSessions(prev => {
         const next = new Set(prev);
@@ -1729,6 +2201,21 @@ export default function App() {
       setTimeout(() => {
         // 自动发送总结到主会话，让 Claude 可以参与互动
         const summaryMessage = `请基于以下多智能体讨论结果，帮我进行分析和互动：\n\n${summary}`;
+        const targetSession = discussionMainSessionRef.current;
+        console.log('[Discussion] Main session target:', targetSession);
+
+        if (targetSession?.sessionId) {
+          const sent = sendMessageToSpecificSession(targetSession.sessionId, summaryMessage, [], {
+            projectId: targetSession.projectId,
+            provider: targetSession.provider
+          });
+          discussionMainSessionRef.current = null;
+          if (sent) {
+            return;
+          }
+        }
+
+        discussionMainSessionRef.current = null;
         handleSend(summaryMessage, []);
       }, 500);
     },
@@ -1739,14 +2226,15 @@ export default function App() {
       console.log('[Discussion]   wsRef.current:', !!wsRef.current);
       console.log('[Discussion]   wsRef.current.readyState:', wsRef.current?.readyState);
       console.log('[Discussion]   isConnected:', isConnected);
+      const provider = currentSession?.provider || newSessionProvider;
       // 保存讨论记录到 pendingHostSessionRef
-      pendingHostSessionRef.current = { title, fullRecord };
+      pendingHostSessionRef.current = { title, fullRecord, provider };
       console.log('[Discussion]   pendingHostSessionRef.current set');
 
       if (wsRef.current && isConnected) {
         // WebSocket 已连接，直接创建新会话
         console.log('[Discussion] WebSocket connected, creating new session');
-        wsRef.current.send(JSON.stringify({ type: 'session', action: 'new', title }));
+        createNewSession(provider, title);
       } else {
         // WebSocket 未连接，等待连接后发送
         console.log('[Discussion] WebSocket not connected, will send after connection');
@@ -1754,7 +2242,7 @@ export default function App() {
         const checkAndSend = () => {
           if (wsRef.current && isConnected) {
             console.log('[Discussion] WebSocket now connected, creating new session');
-            wsRef.current.send(JSON.stringify({ type: 'session', action: 'new', title }));
+            createNewSession(provider, title);
           } else {
             // 继续等待，最多 5 秒
             setTimeout(checkAndSend, 100);
@@ -1801,26 +2289,59 @@ export default function App() {
     return hasValidMention;
   }, []);
 
-  // Find current session from either sessions or projectSessions
-  const currentSession = useMemo(() => {
-    // First try to find in current project sessions
-    let session = sessions.find(s => s.id === currentSessionId);
-    if (session) return session;
-
-    // Then search in all project sessions
-    if (currentProjectId && projectSessions[currentProjectId]) {
-      session = projectSessions[currentProjectId].find(s => s.id === currentSessionId);
-      if (session) return session;
+  const findLocalSession = useCallback((sessionId?: string | null, projectId?: string | null): ChatSession | null => {
+    if (!sessionId) {
+      return null;
     }
 
-    // Finally search in all projects
-    for (const projectId of Object.keys(projectSessions)) {
-      session = projectSessions[projectId].find(s => s.id === currentSessionId);
-      if (session) return session;
+    let session = sessions.find(item => item.id === sessionId);
+    if (session) {
+      return session;
+    }
+
+    if (projectId && projectSessions[projectId]) {
+      session = projectSessions[projectId].find(item => item.id === sessionId);
+      if (session) {
+        return session;
+      }
+    }
+
+    for (const candidateProjectId of Object.keys(projectSessions)) {
+      session = projectSessions[candidateProjectId].find(item => item.id === sessionId);
+      if (session) {
+        return session;
+      }
     }
 
     return null;
-  }, [sessions, currentSessionId, currentProjectId, projectSessions]);
+  }, [projectSessions, sessions]);
+
+  const resolveSessionProvider = useCallback((
+    sessionId?: string | null,
+    projectId?: string | null,
+    fallback: Provider = newSessionProvider
+  ): Provider => {
+    const localSession = findLocalSession(sessionId, projectId);
+    if (localSession?.provider) {
+      return localSession.provider;
+    }
+
+    if (projectId) {
+      const project = projects.find(item => item.id === projectId);
+      if (project?.provider) {
+        return project.provider;
+      }
+    }
+
+    return fallback;
+  }, [findLocalSession, newSessionProvider, projects]);
+
+  // Find current session from either sessions or projectSessions
+  const currentSession = useMemo(() => (
+    findLocalSession(currentSessionId, currentProjectId)
+  ), [findLocalSession, currentProjectId, currentSessionId]);
+
+  const currentProvider = currentSession?.provider || newSessionProvider;
 
   const messages = currentSession?.messages || [];
 
@@ -1854,13 +2375,14 @@ export default function App() {
       action: 'load_more',
       sessionId: currentSessionId,
       projectId: currentProjectId || undefined,
+      provider: currentSession?.provider,
       limit: 20,
       beforeIndex
     }));
 
     isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
-  }, [ws, currentSessionId, currentProjectId, hasMoreMessages, totalMessages]);
+  }, [ws, currentSessionId, currentProjectId, currentSession?.provider, hasMoreMessages, totalMessages]);
 
   // Handle scroll to detect when user scrolls to top
   // 使用防抖来防止滚动事件触发太频繁
@@ -1939,11 +2461,16 @@ export default function App() {
           console.log('Running sessions on server:', msg.sessions);
           if (msg.sessions && Array.isArray(msg.sessions)) {
             const newRunningSet = new Set<string>();
-            const newInfoMap = new Map<string, { title: string; projectId?: string }>();
+            const newInfoMap = new Map<string, { title: string; projectId?: string; provider?: Provider }>();
 
-            msg.sessions.forEach((s: { sessionId: string; title: string; projectId?: string }) => {
-              newRunningSet.add(s.sessionId);
-              newInfoMap.set(s.sessionId, { title: s.title, projectId: s.projectId });
+            msg.sessions.forEach((s) => {
+              const runningSessionId = s.sessionId || s.id;
+              if (!runningSessionId) {
+                return;
+              }
+
+              newRunningSet.add(runningSessionId);
+              newInfoMap.set(runningSessionId, { title: s.title, projectId: s.projectId, provider: s.provider });
             });
 
             setRunningSessions(newRunningSet);
@@ -1952,9 +2479,13 @@ export default function App() {
             // 如果有运行中的会话，自动切换到第一个
             if (msg.sessions.length > 0) {
               const firstSession = msg.sessions[0];
-              setCurrentSessionId(firstSession.sessionId);
-              currentSessionIdRef.current = firstSession.sessionId;
-              console.log('Reconnected to running session:', firstSession.sessionId);
+              const firstRunningSessionId = firstSession.sessionId || firstSession.id;
+              if (firstRunningSessionId) {
+                setCurrentSessionId(firstRunningSessionId);
+                currentSessionIdRef.current = firstRunningSessionId;
+                syncNewSessionProvider(firstSession.provider);
+                console.log('Reconnected to running session:', firstRunningSessionId);
+              }
             }
           }
         } else if (msg.type === 'session_running') {
@@ -1964,10 +2495,11 @@ export default function App() {
             setCurrentSessionId(msg.sessionId);
             currentSessionIdRef.current = msg.sessionId;
             setRunningSessions(prev => new Set(prev).add(msg.sessionId));
+            syncNewSessionProvider(msg.provider);
             if (msg.title) {
               setRunningSessionsInfo(prev => {
                 const next = new Map(prev);
-                next.set(msg.sessionId, { title: msg.title, projectId: msg.projectId });
+                next.set(msg.sessionId, { title: msg.title, projectId: msg.projectId, provider: msg.provider });
                 return next;
               });
             }
@@ -1987,7 +2519,8 @@ export default function App() {
                 id: tempSessionId,
                 title: '🎯 多智能体讨论进行中...',
                 messages: [],
-                createdAt: Date.now()
+                createdAt: Date.now(),
+                provider: currentProvider
               };
               setSessions(prev => [tempSession, ...prev]);
               setCurrentSessionId(tempSessionId);
@@ -2002,39 +2535,71 @@ export default function App() {
         } else if (msg.type === 'claude_start') {
           // Claude is starting to respond
           console.log('Claude started responding');
-        } else if (msg.type === 'claude_tool') {
-          // Handle tool use events
-          console.log('Tool use:', msg.toolName);
+          const startTimestamp = msg.timestamp || Date.now();
           setSessions(prev => {
             const sessionId = targetSessionId || prev[0]?.id;
             if (!sessionId) return prev;
 
             return prev.map(s => {
               if (s.id !== sessionId) return s;
-              const messages = s.messages;
-              const lastMsg = messages[messages.length - 1];
+              const provider = msg.provider || s.provider || currentProvider;
+              return {
+                ...s,
+                messages: updateRunningModelMessage(s.messages, provider, startTimestamp, (lastMsg) => ({
+                  ...lastMsg,
+                  timestamp: startTimestamp,
+                  status: 'sending',
+                  process: appendMessageProcessEvent(lastMsg.process, provider, {
+                    type: 'status',
+                    label: `${getProviderLabel(provider)} started working`,
+                    timestamp: startTimestamp
+                  })
+                }))
+              };
+            });
+          });
+        } else if (msg.type === 'claude_tool') {
+          // Handle tool use events
+          console.log('Tool use:', msg.toolName || msg.toolUseId);
+          const toolTimestamp = msg.timestamp || Date.now();
+          setSessions(prev => {
+            const sessionId = targetSessionId || prev[0]?.id;
+            if (!sessionId) return prev;
 
-              if (lastMsg && lastMsg.role === 'model') {
-                const toolEvent = {
-                  toolName: msg.toolName,
-                  toolInput: msg.toolInput,
-                  toolUseId: msg.toolUseId,
-                  timestamp: Date.now()
-                };
-                const existingTools = lastMsg.tools || [];
-                return {
-                  ...s,
-                  messages: [...messages.slice(0, -1), {
-                    ...lastMsg,
-                    tools: [...existingTools, toolEvent]
-                  }]
-                };
-              }
-              return s;
+            return prev.map(s => {
+              if (s.id !== sessionId) return s;
+              const provider = msg.provider || s.provider || currentProvider;
+              const processEvent: MessageProcessEvent = msg.toolName
+                ? {
+                    type: 'tool_use',
+                    toolName: msg.toolName,
+                    toolInput: msg.toolInput,
+                    toolUseId: msg.toolUseId,
+                    timestamp: toolTimestamp
+                  }
+                : {
+                    type: 'tool_result',
+                    toolUseId: msg.toolUseId,
+                    result: msg.result,
+                    isError: msg.isError,
+                    timestamp: toolTimestamp
+                  };
+
+              return {
+                ...s,
+                messages: updateRunningModelMessage(s.messages, provider, toolTimestamp, (lastMsg) => ({
+                  ...lastMsg,
+                  timestamp: toolTimestamp,
+                  status: 'sending',
+                  tools: upsertToolRecord(lastMsg.tools, msg, toolTimestamp),
+                  process: appendMessageProcessEvent(lastMsg.process, provider, processEvent)
+                }))
+              };
             });
           });
         } else if (msg.type === 'claude_stream') {
           console.log('Stream chunk, sessionId:', targetSessionId, 'replace:', msg.replace, 'done:', msg.done);
+          const streamTimestamp = msg.timestamp || Date.now();
 
           // 更新 sessions 状态
           setSessions(prev => {
@@ -2043,7 +2608,9 @@ export default function App() {
 
             return prev.map(s => {
               if (s.id !== sessionId) return s;
-              const messages = s.messages;
+              const provider = msg.provider || s.provider || currentProvider;
+              let nextMessages = s.messages;
+              const messages = nextMessages;
               const lastMsg = messages[messages.length - 1];
 
               // 如果有内容需要处理
@@ -2056,23 +2623,39 @@ export default function App() {
                     role: 'model',
                     content: msg.content || '',
                     thinking: msg.thinking || '',
-                    timestamp: Date.now(),
+                    timestamp: streamTimestamp,
                     status: msg.done ? 'sent' : 'sending'
                   };
                   return { ...s, messages: [...messages, newMsg] };
                 } else {
                   // 更新现有的 model 消息
                   const updatedMsg = { ...lastMsg };
+                  updatedMsg.timestamp = streamTimestamp;
                   if (msg.replace) {
-                    if (msg.content) updatedMsg.content = msg.content;
-                    if (msg.thinking) updatedMsg.thinking = msg.thinking;
+                    if (msg.content !== undefined) updatedMsg.content = msg.content;
+                    if (msg.thinking !== undefined) updatedMsg.thinking = msg.thinking;
                   } else {
                     if (msg.content) updatedMsg.content = (updatedMsg.content || '') + msg.content;
                     if (msg.thinking) updatedMsg.thinking = (updatedMsg.thinking || '') + msg.thinking;
                   }
-                  if (msg.done) updatedMsg.status = 'sent';
+                  if (msg.done) {
+                    updatedMsg.status = 'sent';
+                    if (updatedMsg.process) {
+                      updatedMsg.process = setMessageProcessState(updatedMsg.process, provider, 'completed');
+                    }
+                  }
                   return { ...s, messages: [...messages.slice(0, -1), updatedMsg] };
                 }
+              } else if (msg.done && lastMsg && lastMsg.role === 'model') {
+                const updatedMsg = {
+                  ...lastMsg,
+                  timestamp: streamTimestamp,
+                  status: 'sent' as const,
+                  process: lastMsg.process
+                    ? setMessageProcessState(lastMsg.process, provider, 'completed')
+                    : lastMsg.process
+                };
+                return { ...s, messages: [...messages.slice(0, -1), updatedMsg] };
               }
               return s;
             });
@@ -2151,9 +2734,20 @@ export default function App() {
               if (s.id !== sessionId) return s;
               const messages = s.messages;
               const lastMsg = messages[messages.length - 1];
+              const provider = msg.provider || s.provider || currentProvider;
 
               if (lastMsg && lastMsg.role === 'model') {
-                return { ...s, messages: [...messages.slice(0, -1), { ...lastMsg, status: 'sent' }] };
+                return {
+                  ...s,
+                  messages: [...messages.slice(0, -1), {
+                    ...lastMsg,
+                    timestamp: msg.timestamp || Date.now(),
+                    status: 'sent',
+                    process: lastMsg.process
+                      ? setMessageProcessState(lastMsg.process, provider, 'completed')
+                      : lastMsg.process
+                  }]
+                };
               }
               return s;
             });
@@ -2161,18 +2755,55 @@ export default function App() {
         } else if (msg.type === 'claude_log') {
           // Handle server log messages
           console.log('Server log:', msg.level, msg.message);
+          const logTimestamp = msg.timestamp || Date.now();
+          const logLevel = msg.level === 'debug' || msg.level === 'warn' || msg.level === 'error'
+            ? msg.level
+            : 'info';
+          const logMessage = msg.message || '';
           setServerLogs(prev => [...prev, {
-            level: msg.level || 'info',
-            message: msg.message || '',
-            timestamp: msg.timestamp || Date.now()
+            level: logLevel,
+            message: logMessage,
+            timestamp: logTimestamp
           }]);
+          if (logMessage) {
+            setSessions(prev => {
+              const sessionId = targetSessionId || prev[0]?.id;
+              if (!sessionId) return prev;
+
+              return prev.map(s => {
+                if (s.id !== sessionId) return s;
+                const provider = msg.provider || s.provider || currentProvider;
+                return {
+                  ...s,
+                  messages: updateRunningModelMessage(s.messages, provider, logTimestamp, (lastMsg) => ({
+                    ...lastMsg,
+                    timestamp: logTimestamp,
+                    status: 'sending',
+                    process: appendMessageProcessEvent(lastMsg.process, provider, {
+                      type: 'log',
+                      level: logLevel,
+                      message: logMessage,
+                      timestamp: logTimestamp
+                    })
+                  }))
+                };
+              });
+            });
+          }
         } else if (msg.type === 'claude_error') {
           console.log('Claude error:', msg.error);
           // Mark this session as done (error)
           const errorSessionId = targetSessionId;
+          const errorTimestamp = msg.timestamp || Date.now();
+          const errorMessage = msg.error || 'Unknown error';
           if (errorSessionId) {
             setRunningSessions(prev => {
               const next = new Set(prev);
+              next.delete(errorSessionId);
+              return next;
+            });
+            setRunningSessionsInfo(prev => {
+              const next = new Map(prev);
               next.delete(errorSessionId);
               return next;
             });
@@ -2185,17 +2816,29 @@ export default function App() {
 
             return prev.map(s => {
               if (s.id !== sessionId) return s;
-              const messages = s.messages;
-              const lastMsg = messages[messages.length - 1];
-
-              if (lastMsg && lastMsg.role === 'model') {
-                return { ...s, messages: [...messages.slice(0, -1), {
+              const provider = msg.provider || s.provider || currentProvider;
+              return {
+                ...s,
+                messages: updateRunningModelMessage(s.messages, provider, errorTimestamp, (lastMsg) => ({
                   ...lastMsg,
-                  content: `Error: ${msg.error || 'Unknown error'}`,
-                  status: 'error'
-                }] };
-              }
-              return s;
+                  content: lastMsg.content?.trim()
+                    ? `${lastMsg.content}\n\nError: ${errorMessage}`
+                    : `Error: ${errorMessage}`,
+                  timestamp: errorTimestamp,
+                  status: 'error',
+                  process: appendMessageProcessEvent(
+                    setMessageProcessState(lastMsg.process, provider, 'error'),
+                    provider,
+                    {
+                      type: 'log',
+                      level: 'error',
+                      message: errorMessage,
+                      timestamp: errorTimestamp
+                    },
+                    'error'
+                  )
+                }))
+              };
             });
           });
         } else if (msg.type === 'command_result') {
@@ -2282,7 +2925,8 @@ export default function App() {
                 id: s.id,
                 title: s.summary || s.title || 'Untitled',
                 messages: [],
-                createdAt: s.createdAt || Date.now()
+                createdAt: s.createdAt || Date.now(),
+                provider: s.provider || msg.provider || 'claude'
               }));
               setProjectSessions(prev => ({
                 ...prev,
@@ -2300,7 +2944,8 @@ export default function App() {
               id: s.id,
               title: s.title,
               messages: [],
-              createdAt: s.createdAt
+              createdAt: s.createdAt,
+              provider: s.provider || msg.provider || 'claude'
             }));
             setSessions(serverSessions);
 
@@ -2310,14 +2955,19 @@ export default function App() {
               setCurrentSessionId(latestSessionId);
               currentSessionIdRef.current = latestSessionId;
               // Request to resume latest session to get messages
-              newWs.send(JSON.stringify({ type: 'session', action: 'resume', sessionId: latestSessionId }));
+              newWs.send(JSON.stringify({
+                type: 'session',
+                action: 'resume',
+                sessionId: latestSessionId,
+                provider: msg.sessions[0].provider || msg.provider || 'claude'
+              }));
             } else {
               isRefreshingRef.current = false;
             }
           } else {
             // No sessions, create a new one (only on initial connection)
             if (!isRefreshingRef.current) {
-              newWs.send(JSON.stringify({ type: 'session', action: 'new' }));
+              newWs.send(JSON.stringify({ type: 'session', action: 'new', provider: newSessionProvider }));
             } else {
               setSessions([]);
               isRefreshingRef.current = false;
@@ -2328,16 +2978,18 @@ export default function App() {
           console.log('Session created:', msg.session);
           console.log('[session_created] pendingHostSessionRef.current:', pendingHostSessionRef.current ? 'HAS VALUE' : 'NULL');
           if (msg.session) {
+            const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
             const newSession: ChatSession = {
               id: msg.session.id,
               title: msg.session.title || 'New Chat',
               messages: [],
-              createdAt: msg.session.createdAt || Date.now()
+              createdAt: msg.session.createdAt || Date.now(),
+              provider: sessionProvider
             };
 
             // Determine which project this session belongs to
             // If we have a current project, add to that project's sessions
-            const targetProjectId = currentProjectId || (projects.length > 0 ? projects[0].id : null);
+            const targetProjectId = msg.projectId || currentProjectId || null;
             console.log('[session_created] targetProjectId:', targetProjectId, 'currentProjectId:', currentProjectId);
 
             setSessions(prev => {
@@ -2362,8 +3014,8 @@ export default function App() {
 
             setCurrentSessionId(newSession.id);
             currentSessionIdRef.current = newSession.id;
-            // Clear projectId when creating new session (always in current project)
-            setCurrentProjectId(null);
+            setCurrentProjectId(targetProjectId);
+            syncNewSessionProvider(sessionProvider);
 
             // 通知后端切换活跃会话（用于后台会话优化）
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -2397,11 +3049,13 @@ export default function App() {
           // Handle session resumed with messages
           console.log('Session resumed:', msg.session, 'projectId:', msg.projectId, 'hasMore:', msg.hasMore, 'totalMessages:', msg.totalMessages);
           if (msg.session) {
+            const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
             const resumedSession: ChatSession = {
               id: msg.session.id,
               title: msg.session.summary || msg.session.title || 'Untitled',
               messages: msg.session.messages || [],
-              createdAt: msg.session.createdAt || Date.now()
+              createdAt: msg.session.createdAt || Date.now(),
+              provider: sessionProvider
             };
 
             // Update pagination state
@@ -2461,11 +3115,11 @@ export default function App() {
               });
               setCurrentProjectId(msg.projectId);
             } else {
-              // Clear projectId when resuming current project session
               setCurrentProjectId(null);
             }
             setCurrentSessionId(resumedSession.id);
             currentSessionIdRef.current = resumedSession.id;
+            syncNewSessionProvider(sessionProvider);
 
             // 通知后端切换活跃会话（用于后台会话优化）
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -2494,9 +3148,15 @@ export default function App() {
         } else if (msg.type === 'session_id_updated') {
           // Handle session ID update from server (when Claude CLI returns a new session ID)
           console.log('Session ID updated:', msg.oldSessionId, '->', msg.newSessionId);
+          syncNewSessionProvider(msg.provider);
           setSessions(prev => prev.map(s => {
             if (s.id === msg.oldSessionId) {
-              return { ...s, id: msg.newSessionId, title: msg.title || s.title };
+              return {
+                ...s,
+                id: msg.newSessionId,
+                title: msg.title || s.title,
+                provider: msg.provider || s.provider
+              };
             }
             return s;
           }));
@@ -2506,7 +3166,12 @@ export default function App() {
             for (const [projectId, sessions] of Object.entries(prev)) {
               updated[projectId] = sessions.map(s => {
                 if (s.id === msg.oldSessionId) {
-                  return { ...s, id: msg.newSessionId, title: msg.title || s.title };
+                  return {
+                    ...s,
+                    id: msg.newSessionId,
+                    title: msg.title || s.title,
+                    provider: msg.provider || s.provider
+                  };
                 }
                 return s;
               });
@@ -2523,6 +3188,23 @@ export default function App() {
               return next;
             }
             return prev;
+          });
+          setRunningSessionsInfo(prev => {
+            if (!prev.has(msg.oldSessionId)) {
+              return prev;
+            }
+
+            const next = new Map(prev);
+            const info = next.get(msg.oldSessionId);
+            next.delete(msg.oldSessionId);
+            if (info) {
+              next.set(msg.newSessionId, {
+                ...info,
+                title: msg.title || info.title,
+                provider: msg.provider || info.provider
+              });
+            }
+            return next;
           });
           // Update completedSessions as well
           setCompletedSessions(prev => {
@@ -2654,17 +3336,30 @@ export default function App() {
   }, [messages]);
 
   // Create new session (on server)
-  const createNewSession = () => {
+  const createNewSession = (provider: Provider = newSessionProvider, title?: string) => {
     if (wsRef.current && isConnected) {
-      wsRef.current.send(JSON.stringify({ type: 'session', action: 'new' }));
+      syncNewSessionProvider(provider);
+      wsRef.current.send(JSON.stringify({
+        type: 'session',
+        action: 'new',
+        provider,
+        ...(title ? { title } : {})
+      }));
     }
   };
 
   // Resume existing session (supports cross-project)
-  const resumeSession = (sessionId: string, projectId?: string) => {
+  const resumeSession = (sessionId: string, projectId?: string, provider?: Provider) => {
     console.log('[resumeSession] Called with sessionId:', sessionId, 'projectId:', projectId, 'isConnected:', isConnected);
     if (wsRef.current && isConnected) {
-      const msg: any = { type: 'session', action: 'resume', sessionId };
+      const resolvedProvider = provider || resolveSessionProvider(sessionId, projectId);
+      syncNewSessionProvider(resolvedProvider);
+      const msg: any = {
+        type: 'session',
+        action: 'resume',
+        sessionId,
+        provider: resolvedProvider
+      };
       if (projectId) {
         msg.projectId = projectId;
       }
@@ -2682,9 +3377,14 @@ export default function App() {
   };
 
   // Delete session (supports cross-project)
-  const deleteSessionById = (sessionId: string, projectId?: string) => {
+  const deleteSessionById = (sessionId: string, projectId?: string, provider?: Provider) => {
     if (wsRef.current && isConnected) {
-      const msg: any = { type: 'session', action: 'delete', sessionId };
+      const msg: any = {
+        type: 'session',
+        action: 'delete',
+        sessionId,
+        provider: provider || resolveSessionProvider(sessionId, projectId)
+      };
       if (projectId) {
         msg.projectId = projectId;
       }
@@ -2744,7 +3444,121 @@ export default function App() {
   const pendingMessageRef = useRef<{ text: string; attachments: Attachment[] } | null>(null);
 
   // Store pending host session message (for discussion records)
-  const pendingHostSessionRef = useRef<{ title: string; fullRecord: string } | null>(null);
+  const pendingHostSessionRef = useRef<{ title: string; fullRecord: string; provider: Provider } | null>(null);
+  const discussionMainSessionRef = useRef<{ sessionId: string; projectId?: string | null; provider: Provider } | null>(null);
+
+  function sendMessageToSpecificSession(
+    sessionId: string,
+    text: string,
+    attachments: Attachment[],
+    options?: { projectId?: string | null; provider?: Provider }
+  ): boolean {
+    const activeWs = wsRef.current;
+    if (!activeWs || !isConnected) {
+      console.log('[sendMessageToSpecificSession] WebSocket not ready');
+      return false;
+    }
+
+    const projectId = options?.projectId ?? null;
+    const provider = options?.provider || resolveSessionProvider(sessionId, projectId, currentProvider);
+
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: text,
+      timestamp: Date.now(),
+      attachments,
+      status: 'sent'
+    };
+
+    const aiMessage: Message = {
+      id: Math.random().toString(36).substring(7),
+      role: 'model',
+      content: '',
+      timestamp: Date.now(),
+      status: 'sending'
+    };
+
+    setSessions(prev => {
+      const sessionExists = prev.find(s => s.id === sessionId);
+      if (sessionExists) {
+        return prev.map(s =>
+          s.id === sessionId ? { ...s, messages: [...s.messages, userMessage, aiMessage] } : s
+        );
+      }
+
+      return [{
+        id: sessionId,
+        title: text.substring(0, 30),
+        messages: [userMessage, aiMessage],
+        createdAt: Date.now(),
+        provider
+      }, ...prev];
+    });
+
+    if (projectId) {
+      setProjectSessions(prev => {
+        const projectList = prev[projectId] || [];
+        const sessionExists = projectList.find(s => s.id === sessionId);
+        if (sessionExists) {
+          return {
+            ...prev,
+            [projectId]: projectList.map(s =>
+              s.id === sessionId ? { ...s, messages: [...s.messages, userMessage, aiMessage] } : s
+            )
+          };
+        }
+
+        return {
+          ...prev,
+          [projectId]: [{
+            id: sessionId,
+            title: text.substring(0, 30),
+            messages: [userMessage, aiMessage],
+            createdAt: Date.now(),
+            provider
+          }, ...projectList]
+        };
+      });
+    }
+
+    setRunningSessions(prev => new Set(prev).add(sessionId));
+    setRunningSessionsInfo(prev => {
+      const next = new Map(prev);
+      next.set(sessionId, {
+        title: text.substring(0, 30),
+        projectId: projectId || undefined,
+        provider
+      });
+      return next;
+    });
+
+    const message: any = {
+      type: 'claude',
+      content: text,
+      stream: true,
+      sessionId,
+      provider,
+      timestamp: Date.now()
+    };
+
+    if (attachments.length > 0) {
+      message.attachments = attachments.map(att => ({
+        id: att.id,
+        name: att.name,
+        type: att.type,
+        data: att.data
+      }));
+    }
+
+    if (projectId) {
+      message.projectId = projectId;
+    }
+
+    console.log('[sendMessageToSpecificSession] Sending message:', JSON.stringify(message));
+    activeWs.send(JSON.stringify(message));
+    return true;
+  }
 
   // Send message
   const handleSend = async (text: string, attachments: Attachment[]) => {
@@ -2774,13 +3588,14 @@ export default function App() {
       if (!currentSessionIdRef.current) {
         console.log('[handleSend] No current session for discussion, creating one...');
         pendingMessageRef.current = { text, attachments: [] };
-        activeWs.send(JSON.stringify({ type: 'session', action: 'new' }));
+        createNewSession(newSessionProvider);
         // session 创建后会重新触发 handleSend（通过 pendingMessageRef）
         // 但这次我们需要特殊处理，所以存储一个标记
         return;
       }
 
       const sessionId = currentSessionIdRef.current;
+      const provider = resolveSessionProvider(sessionId, currentProjectId, currentProvider);
 
       // 先添加用户消息到聊天
       const userMessage: Message = {
@@ -2803,7 +3618,8 @@ export default function App() {
           id: sessionId,
           title: text.substring(0, 30),
           messages: [userMessage],
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          provider
         }, ...prev];
       });
 
@@ -2826,7 +3642,8 @@ export default function App() {
               id: sessionId,
               title: text.substring(0, 30),
               messages: [userMessage],
-              createdAt: Date.now()
+              createdAt: Date.now(),
+              provider
             }, ...projectList]
           };
         });
@@ -2841,6 +3658,11 @@ export default function App() {
       }, 100);
 
       // 启动讨论
+      discussionMainSessionRef.current = {
+        sessionId,
+        projectId: currentProjectId,
+        provider
+      };
       discussion.startDiscussion(text, { maxRounds: 3 });
       return;
     }
@@ -2849,11 +3671,12 @@ export default function App() {
     if (!currentSessionIdRef.current) {
       console.log('No current session, creating one...');
       pendingMessageRef.current = { text, attachments };
-      activeWs.send(JSON.stringify({ type: 'session', action: 'new' }));
+      createNewSession(newSessionProvider);
       return;
     }
 
     const sessionId = currentSessionIdRef.current;
+    const provider = resolveSessionProvider(sessionId, currentProjectId, currentProvider);
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -2887,7 +3710,8 @@ export default function App() {
         id: sessionId,
         title: text.substring(0, 30),
         messages: [userMessage, aiMessage],
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        provider
       }, ...prev];
     });
 
@@ -2911,7 +3735,8 @@ export default function App() {
             id: sessionId,
             title: text.substring(0, 30),
             messages: [userMessage, aiMessage],
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            provider
           }, ...projectList]
         };
       });
@@ -2928,7 +3753,7 @@ export default function App() {
     // Also save session info for the running session
     setRunningSessionsInfo(prev => {
       const next = new Map(prev);
-      next.set(sessionId, { title: text.substring(0, 30), projectId: currentProjectId || undefined });
+      next.set(sessionId, { title: text.substring(0, 30), projectId: currentProjectId || undefined, provider });
       return next;
     });
 
@@ -2940,6 +3765,7 @@ export default function App() {
       content: text,
       stream: true,
       sessionId,
+      provider,
       timestamp: Date.now()
     };
     // Include attachments (images) if any
@@ -2982,7 +3808,7 @@ export default function App() {
   };
 
   const handleNewChat = () => {
-    createNewSession();
+    createNewSession(newSessionProvider);
     setIsSidebarOpen(false);
   };
 
@@ -3003,6 +3829,7 @@ export default function App() {
       sessionId: currentSessionId,
       title: newTitle,
       projectId: currentProjectId,
+      provider: currentSession?.provider,
       timestamp: Date.now()
     };
     wsRef.current.send(JSON.stringify(message));
@@ -3035,6 +3862,9 @@ export default function App() {
         onTitleBlur={handleTitleBlur}
         onSettingsClick={() => setShowSettings(!showSettings)}
         isConnected={isConnected}
+        currentProvider={currentProvider}
+        newSessionProvider={newSessionProvider}
+        onNewSessionProviderChange={setNewSessionProvider}
       />
 
       {/* Settings Panel */}
@@ -3119,6 +3949,12 @@ export default function App() {
                         <span className="flex-1 text-left truncate" title={project.displayName}>
                           {project.displayName}
                         </span>
+                        <span className={cn(
+                          'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                          getProviderBadgeClass(project.provider)
+                        )}>
+                          {getProviderLabel(project.provider)}
+                        </span>
                         <span className="text-xs text-white/40 bg-white/10 px-2 py-0.5 rounded-full">
                           {project.sessionCount}
                         </span>
@@ -3158,7 +3994,7 @@ export default function App() {
                               >
                                 <button
                                   onClick={() => {
-                                    resumeSession(session.id, project.id);
+                                    resumeSession(session.id, project.id, session.provider);
                                     setIsSidebarOpen(false);
                                     // Clear completed status when viewing the session
                                     setCompletedSessions(prev => {
@@ -3191,7 +4027,7 @@ export default function App() {
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    deleteSessionById(session.id, project.id);
+                                    deleteSessionById(session.id, project.id, session.provider);
                                   }}
                                   className="text-white/30 hover:text-red-400 transition-all p-1 touch-manipulation"
                                   title="Delete session"
@@ -3266,12 +4102,14 @@ export default function App() {
                   const infoFromMap = runningSessionsInfo.get(sessionId);
                   let title = infoFromMap?.title;
                   let projectId = infoFromMap?.projectId;
+                  let provider = infoFromMap?.provider;
 
                   // 如果 infoFromMap 中没有 title 或 projectId，从其他来源查找
                   if (!title || !projectId) {
                     const sessionInfo = sessions.find(s => s.id === sessionId);
                     if (sessionInfo) {
                       if (!title) title = sessionInfo.title;
+                      if (!provider) provider = sessionInfo.provider;
                     }
                     // 在 projectSessions 中查找 projectId 和 title
                     if (!projectId || !title) {
@@ -3280,6 +4118,7 @@ export default function App() {
                         if (found) {
                           if (!title) title = found.title;
                           if (!projectId) projectId = pid;
+                          if (!provider) provider = found.provider;
                           break;
                         }
                       }
@@ -3298,7 +4137,7 @@ export default function App() {
                       onClick={() => {
                         console.log('[RunningTaskCard] Clicked session:', sessionId, 'projectId:', projectId);
                         // 恢复会话
-                        resumeSession(sessionId, projectId);
+                        resumeSession(sessionId, projectId, provider);
                         setIsSidebarOpen(false);
                         // 清除完成状态
                         setCompletedSessions(prev => {
@@ -3313,7 +4152,17 @@ export default function App() {
                         <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
                       </div>
                       <div className="flex-1 text-left">
-                        <div className="text-sm font-medium text-white truncate">{displayTitle}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-medium text-white truncate">{displayTitle}</div>
+                          {provider && (
+                            <span className={cn(
+                              'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                              getProviderBadgeClass(provider)
+                            )}>
+                              {getProviderLabel(provider)}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-xs text-white/50">运行中 · 点击查看</div>
                       </div>
                       <ChevronRight size={16} className="text-white/30" />
@@ -3332,7 +4181,7 @@ export default function App() {
             </motion.div>
             <h1 className="text-2xl font-bold mb-2">CodeRemote</h1>
             <p className="text-white/40 text-[15px] max-w-[240px]">
-              Connect to your development environment and control Claude Code from anywhere.
+              Connect to your development environment and control Claude Code or Codex CLI from anywhere.
             </p>
             <div className="mt-6 text-xs text-white/30">
               <div className="flex items-center gap-2 mb-2">
@@ -3350,6 +4199,7 @@ export default function App() {
               // 过滤空消息（既没有 content 也没有 thinking）
               const hasContent = msg.content && msg.content.trim() !== '';
               const hasThinking = msg.thinking && msg.thinking.trim() !== '';
+              const hasProcess = !!msg.process?.events?.length;
 
               // 检查 content 中是否包含 thinking 标签
               const hasThinkingInContent = msg.content && (
@@ -3357,11 +4207,11 @@ export default function App() {
                 msg.content.includes('🤔 Thinking...')
               );
 
-              if (!hasContent && !hasThinking && !hasThinkingInContent) return false;
+              if (!hasContent && !hasThinking && !hasThinkingInContent && !hasProcess) return false;
 
               // 过滤只包含闭合的 thinking 标签的消息（已完成的 thinking）
               const thinkingRegex = /^<thinking>[\s\S]*<\/thinking>\s*$/;
-              if (thinkingRegex.test(msg.content?.trim() || '')) return false;
+              if (thinkingRegex.test(msg.content?.trim() || '') && !hasProcess) return false;
 
               return true;
             })
@@ -3385,7 +4235,7 @@ export default function App() {
           ))
         )}
 
-        {/* Loading indicator when Claude is processing */}
+      {/* Loading indicator while the active provider is processing */}
         <AnimatePresence>
           {isGenerating && (
             <motion.div
@@ -3400,7 +4250,7 @@ export default function App() {
                   <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
                 </div>
                 <div className="flex flex-col flex-1">
-                  <span className="text-sm font-medium text-white">Claude 正在处理...</span>
+                  <span className="text-sm font-medium text-white">{getProviderLabel(currentProvider)} 正在处理...</span>
                   {serverLogs.length > 0 && (
                     <span className="text-xs text-white/50 truncate">
                       {serverLogs[serverLogs.length - 1].message}

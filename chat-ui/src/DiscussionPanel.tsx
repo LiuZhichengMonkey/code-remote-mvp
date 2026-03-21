@@ -4,7 +4,7 @@
  * 显示多 Agent 讨论过程和结果
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useId } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Users,
@@ -20,6 +20,9 @@ import {
   Clock,
   Zap
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { DiscussionSession, DiscussionMessage, DiscussionAgent } from './types';
 import { cn } from './utils';
 
@@ -52,13 +55,147 @@ interface DiscussionPanelProps {
   onClose?: () => void;
 }
 
+const MERMAID_DIAGRAM_START = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|sankey-beta|block-beta|packet-beta|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/i;
+
+const getWholeMessageMermaidSource = (content: string): string | null => {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.startsWith('```')) {
+    return null;
+  }
+
+  return MERMAID_DIAGRAM_START.test(trimmed) ? trimmed : null;
+};
+
+const isMermaidBlock = (language: string | undefined, code: string): boolean => {
+  return (language || '').toLowerCase() === 'mermaid' || getWholeMessageMermaidSource(code) !== null;
+};
+
+let mermaidConfigured = false;
+
+const MermaidBlock: React.FC<{ code: string }> = ({ code }) => {
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const renderId = useId().replace(/:/g, '');
+
+  useEffect(() => {
+    let active = true;
+
+    const renderDiagram = async () => {
+      try {
+        const mermaid = (await import('mermaid')).default;
+
+        if (!mermaidConfigured) {
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: 'base',
+            themeVariables: {
+              background: 'transparent',
+              primaryColor: '#0f172a',
+              primaryTextColor: '#e2e8f0',
+              primaryBorderColor: '#475569',
+              lineColor: '#94a3b8',
+              secondaryColor: '#111827',
+              tertiaryColor: '#172033',
+            }
+          });
+          mermaidConfigured = true;
+        }
+
+        const { svg: renderedSvg } = await mermaid.render(`discussion-mermaid-${renderId}-${Date.now()}`, code);
+        if (active) {
+          setSvg(renderedSvg);
+          setError(null);
+        }
+      } catch (e) {
+        if (active) {
+          setSvg('');
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    };
+
+    renderDiagram();
+
+    return () => {
+      active = false;
+    };
+  }, [code, renderId]);
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-white/10 bg-black/20 p-4">
+      {error ? (
+        <div className="space-y-3">
+          <div className="text-xs text-red-300">
+            Mermaid render failed: {error}
+          </div>
+          <pre className="whitespace-pre-wrap text-sm text-white/70">{code}</pre>
+        </div>
+      ) : svg ? (
+        <div
+          className="[&_svg]:h-auto [&_svg]:max-w-full [&_svg]:min-w-[320px]"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      ) : (
+        <div className="text-sm text-white/50">Rendering diagram...</div>
+      )}
+    </div>
+  );
+};
+
+const DiscussionMarkdown: React.FC<{ content: string }> = ({ content }) => {
+  const standaloneMermaid = getWholeMessageMermaidSource(content);
+
+  if (standaloneMermaid) {
+    return <MermaidBlock code={standaloneMermaid} />;
+  }
+
+  return (
+    <div className="markdown-body text-white/80">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          code({ className, children, inline, ...props }: any) {
+            const match = /language-([\w-]+)/.exec(className || '');
+            const codeString = String(children).replace(/\n$/, '');
+            const language = match ? match[1] : undefined;
+            const isCodeBlock = match || codeString.includes('\n');
+
+            if (isCodeBlock && !inline) {
+              return isMermaidBlock(language, codeString) ? (
+                <MermaidBlock code={codeString} />
+              ) : (
+                <pre className="overflow-x-auto rounded-lg border border-white/10 bg-black/30 p-3">
+                  <code className="whitespace-pre text-sm text-white/80">{codeString}</code>
+                </pre>
+              );
+            }
+
+            return (
+              <code className={cn('rounded bg-black/30 px-1.5 py-0.5 text-xs text-white/90', className)} {...props}>
+                {children}
+              </code>
+            );
+          },
+          p({ children }) {
+            return <p className="whitespace-pre-wrap">{children}</p>;
+          }
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+};
+
 // Agent 头像组件
 const AgentAvatar: React.FC<{ agent: DiscussionAgent; size?: 'sm' | 'md' | 'lg' }> = ({
   agent,
   size = 'md'
 }) => {
-  const color = agent.avatar?.color || AGENT_COLORS[agent.name] || AGENT_COLORS.default;
-  const icon = agent.avatar?.icon || AGENT_ICONS[agent.name] || AGENT_ICONS.default;
+  const avatarConfig = typeof agent.avatar === 'string' ? undefined : agent.avatar;
+  const color = avatarConfig?.color || AGENT_COLORS[agent.name] || AGENT_COLORS.default;
+  const icon = avatarConfig?.icon || AGENT_ICONS[agent.name] || AGENT_ICONS.default;
 
   const sizeClasses = {
     sm: 'w-6 h-6 text-xs',
@@ -105,8 +242,8 @@ const MessageBubble: React.FC<{ message: DiscussionMessage }> = ({ message }) =>
           <Sparkles className="w-4 h-4 text-yellow-400" />
           <span className="text-white font-medium">讨论结论</span>
         </div>
-        <div className="text-white/80 text-sm whitespace-pre-wrap">
-          {message.content}
+        <div className="text-sm">
+          <DiscussionMarkdown content={message.content} />
         </div>
       </div>
     );
@@ -154,7 +291,7 @@ const MessageBubble: React.FC<{ message: DiscussionMessage }> = ({ message }) =>
             ? 'bg-indigo-600 text-white'
             : 'bg-white/5 text-white/90'
         )}>
-          {message.content}
+          <DiscussionMarkdown content={message.content} />
         </div>
       </div>
     </motion.div>
@@ -346,8 +483,9 @@ export const AgentSelector: React.FC<{
     <div className="flex flex-wrap gap-2">
       {availableAgents.map((agent) => {
         const isSelected = selectedAgents.includes(agent.id);
-        const color = agent.avatar?.color || AGENT_COLORS[agent.name] || AGENT_COLORS.default;
-        const icon = agent.avatar?.icon || AGENT_ICONS[agent.name] || AGENT_ICONS.default;
+        const avatarConfig = typeof agent.avatar === 'string' ? undefined : agent.avatar;
+        const color = avatarConfig?.color || AGENT_COLORS[agent.name] || AGENT_COLORS.default;
+        const icon = avatarConfig?.icon || AGENT_ICONS[agent.name] || AGENT_ICONS.default;
 
         return (
           <button

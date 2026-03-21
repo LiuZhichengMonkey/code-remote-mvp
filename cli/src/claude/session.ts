@@ -1,99 +1,134 @@
-import { ClaudeSession, ClaudeMessage, SessionInfo, createMessage, createSession } from './types';
+import { CodexSessionStorage } from '../codexStorage';
+import { DEFAULT_PROVIDER, Provider, SUPPORTED_PROVIDERS } from '../session/provider';
+import { ClaudeMessage, ClaudeSession, SessionInfo, createSession } from './types';
 import { SessionStorage } from './storage';
 
+type ProviderStorage = SessionStorage | CodexSessionStorage;
+
 export class SessionManager {
-  private storage: SessionStorage;
+  private storages: Record<Provider, ProviderStorage>;
   private currentSession: ClaudeSession | null = null;
   private sessions: Map<string, ClaudeSession> = new Map();
-  private isTemporarySession: boolean = false;
 
   constructor(workspaceRoot?: string) {
-    this.storage = new SessionStorage(workspaceRoot);
+    this.storages = {
+      claude: new SessionStorage(workspaceRoot),
+      codex: new CodexSessionStorage(workspaceRoot)
+    };
     this.loadAllSessions();
   }
 
   private loadAllSessions(): void {
-    const sessions = this.storage.list();
-    for (const session of sessions) {
-      this.sessions.set(session.id, session);
-    }
-  }
-
-  create(title?: string): ClaudeSession {
-    const sessionTitle = title || 'New Chat';
-    const session = createSession(sessionTitle);
-    this.sessions.set(session.id, session);
-    // 不保存到存储 - Claude CLI 会自己管理会话文件
-    this.currentSession = session;
-    this.isTemporarySession = true; // 标记为临时，等待 Claude CLI session ID
-    return session;
-  }
-
-  // 创建临时会话（不保存到存储，等待 Claude CLI session ID）
-  createTemporary(title?: string): ClaudeSession {
-    const sessionTitle = title || 'New Chat';
-    const session = createSession(sessionTitle);
-    this.currentSession = session;
-    this.isTemporarySession = true;
-    return session;
-  }
-
-  // 更新会话 ID（当 Claude CLI 返回 session ID 时使用）
-  updateSessionId(newSessionId: string): void {
-    if (!this.currentSession) return;
-
-    const oldId = this.currentSession.id;
-
-    // 从存储加载 Claude CLI 创建的会话
-    const claudeSession = this.storage.load(newSessionId);
-    if (claudeSession) {
-      // 使用 Claude CLI 的会话替换临时会话
-      this.currentSession = claudeSession;
-      this.sessions.delete(oldId);
-      this.sessions.set(newSessionId, claudeSession);
-      console.log(`[SessionManager] Loaded Claude CLI session: ${newSessionId}`);
-    } else {
-      // 如果加载失败，只更新 ID
-      this.currentSession.id = newSessionId;
-      this.currentSession.claudeSessionId = newSessionId;
-      this.sessions.delete(oldId);
-      this.sessions.set(newSessionId, this.currentSession);
-    }
-    this.isTemporarySession = false;
-  }
-
-  resume(sessionId: string): ClaudeSession | null {
-    // 先检查内存中的缓存
-    let session = this.sessions.get(sessionId) || null;
-    if (!session) {
-      // 从存储加载
-      session = this.storage.load(sessionId);
-      if (session) {
-        this.sessions.set(sessionId, session);
+    for (const provider of SUPPORTED_PROVIDERS) {
+      for (const session of this.storages[provider].list()) {
+        this.sessions.set(session.id, session);
       }
     }
+  }
+
+  private getProvidersToTry(provider?: Provider): Provider[] {
+    if (provider) {
+      return [provider];
+    }
+
+    if (this.currentSession) {
+      const remaining = SUPPORTED_PROVIDERS.filter(candidate => candidate !== this.currentSession?.provider);
+      return [this.currentSession.provider, ...remaining];
+    }
+
+    return [...SUPPORTED_PROVIDERS];
+  }
+
+  private getCachedOrLoaded(sessionId: string, provider?: Provider): ClaudeSession | null {
+    const cached = this.sessions.get(sessionId);
+    if (cached && (!provider || cached.provider === provider)) {
+      return cached;
+    }
+
+    for (const candidate of this.getProvidersToTry(provider)) {
+      const session = this.storages[candidate].load(sessionId);
+      if (session) {
+        this.sessions.set(sessionId, session);
+        return session;
+      }
+    }
+
+    return null;
+  }
+
+  create(title?: string, provider: Provider = DEFAULT_PROVIDER): ClaudeSession {
+    const session = createSession(title || 'New Chat', provider);
+    this.sessions.set(session.id, session);
+    this.currentSession = session;
+    return session;
+  }
+
+  createTemporary(title?: string, provider: Provider = DEFAULT_PROVIDER): ClaudeSession {
+    const session = createSession(title || 'New Chat', provider);
+    this.currentSession = session;
+    this.sessions.set(session.id, session);
+    return session;
+  }
+
+  updateSessionId(newSessionId: string): void {
+    if (!this.currentSession) {
+      return;
+    }
+
+    const provider = this.currentSession.provider;
+    const oldId = this.currentSession.id;
+    const loadedSession = this.storages[provider].load(newSessionId);
+
+    if (loadedSession) {
+      this.currentSession = loadedSession;
+      this.sessions.delete(oldId);
+      this.sessions.set(newSessionId, loadedSession);
+      console.log(`[SessionManager] Loaded ${provider} session: ${newSessionId}`);
+      return;
+    }
+
+    this.currentSession.id = newSessionId;
+    this.currentSession.providerSessionId = newSessionId;
+    if (provider === 'claude') {
+      this.currentSession.claudeSessionId = newSessionId;
+    }
+
+    this.sessions.delete(oldId);
+    this.sessions.set(newSessionId, this.currentSession);
+  }
+
+  resume(sessionId: string, provider?: Provider): ClaudeSession | null {
+    const session = this.getCachedOrLoaded(sessionId, provider);
     if (session) {
       this.currentSession = session;
     }
     return session;
   }
 
-  // 分页恢复会话（从后往前加载消息）
   resumePaginated(
     sessionId: string,
     limit: number = 20,
-    beforeIndex?: number
+    beforeIndex?: number,
+    provider?: Provider
   ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
-    const result = this.storage.loadPaginated(sessionId, limit, beforeIndex);
-    if (result.session) {
-      this.currentSession = result.session;
-      this.sessions.set(sessionId, result.session);
+    for (const candidate of this.getProvidersToTry(provider)) {
+      const result = this.storages[candidate].loadPaginated(sessionId, limit, beforeIndex);
+      if (result.session) {
+        this.currentSession = result.session;
+        this.sessions.set(sessionId, result.session);
+        return result;
+      }
     }
-    return result;
+
+    return { session: null, hasMore: false, totalMessages: 0 };
   }
 
-  resumeLatest(): ClaudeSession | null {
-    const latest = this.storage.getLatest();
+  resumeLatest(provider?: Provider): ClaudeSession | null {
+    const sessions = provider
+      ? this.storages[provider].list()
+      : SUPPORTED_PROVIDERS.flatMap(candidate => this.storages[candidate].list());
+
+    const latest = sessions.sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
     if (latest) {
       this.currentSession = latest;
       this.sessions.set(latest.id, latest);
@@ -103,17 +138,18 @@ export class SessionManager {
 
   addMessage(message: ClaudeMessage): void {
     if (!this.currentSession) {
-      // 自动创建临时会话
       this.createTemporary();
     }
-    if (this.currentSession) {
-      this.currentSession.messages.push(message);
-      this.currentSession.updatedAt = Date.now();
-      // 更新标题（如果是第一条用户消息）
-      if (this.currentSession.messages.length === 1 && message.role === 'user') {
-        this.currentSession.title = message.content.substring(0, 50);
-      }
-      // 不保存到存储 - Claude CLI 会自己管理会话文件
+
+    if (!this.currentSession) {
+      return;
+    }
+
+    this.currentSession.messages.push(message);
+    this.currentSession.updatedAt = Date.now();
+
+    if (this.currentSession.messages.length === 1 && message.role === 'user') {
+      this.currentSession.title = message.content.substring(0, 50);
     }
   }
 
@@ -121,61 +157,91 @@ export class SessionManager {
     return this.currentSession;
   }
 
-  get(sessionId: string): ClaudeSession | null {
-    return this.sessions.get(sessionId) || this.storage.load(sessionId);
+  get(sessionId: string, provider?: Provider): ClaudeSession | null {
+    return this.getCachedOrLoaded(sessionId, provider);
   }
 
-  list(): SessionInfo[] {
-    return this.storage.listInfo();
+  list(provider?: Provider): SessionInfo[] {
+    const sessions = provider
+      ? this.storages[provider].listInfo()
+      : SUPPORTED_PROVIDERS.flatMap(candidate => this.storages[candidate].listInfo());
+
+    return sessions.sort((a, b) => (b.lastActivity || b.createdAt) - (a.lastActivity || a.createdAt));
   }
 
-  getStorage(): SessionStorage {
-    return this.storage;
+  getStorage(provider?: Provider): ProviderStorage {
+    const effectiveProvider = provider || this.currentSession?.provider || DEFAULT_PROVIDER;
+    return this.storages[effectiveProvider];
   }
 
-  delete(sessionId: string): boolean {
+  getStorageByProvider(provider: Provider): ProviderStorage {
+    return this.storages[provider];
+  }
+
+  getProjectId(provider: Provider): string {
+    return this.storages[provider].getProjectId();
+  }
+
+  delete(sessionId: string, provider?: Provider): boolean {
     if (this.currentSession?.id === sessionId) {
       this.currentSession = null;
     }
-    this.sessions.delete(sessionId);
-    return this.storage.delete(sessionId);
+
+    const cached = this.sessions.get(sessionId);
+    const providersToTry = provider ? [provider] : cached ? [cached.provider] : SUPPORTED_PROVIDERS;
+
+    for (const candidate of providersToTry) {
+      if (this.storages[candidate].delete(sessionId)) {
+        this.sessions.delete(sessionId);
+        return true;
+      }
+    }
+
+    return false;
   }
 
-  rename(sessionId: string, newTitle: string): boolean {
-    // 更新内存中的会话标题
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.title = newTitle;
+  rename(sessionId: string, newTitle: string, provider?: Provider): boolean {
+    const cached = this.sessions.get(sessionId);
+    if (cached) {
+      cached.title = newTitle;
     }
-    // 更新存储中的标题
-    return this.storage.rename(sessionId, newTitle);
+
+    const providersToTry = provider ? [provider] : cached ? [cached.provider] : SUPPORTED_PROVIDERS;
+    for (const candidate of providersToTry) {
+      if (this.storages[candidate].rename(sessionId, newTitle)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   clearCurrent(): void {
     this.currentSession = null;
   }
 
-  // 获取当前会话的消息历史（用于 API 调用）
   getMessagesForAPI(): ClaudeMessage[] {
+    return this.currentSession ? [...this.currentSession.messages] : [];
+  }
+
+  setProviderSessionId(providerSessionId: string): void {
     if (!this.currentSession) {
-      return [];
+      return;
     }
-    return [...this.currentSession.messages];
+
+    this.currentSession.providerSessionId = providerSessionId;
+    if (this.currentSession.provider === 'claude') {
+      this.currentSession.claudeSessionId = providerSessionId;
+    }
   }
 
-  // 更新会话的 Claude CLI session ID
   setClaudeSessionId(claudeSessionId: string): void {
-    if (this.currentSession) {
-      this.currentSession.claudeSessionId = claudeSessionId;
-      // 不保存到存储 - Claude CLI 会自己管理会话文件
-    }
+    this.setProviderSessionId(claudeSessionId);
   }
 
-  // 设置跨项目会话（从其他项目恢复会话时使用）
   setSessionFromCrossProject(session: ClaudeSession): void {
     this.currentSession = session;
     this.sessions.set(session.id, session);
-    this.isTemporarySession = false;
-    console.log(`[SessionManager] Set cross-project session: ${session.id}, claudeSessionId: ${session.claudeSessionId}`);
+    console.log(`[SessionManager] Set cross-project session: ${session.id}, provider: ${session.provider}`);
   }
 }

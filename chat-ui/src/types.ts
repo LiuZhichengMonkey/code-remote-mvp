@@ -5,7 +5,6 @@ export interface ChatOption {
   category?: string;
 }
 
-// 工具使用记录
 export interface ToolUse {
   toolName: string;
   toolInput?: Record<string, unknown>;
@@ -13,6 +12,43 @@ export interface ToolUse {
   result?: string;
   isError?: boolean;
   timestamp: number;
+}
+
+export type Provider = 'claude' | 'codex';
+
+export type MessageProcessState = 'running' | 'completed' | 'error';
+
+export type MessageProcessEvent =
+  | {
+      type: 'status';
+      label: string;
+      timestamp: number;
+    }
+  | {
+      type: 'log';
+      level: 'info' | 'debug' | 'warn' | 'error';
+      message: string;
+      timestamp: number;
+    }
+  | {
+      type: 'tool_use';
+      toolName: string;
+      toolInput?: Record<string, unknown>;
+      toolUseId?: string;
+      timestamp: number;
+    }
+  | {
+      type: 'tool_result';
+      toolUseId?: string;
+      result?: string;
+      isError?: boolean;
+      timestamp: number;
+    };
+
+export interface MessageProcess {
+  provider: Provider;
+  state: MessageProcessState;
+  events: MessageProcessEvent[];
 }
 
 export interface Message {
@@ -24,9 +60,9 @@ export interface Message {
   attachments?: Attachment[];
   options?: ChatOption[];
   thinking?: string;
-  tools?: ToolUse[];  // 工具使用记录
-  canRetry?: boolean; // 是否可以重试（如429限流错误）
-  retryContent?: string; // 重试时发送的内容
+  tools?: ToolUse[];
+  process?: MessageProcess;
+  canRetry?: boolean;
 }
 
 export interface Attachment {
@@ -34,31 +70,26 @@ export interface Attachment {
   url: string;
   type: string;
   name: string;
-  data?: string; // base64
+  data?: string;
 }
+
+export type DiscussionAvatar = string | {
+  icon?: string;
+  color?: string;
+};
 
 export interface ChatSession {
   id: string;
   title: string;
   messages: Message[];
   createdAt: number;
+  provider: Provider;
 }
 
-// 讨论系统类型
-
-/**
- * 讨论模式
- */
 export type DiscussionMode = 'debate' | 'collaborate' | 'auto';
 
-/**
- * 终止模式
- */
 export type TerminationMode = 'consensus' | 'rounds' | 'both';
 
-/**
- * 讨论配置
- */
 export interface DiscussionConfig {
   maxRounds?: number;
   maxMessagesPerRound?: number;
@@ -80,10 +111,7 @@ export interface DiscussionAgent {
   id: string;
   name: string;
   role: string;
-  avatar?: {
-    icon?: string;
-    color?: string;
-  };
+  avatar?: DiscussionAvatar;
 }
 
 export interface DiscussionMessage {
@@ -94,10 +122,7 @@ export interface DiscussionMessage {
   timestamp: number;
   type: 'user' | 'agent' | 'system' | 'summary';
   round?: number;
-  avatar?: {
-    icon?: string;
-    color?: string;
-  };
+  avatar?: DiscussionAvatar;
 }
 
 export interface DiscussionSession {
@@ -108,17 +133,16 @@ export interface DiscussionSession {
   currentRound: number;
   maxRounds: number;
   conclusion?: string;
-  /** 讨论模式 */
+  originalInput?: string;
+  participants?: string[];
+  config?: Record<string, unknown>;
+  createdAt?: number;
+  updatedAt?: number;
   mode?: DiscussionMode;
-  /** 模式判断理由 */
   modeReason?: string;
-  /** 共识分数 (0-100) */
   consensusScore?: number;
-  /** 已验证事实 */
   verifiedFacts?: string[];
-  /** 核心争议点 */
   coreClashes?: string[];
-  /** Agent 见解 */
   agentInsights?: Record<string, string>;
 }
 
@@ -138,7 +162,6 @@ export interface DiscussionResult {
   recommendations: string[];
   messages: DiscussionMessage[];
   duration: number;
-  /** Token 使用量统计 */
   tokenUsage?: {
     inputTokens: number;
     outputTokens: number;
@@ -146,9 +169,6 @@ export interface DiscussionResult {
   };
 }
 
-/**
- * 模式检测结果
- */
 export interface ModeDetectionResult {
   mode: DiscussionMode;
   reason: string;

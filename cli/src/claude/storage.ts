@@ -260,8 +260,11 @@ export class SessionStorage {
         createdAt,
         updatedAt,
         messages,
+        provider: 'claude',
+        providerSessionId: claudeSessionId || sessionId,
         claudeSessionId: claudeSessionId || undefined,
-        cwd: cwd || undefined
+        cwd: cwd || undefined,
+        projectId: this.getProjectId()
       };
     } catch (error) {
       console.error(`Failed to parse session ${filePath}:`, error);
@@ -446,7 +449,10 @@ export class SessionStorage {
       id: s.id,
       title: s.title,
       createdAt: s.createdAt,
-      messageCount: s.messages.length
+      messageCount: s.messages.length,
+      provider: 'claude',
+      projectId: this.getProjectId(),
+      lastActivity: s.updatedAt
     }));
   }
 
@@ -557,6 +563,7 @@ export class SessionStorage {
       try {
         const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
         let lastActivity = 0;
+        let displayName = claudeDirToPath(projectId);
 
         for (const file of files) {
           const filePath = path.join(projectDir, file);
@@ -566,9 +573,17 @@ export class SessionStorage {
           }
         }
 
+        if (files.length > 0) {
+          const storage = new SessionStorage(projectId);
+          const sampleSession = storage.load(files[0].replace('.jsonl', ''));
+          if (sampleSession?.cwd) {
+            displayName = sampleSession.cwd;
+          }
+        }
+
         projects.push({
           id: projectId,
-          displayName: claudeDirToPath(projectId),
+          displayName,
           sessionCount: files.length,
           lastActivity
         });
@@ -659,6 +674,8 @@ export class SessionStorage {
             title,
             createdAt,
             messageCount,
+            provider: 'claude',
+            projectId,
             lastActivity
           });
         }
@@ -675,9 +692,7 @@ export class SessionStorage {
    * 加载指定项目的会话内容
    */
   static loadSessionFromProject(projectId: string, sessionId: string): ClaudeSession | null {
-    const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
-    const storage = new SessionStorage(claudeDirToPath(projectId));
-    storage.projectDir = projectDir;
+    const storage = new SessionStorage(projectId);
     return storage.load(sessionId);
   }
 
@@ -690,9 +705,7 @@ export class SessionStorage {
     limit: number = 20,
     beforeIndex?: number
   ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
-    const projectDir = path.join(CLAUDE_PROJECTS_DIR, projectId);
-    const storage = new SessionStorage(claudeDirToPath(projectId));
-    storage.projectDir = projectDir;
+    const storage = new SessionStorage(projectId);
     return storage.loadPaginated(sessionId, limit, beforeIndex);
   }
 

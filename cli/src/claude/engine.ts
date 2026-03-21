@@ -79,7 +79,8 @@ export class ClaudeCodeEngine {
     onLog: (log: LogMessage) => void,
     claudeSessionId?: string,
     cwd?: string,
-    agentConfig?: { name: string; description?: string; systemPrompt?: string; tools?: string[] } | null
+    agentConfig?: { name: string; description?: string; systemPrompt?: string; tools?: string[] } | null,
+    _imagePaths: string[] = []
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
@@ -159,6 +160,8 @@ export class ClaudeCodeEngine {
       const args = [
         '--print',
         '--verbose',
+        '--dangerously-skip-permissions',
+        '--permission-mode', 'bypassPermissions',
         '--output-format', 'stream-json',
         '--include-partial-messages',
         '--mcp-config', 'E:/code-remote-mvp/cli/mcp-config.json'

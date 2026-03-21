@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { Provider } from '../session/provider';
 
 export interface ClaudeMessage {
   id: string;
@@ -6,6 +7,50 @@ export interface ClaudeMessage {
   content: string;
   timestamp: number;
   images?: string[];
+  process?: MessageProcess;
+}
+
+export type MessageProcessState = 'running' | 'completed' | 'error';
+
+export interface ProcessStatusEvent {
+  type: 'status';
+  label: string;
+  timestamp: number;
+}
+
+export interface ProcessLogEvent {
+  type: 'log';
+  level: LogLevel;
+  message: string;
+  timestamp: number;
+}
+
+export interface ProcessToolUseEvent {
+  type: 'tool_use';
+  toolName: string;
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+  timestamp: number;
+}
+
+export interface ProcessToolResultEvent {
+  type: 'tool_result';
+  toolUseId?: string;
+  result?: string;
+  isError?: boolean;
+  timestamp: number;
+}
+
+export type MessageProcessEvent =
+  | ProcessStatusEvent
+  | ProcessLogEvent
+  | ProcessToolUseEvent
+  | ProcessToolResultEvent;
+
+export interface MessageProcess {
+  provider: Provider;
+  state: MessageProcessState;
+  events: MessageProcessEvent[];
 }
 
 export interface ClaudeSession {
@@ -14,8 +59,11 @@ export interface ClaudeSession {
   createdAt: number;
   updatedAt: number;
   messages: ClaudeMessage[];
+  provider: Provider;
+  providerSessionId?: string;
   claudeSessionId?: string;
-  cwd?: string;  // 工作目录
+  cwd?: string;
+  projectId?: string;
 }
 
 export interface ClaudeConfig {
@@ -26,10 +74,8 @@ export interface ClaudeConfig {
   sessionTimeout: number;
 }
 
-// 日志级别类型
 export type LogLevel = 'info' | 'debug' | 'warn' | 'error';
 
-// 日志消息接口
 export interface LogMessage {
   level: LogLevel;
   message: string;
@@ -41,10 +87,11 @@ export interface ClaudeStreamChunk {
   content: string;
   done: boolean;
   messageId?: string;
+  sessionId?: string;
+  provider?: Provider;
   timestamp: number;
 }
 
-// 工具使用事件
 export interface ToolUseEvent {
   type: 'tool_use';
   toolName: string;
@@ -52,7 +99,6 @@ export interface ToolUseEvent {
   toolUseId?: string;
 }
 
-// 工具结果事件
 export interface ToolResultEvent {
   type: 'tool_result';
   toolUseId: string;
@@ -63,7 +109,9 @@ export interface ToolResultEvent {
 export interface ClaudeError {
   type: 'claude_error';
   error: string;
-  code: 'CLI_NOT_FOUND' | 'API_KEY_MISSING' | 'RATE_LIMITED' | 'SESSION_NOT_FOUND' | 'STREAM_ERROR';
+  code: 'CLI_NOT_FOUND' | 'API_KEY_MISSING' | 'RATE_LIMITED' | 'SESSION_NOT_FOUND' | 'STREAM_ERROR' | 'SESSION_BUSY';
+  sessionId?: string;
+  provider?: Provider;
   timestamp: number;
 }
 
@@ -72,7 +120,9 @@ export interface SessionInfo {
   title: string;
   createdAt: number;
   messageCount: number;
-  lastActivity?: number;  // 最后活动时间，用于排序
+  provider: Provider;
+  projectId?: string;
+  lastActivity?: number;
 }
 
 export function createMessage(role: 'user' | 'assistant', content: string, images?: string[]): ClaudeMessage {
@@ -85,14 +135,19 @@ export function createMessage(role: 'user' | 'assistant', content: string, image
   };
 }
 
-export function createSession(title: string = 'New Chat'): ClaudeSession {
+export function createSession(title: string = 'New Chat', provider: Provider = 'claude'): ClaudeSession {
   return {
     id: uuidv4(),
     title,
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    messages: []
+    messages: [],
+    provider
   };
+}
+
+export function getProviderSessionId(session: Pick<ClaudeSession, 'provider' | 'providerSessionId' | 'claudeSessionId'>): string | undefined {
+  return session.providerSessionId || (session.provider === 'claude' ? session.claudeSessionId : undefined);
 }
 
 export const DEFAULT_CONFIG: ClaudeConfig = {

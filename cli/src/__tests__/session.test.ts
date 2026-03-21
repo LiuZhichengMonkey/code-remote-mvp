@@ -9,10 +9,12 @@ import { SessionManager } from '../claude/session';
 
 // Mock SessionStorage
 jest.mock('../claude/storage');
+jest.mock('../codexStorage');
 
 describe('SessionManager', () => {
   let manager: SessionManager;
   let mockStorage: any;
+  let mockCodexStorage: any;
 
   beforeEach(() => {
     // 创建模拟存储
@@ -28,9 +30,22 @@ describe('SessionManager', () => {
       exists: jest.fn().mockReturnValue(false)
     };
 
+    mockCodexStorage = {
+      list: jest.fn().mockReturnValue([]),
+      listInfo: jest.fn().mockReturnValue([]),
+      load: jest.fn().mockReturnValue(null),
+      loadPaginated: jest.fn().mockReturnValue({ session: null, hasMore: false, totalMessages: 0 }),
+      delete: jest.fn().mockReturnValue(true),
+      rename: jest.fn().mockReturnValue(true),
+      getLatest: jest.fn().mockReturnValue(null),
+      getProjectId: jest.fn().mockReturnValue('codex-test-project')
+    };
+
     // Mock SessionStorage 构造函数
     const SessionStorageMock = require('../claude/storage').SessionStorage;
     SessionStorageMock.mockImplementation(() => mockStorage);
+    const CodexSessionStorageMock = require('../codexStorage').CodexSessionStorage;
+    CodexSessionStorageMock.mockImplementation(() => mockCodexStorage);
 
     manager = new SessionManager();
   });
