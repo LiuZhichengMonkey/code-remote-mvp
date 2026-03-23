@@ -56,3 +56,8 @@ app/ios/Symlinks/
 # Logs
 *.log
 logs/
+
+# Local runtime state
+.coderemote/
+cli/.coderemote/
+bg-test.txt
