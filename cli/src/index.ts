@@ -7,7 +7,6 @@ import { existsSync } from 'fs';
 import { CodeRemoteServer } from './server.js';
 import { MessageHandler } from './handler.js';
 import { AuthManager } from './auth.js';
-import { TunnelManager } from './tunnel.js';
 
 // Export ImageHandler and related types
 export { ImageHandler } from './imageHandler.js';
@@ -31,7 +30,7 @@ const cleanup = () => {
   if (server) {
     server.close();
   }
-  console.log(chalk.yellow('→'), 'CodeRemote stopped.');
+  console.log(chalk.yellow('[stop]'), 'CodeRemote stopped.');
   process.exit(0);
 };
 
@@ -40,7 +39,7 @@ process.on('SIGTERM', cleanup);
 
 program
   .name('code-remote')
-  .description('CodeRemote - Control Claude Code from your phone')
+  .description('CodeRemote - Control Claude Code and Codex from your phone')
   .version('1.0.0');
 
 program
@@ -55,12 +54,12 @@ program
   .option('-v, --verbose', 'Verbose output')
   .action(async (options) => {
     console.log();
-    console.log(chalk.bold.cyan(`
-╔════════════════════════════════════════╗
-║         CodeRemote Server            ║
-║    Remote Control Your Code          ║
-╚════════════════════════════════════════╝
-    `));
+    console.log(chalk.bold.cyan([
+      '+--------------------------------------+',
+      '|          CodeRemote Server           |',
+      '|    Claude Code + Codex Remote UI     |',
+      '+--------------------------------------+'
+    ].join('\n')));
     console.log();
 
     const port = parseInt(options.port, 10);
@@ -95,12 +94,12 @@ program
     });
 
     server.onConnection((clientId) => {
-      console.log(chalk.green('✓'), `Client ${chalk.cyan(clientId)} connected`);
-      server!.sendToClient(clientId, '🎉 Connected to CodeRemote! Send me a message to get started.');
+      console.log(chalk.green('[ok]'), `Client ${chalk.cyan(clientId)} connected`);
+      server!.sendToClient(clientId, 'Connected to CodeRemote. Send a message to get started.');
     });
 
     server.onDisconnection((clientId) => {
-      console.log(chalk.yellow('→'), `Client ${chalk.cyan(clientId)} disconnected`);
+      console.log(chalk.yellow('[close]'), `Client ${chalk.cyan(clientId)} disconnected`);
     });
 
     // Wait for server to start
@@ -124,8 +123,8 @@ program
 
     // Display connection info
     console.log();
-    console.log(chalk.bold('📱 Connection Information'));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.bold('Connection Information'));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
     console.log(chalk.cyan('Local URL:'), `ws://localhost:${port}`);
     console.log(chalk.yellow('Token:'),     auth.getToken());
@@ -150,7 +149,7 @@ program
     }
 
     console.log();
-    console.log(chalk.green('✓'), 'CodeRemote is ready and waiting for connections!');
+    console.log(chalk.green('[ok]'), 'CodeRemote is ready and waiting for connections.');
     console.log();
 
     // Keep process alive
@@ -176,12 +175,12 @@ program
     const WebSocket = (await import('ws')).default;
     const token = options.token || require('uuid').v4();
 
-    console.log(chalk.blue('→'), `Connecting to ${options.url}...`);
+    console.log(chalk.blue('[connect]'), `Connecting to ${options.url}...`);
 
     const ws = new WebSocket(options.url);
 
     ws.on('open', () => {
-      console.log(chalk.green('✓'), 'Connected!');
+      console.log(chalk.green('[ok]'), 'Connected.');
       ws.send(JSON.stringify({ type: 'auth', token }));
     });
 
@@ -193,7 +192,7 @@ program
         ws.send(JSON.stringify({ type: 'message', content: 'Hello from test!' }));
         setTimeout(() => {
           ws.close();
-          console.log(chalk.green('✓'), 'Test complete!');
+          console.log(chalk.green('[ok]'), 'Test complete.');
         }, 1000);
       }
     });
@@ -203,7 +202,7 @@ program
     });
 
     ws.on('close', () => {
-      console.log(chalk.yellow('→'), 'Connection closed');
+      console.log(chalk.yellow('[close]'), 'Connection closed.');
     });
   });
 

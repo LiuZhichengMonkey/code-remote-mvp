@@ -15,6 +15,20 @@ import {
   DiscussionResult as BackendResult
 } from './types';
 
+const debugLog = (...args: unknown[]): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    if (window.localStorage.getItem('coderemote_debug') === '1') {
+      console.log(...args);
+    }
+  } catch {
+    // Ignore storage access errors.
+  }
+};
+
 // 内置 Agent 模板
 const BUILTIN_AGENTS: DiscussionAgent[] = [
   { id: 'code-reviewer', name: '代码审查', role: 'Code Reviewer', avatar: { icon: '🔍', color: '#4CAF50' } },
@@ -207,7 +221,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
       status: 'sent'
     };
 
-    console.log('[Discussion] Adding message to chat:', msg.type, msg.sender, 'sessionId:', sessionIdRef.current);
+    debugLog('[Discussion] Adding message to chat:', msg.type, msg.sender, 'sessionId:', sessionIdRef.current);
     onAddMessage(message);
   }, [onAddMessage]);
 
@@ -270,7 +284,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
             // 模式检测结果
             const modeData = msg.data as { mode: DiscussionMode; reason: string };
             setDiscussionMode(modeData.mode);
-            console.log(`[Discussion] Mode detected: ${modeData.mode} - ${modeData.reason}`);
+            debugLog(`[Discussion] Mode detected: ${modeData.mode} - ${modeData.reason}`);
 
             addDiscussionMessage({
               sender: '系统',
@@ -292,7 +306,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
               consensusScore: scoreData.score
             } : null);
 
-            console.log(`[Discussion] Consensus score: ${scoreData.previousScore} -> ${scoreData.score}`);
+            debugLog(`[Discussion] Consensus score: ${scoreData.previousScore} -> ${scoreData.score}`);
 
             handlersRef.current.onConsensusUpdate?.(scoreData.score, scoreData.previousScore);
             break;
@@ -314,7 +328,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
           case 'fluff_detected':
             // 废话检测（静默处理，只记录日志）
             const fluffData = msg.data as { agentName: string; fluffCount: number; cleanContent: string };
-            console.log(`[Discussion] Fluff detected from ${fluffData.agentName}: ${fluffData.fluffCount} instances`);
+            debugLog(`[Discussion] Fluff detected from ${fluffData.agentName}: ${fluffData.fluffCount} instances`);
             break;
 
           case 'discussion_event':
@@ -357,11 +371,11 @@ export function useDiscussion(options: UseDiscussionOptions) {
             break;
 
           case 'discussion_result':
-            console.log('[Discussion] Received discussion_result');
-            console.log('[Discussion]   msg.sessionId:', msg.sessionId);
-            console.log('[Discussion]   handlersRef.current keys:', Object.keys(handlersRef.current));
-            console.log('[Discussion]   onCreateHostSession exists:', !!handlersRef.current.onCreateHostSession);
-            console.log('[Discussion]   onComplete exists:', !!handlersRef.current.onComplete);
+            debugLog('[Discussion] Received discussion_result');
+            debugLog('[Discussion]   msg.sessionId:', msg.sessionId);
+            debugLog('[Discussion]   handlersRef.current keys:', Object.keys(handlersRef.current));
+            debugLog('[Discussion]   onCreateHostSession exists:', !!handlersRef.current.onCreateHostSession);
+            debugLog('[Discussion]   onComplete exists:', !!handlersRef.current.onComplete);
             setIsRunning(false);
             sessionIdRef.current = null; // 清理 ref
             const result = msg.data as DiscussionResult;
@@ -407,7 +421,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
                 createdAt: Date.now(),
                 updatedAt: Date.now()
               });
-              console.log('[Discussion] Creating host session for discussion record');
+              debugLog('[Discussion] Creating host session for discussion record');
               handlersRef.current.onCreateHostSession(title, fullRecord);
             }
 
@@ -439,7 +453,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
 
               // 将讨论结果发送到主会话
               if (onSendToMainSession && summaryData.rawResult) {
-                console.log('[Discussion] Sending summary to main session');
+                debugLog('[Discussion] Sending summary to main session');
                 onSendToMainSession(summaryData.summary, summaryData.rawResult);
               }
             }
@@ -477,7 +491,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       // 延迟一点，确保消息监听器已注册
       const timer = setTimeout(() => {
-        console.log('[Discussion] Requesting pending results on connect');
+        debugLog('[Discussion] Requesting pending results on connect');
         ws.send(JSON.stringify({ type: 'discussion_get_pending' }));
       }, 100);
       return () => clearTimeout(timer);
@@ -486,7 +500,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
 
   // 开始讨论
   const startDiscussion = useCallback((input: string, config?: DiscussionConfig & { hostMode?: boolean }) => {
-    console.log('[Discussion] startDiscussion called', { ws: ws?.readyState, input: input?.substring(0, 50), config });
+    debugLog('[Discussion] startDiscussion called', { ws: ws?.readyState, input: input?.substring(0, 50), config });
 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.error('[Discussion] WebSocket not connected', { ws: !!ws, readyState: ws?.readyState });
@@ -511,7 +525,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
       hostMode: config?.hostMode !== false // 默认开启主持人模式
     });
 
-    console.log('[Discussion] Sending message:', message.substring(0, 300));
+    debugLog('[Discussion] Sending message:', message.substring(0, 300));
     ws.send(message);
   }, [ws]);
 
@@ -524,10 +538,10 @@ export function useDiscussion(options: UseDiscussionOptions) {
   // 请求缓存的讨论结果（重连后调用）
   const requestPendingResults = useCallback(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.log('[Discussion] Cannot request pending results: WebSocket not ready');
+      debugLog('[Discussion] Cannot request pending results: WebSocket not ready');
       return;
     }
-    console.log('[Discussion] Requesting pending results...');
+    debugLog('[Discussion] Requesting pending results...');
     ws.send(JSON.stringify({ type: 'discussion_get_pending' }));
   }, [ws]);
 
@@ -543,7 +557,7 @@ export function useDiscussion(options: UseDiscussionOptions) {
 
   // 恢复运行中的讨论（用于重连）
   const restoreRunning = useCallback((discussionId: string) => {
-    console.log('[Discussion] Restoring running discussion:', discussionId);
+    debugLog('[Discussion] Restoring running discussion:', discussionId);
     setIsRunning(true);
     sessionIdRef.current = discussionId; // 更新 ref
     // 创建一个临时的 session 对象来接收后续消息

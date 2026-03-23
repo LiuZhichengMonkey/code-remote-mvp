@@ -41,6 +41,33 @@ function formatCommandResult(item: any): string {
   return parts.join('\n\n');
 }
 
+function parseFunctionArguments(rawArguments: unknown): Record<string, unknown> | undefined {
+  if (typeof rawArguments !== 'string' || !rawArguments.trim()) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(rawArguments);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : { value: parsed };
+  } catch {
+    return { raw: rawArguments };
+  }
+}
+
+function extractAssistantText(content: unknown): string {
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .filter((item: any) => item?.type === 'output_text' && typeof item.text === 'string')
+    .map((item: any) => item.text)
+    .join('')
+    .trim();
+}
+
 export class CodexCodeEngine {
   private cliAvailable: boolean | null = null;
   private currentProcess: ReturnType<typeof spawn> | null = null;
@@ -166,6 +193,8 @@ export class CodexCodeEngine {
       let responseSessionId = providerSessionId;
       let settled = false;
       let completionTimer: NodeJS.Timeout | null = null;
+      let lastCommentaryText = '';
+      let lastAssistantText = '';
 
       const clearCompletionTimer = () => {
         if (completionTimer) {
@@ -261,12 +290,103 @@ export class CodexCodeEngine {
             return;
           }
 
-          if (entry.type === 'item.completed' && entry.item?.type === 'agent_message' && typeof entry.item.text === 'string') {
-            const text = entry.item.text.trim();
+          if (
+            entry.type === 'response_item'
+            && (entry.payload?.type === 'function_call' || entry.payload?.type === 'custom_tool_call')
+          ) {
+            const toolEvent: ToolUseEvent = {
+              type: 'tool_use',
+              toolName: entry.payload.name || 'tool',
+              toolInput: parseFunctionArguments(entry.payload.arguments),
+              toolUseId: entry.payload.call_id || entry.payload.id
+            };
+            onChunk('', false, undefined, toolEvent);
+            lastCommentaryText = '';
+            return;
+          }
+
+          if (
+            entry.type === 'response_item'
+            && (entry.payload?.type === 'function_call_output' || entry.payload?.type === 'custom_tool_call_output')
+          ) {
+            const toolEvent: ToolResultEvent = {
+              type: 'tool_result',
+              toolUseId: entry.payload.call_id || entry.payload.id,
+              result: typeof entry.payload.output === 'string' ? entry.payload.output : undefined,
+              isError: false
+            };
+            onChunk('', false, undefined, toolEvent);
+            lastCommentaryText = '';
+            return;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') {
+            sendLog('info', 'Codex started working');
+            lastCommentaryText = '';
+            return;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
+            sendLog('info', 'Codex completed the response');
+            lastCommentaryText = '';
+            return;
+          }
+
+          if (entry.type === 'response_item' && entry.payload?.type === 'reasoning') {
+            sendLog('debug', 'Codex generated internal reasoning');
+            lastCommentaryText = '';
+            return;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'agent_message') {
+            const phase = typeof entry.payload.phase === 'string' ? entry.payload.phase : '';
+            const text = typeof entry.payload.message === 'string' ? entry.payload.message.trim() : '';
+            if (text && phase && phase !== 'final_answer' && text !== lastCommentaryText) {
+              lastCommentaryText = text;
+              sendLog('info', text);
+            }
+            return;
+          }
+
+          if (
+            entry.type === 'response_item'
+            && entry.payload?.type === 'message'
+            && entry.payload?.role === 'assistant'
+          ) {
+            const phase = typeof entry.payload.phase === 'string' ? entry.payload.phase : '';
+            const text = extractAssistantText(entry.payload.content);
             if (!text) {
               return;
             }
 
+            if (phase && phase !== 'final_answer') {
+              if (text !== lastCommentaryText) {
+                lastCommentaryText = text;
+                sendLog('info', text);
+              }
+              return;
+            }
+
+            if (text === lastAssistantText) {
+              return;
+            }
+
+            lastAssistantText = text;
+            lastCommentaryText = '';
+            const chunk = fullResponse ? `\n\n${text}` : text;
+            fullResponse += chunk;
+            onChunk(chunk, false);
+            return;
+          }
+
+          if (entry.type === 'item.completed' && entry.item?.type === 'agent_message' && typeof entry.item.text === 'string') {
+            const text = entry.item.text.trim();
+            if (!text || text === lastAssistantText) {
+              return;
+            }
+
+            lastAssistantText = text;
+            lastCommentaryText = '';
             const chunk = fullResponse ? `\n\n${text}` : text;
             fullResponse += chunk;
             onChunk(chunk, false);

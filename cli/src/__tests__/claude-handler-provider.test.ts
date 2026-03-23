@@ -262,4 +262,92 @@ describe('ClaudeHandler provider behavior', () => {
     ]);
     expect(mockSessionManager.setSessionFromCrossProject).toHaveBeenCalledWith(codexSession);
   });
+
+  test('buffers running logs for an unfocused codex session and flushes them after focus returns', async () => {
+    const handler = new ClaudeHandler('E:/code-remote-mvp');
+    const ws = createWebSocketMock();
+    const sendError = jest.fn();
+    let resolveRun: any = null;
+    handler.setActiveSession('another-session');
+
+    mockCodexEngine.sendMessage.mockImplementation(async (
+      _message: string,
+      _messages: any[],
+      onChunk: (content: string, done: boolean) => void,
+      onLog: (log: { level: 'info' | 'debug' | 'warn' | 'error'; message: string; timestamp: number }) => void
+    ) => {
+      onLog({ level: 'info', message: 'Running build...', timestamp: 1234 });
+      onChunk('partial', false);
+      return await new Promise(resolve => {
+        resolveRun = resolve;
+      });
+    });
+
+    const runPromise = handler.handleClaudeMessage(ws, 'hello codex', sendError, undefined, undefined, undefined, 'codex');
+
+    await Promise.resolve();
+
+    let sent = parseSentMessages(ws);
+    expect(sent.some(message => message.type === 'claude_log' && message.message === 'Running build...')).toBe(false);
+
+    handler.setActiveSession('temp-codex-1');
+
+    sent = parseSentMessages(ws);
+    expect(sent).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'claude_log',
+        sessionId: 'temp-codex-1',
+        provider: 'codex',
+        message: 'Running build...'
+      }),
+      expect.objectContaining({
+        type: 'claude_stream',
+        sessionId: 'temp-codex-1',
+        provider: 'codex',
+        content: 'partial',
+        replace: true,
+        done: false
+      })
+    ]));
+
+    if (resolveRun) {
+      resolveRun({ response: 'codex response', providerSessionId: 'codex-real-session' });
+    }
+    await runPromise;
+
+    expect(sendError).not.toHaveBeenCalled();
+  });
+
+  test('normalizes codex upstream transport errors as stream errors instead of CLI_NOT_FOUND', async () => {
+    const handler = new ClaudeHandler('E:/code-remote-mvp');
+    const ws = createWebSocketMock();
+    const sendError = jest.fn();
+
+    mockCodexEngine.sendMessage.mockRejectedValueOnce(new Error(
+      'Reconnecting... 1/5 (stream disconnected before completion: Transport error: network error: error decoding response body)'
+    ));
+
+    await handler.handleClaudeMessage(ws, 'hello codex', sendError, undefined, undefined, undefined, 'codex');
+
+    expect(sendError).toHaveBeenCalledWith(
+      'STREAM_ERROR',
+      expect.stringContaining('Codex upstream stream disconnected.')
+    );
+    expect(sendError).toHaveBeenCalledWith(
+      'STREAM_ERROR',
+      expect.stringContaining('error decoding response body')
+    );
+  });
+
+  test('keeps CLI not found errors classified correctly for codex', async () => {
+    const handler = new ClaudeHandler('E:/code-remote-mvp');
+    const ws = createWebSocketMock();
+    const sendError = jest.fn();
+
+    mockCodexEngine.sendMessage.mockRejectedValueOnce(new Error('Codex CLI not found'));
+
+    await handler.handleClaudeMessage(ws, 'hello codex', sendError, undefined, undefined, undefined, 'codex');
+
+    expect(sendError).toHaveBeenCalledWith('CLI_NOT_FOUND', 'Codex CLI not found');
+  });
 });

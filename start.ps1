@@ -1,161 +1,131 @@
-# CodeRemote 一键启动脚本 (PowerShell)
+# CodeRemote quick start (PowerShell)
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
+$cliDir = Join-Path $projectRoot "cli"
+$chatUiDistDir = Join-Path $projectRoot "chat-ui\\dist"
+$serverPort = 8085
+$serverToken = "test123"
+$localHttpUrl = "http://localhost:$serverPort"
+$localWsUrl = "ws://localhost:$serverPort"
+$defaultRemoteWsUrl = "wss://acropetal-nonfalteringly-ruben.ngrok-free.dev"
+$tunnelApiUrl = "http://127.0.0.1:4040/api/tunnels"
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   CodeRemote 一键启动" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
+function Write-Section {
+    param([string]$Text)
 
-# 检查 Node.js
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ("  {0}" -f $Text) -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+}
+
+function Stop-ProcessesOnPort {
+    param([int]$Port)
+
+    $processIds = @()
+
+    try {
+        $processIds = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique
+    } catch {
+        $processIds = netstat -ano |
+            Select-String ":$Port\s+.*LISTENING" |
+            ForEach-Object {
+                $parts = ($_ -split "\s+") | Where-Object { $_ }
+                if ($parts.Length -ge 5) {
+                    [int]$parts[-1]
+                }
+            } |
+            Select-Object -Unique
+    }
+
+    foreach ($processId in $processIds) {
+        if ($processId -le 0) {
+            continue
+        }
+
+        try {
+            Stop-Process -Id $processId -Force -ErrorAction Stop
+            Write-Host ("[OK] Stopped PID {0} on port {1}" -f $processId, $Port) -ForegroundColor Green
+        } catch {
+            Write-Host ("[WARN] Failed to stop PID {0} on port {1}: {2}" -f $processId, $Port, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+}
+
+function Get-TunnelPublicUrl {
+    try {
+        $response = Invoke-RestMethod -Uri $tunnelApiUrl -TimeoutSec 2
+        $firstTunnel = @($response.tunnels | Where-Object { $_.public_url }) | Select-Object -First 1
+        if ($firstTunnel) {
+            return [string]$firstTunnel.public_url
+        }
+    } catch {
+        return $null
+    }
+
+    return $null
+}
+
+Write-Section "CodeRemote Quick Start"
+
 try {
-    $nodeVersion = node --version
-    Write-Host "[OK] Node.js: $nodeVersion" -ForegroundColor Green
+    $nodeVersion = (& node --version).Trim()
+    Write-Host ("[OK] Node.js: {0}" -f $nodeVersion) -ForegroundColor Green
 } catch {
-    Write-Host "[错误] 未找到 Node.js，请先安装 Node.js 18+" -ForegroundColor Red
-    Read-Host "按回车退出"
+    Write-Host "[ERROR] Node.js was not found. Install Node.js 18+ first." -ForegroundColor Red
     exit 1
 }
 
-# 安装 CLI 依赖
-Write-Host "[1/5] 安装 CLI 依赖..." -ForegroundColor Yellow
-Set-Location "$projectRoot\cli"
-if (-not (Test-Path "node_modules")) {
-    npm install
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[错误] CLI 依赖安装失败" -ForegroundColor Red
-        exit 1
-    }
-}
-
-# 构建 CLI
-Write-Host "[2/5] 构建 CLI..." -ForegroundColor Yellow
-npm run build 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[错误] CLI 构建失败" -ForegroundColor Red
+if (-not (Test-Path (Join-Path $cliDir "dist\\index.js"))) {
+    Write-Host "[ERROR] Missing cli\\dist\\index.js" -ForegroundColor Red
+    Write-Host "Run: cd cli && npm run build" -ForegroundColor Yellow
     exit 1
 }
-Write-Host "     构建完成" -ForegroundColor Green
 
-# 检查 ngrok
-Write-Host "[3/5] 检查 ngrok..." -ForegroundColor Yellow
-
-# 尝试多种方式找 ngrok
-$ngrokPath = $null
-$ngrokPaths = @(
-    "ngrok",
-    "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe",
-    "$env:ProgramFiles\ngrok\ngrok.exe",
-    "$env:ProgramFiles(x86)\ngrok\ngrok.exe"
-)
-
-foreach ($path in $ngrokPaths) {
-    if ($path -match "ngrok\.exe$") {
-        if (Test-Path $path) {
-            $ngrokPath = $path
-            break
-        }
-    } else {
-        $result = Get-Command $path -ErrorAction SilentlyContinue
-        if ($result) {
-            $ngrokPath = $result.Source
-            break
-        }
-    }
+if (-not (Test-Path (Join-Path $chatUiDistDir "index.html"))) {
+    Write-Host "[ERROR] Missing chat-ui\\dist\\index.html" -ForegroundColor Red
+    Write-Host "Run: cd chat-ui && npm run build" -ForegroundColor Yellow
+    exit 1
 }
 
-if (-not $ngrokPath) {
-    Write-Host "     ngrok 未安装，将跳过隧道功能" -ForegroundColor Yellow
-    Write-Host "     如需外网访问，请手动安装 ngrok" -ForegroundColor Yellow
-} else {
-    Write-Host "     ngrok 已找到: $ngrokPath" -ForegroundColor Green
+Write-Host "[1/3] Cleaning up port 8085..." -ForegroundColor Yellow
+Stop-ProcessesOnPort -Port $serverPort
 
-    # 检查 ngrok authtoken
-    $ngrokConfig = "$env:USERPROFILE\AppData\Local\ngrok\ngrok.yml"
-    if (-not (Test-Path $ngrokConfig)) {
-        Write-Host ""
-        Write-Host "========================================" -ForegroundColor Yellow
-        Write-Host "  首次使用需要配置 ngrok" -ForegroundColor Yellow
-        Write-Host "========================================" -ForegroundColor Yellow
-        Write-Host "1. 访问 https://dashboard.ngrok.com/signup 注册" -ForegroundColor White
-        Write-Host "2. 获取 authtoken" -ForegroundColor White
-        Write-Host ""
-        $token = Read-Host "请输入 ngrok authtoken (直接回车跳过)"
-        if ($token) {
-            & $ngrokPath config add-authtoken $token
-            Write-Host "     ngrok 配置完成" -ForegroundColor Green
-        }
-    }
-}
+Write-Host "[2/3] Starting CodeRemote server (HTTP + WebSocket on port 8085)..." -ForegroundColor Yellow
+$serverCommand = "cd /d `"$cliDir`" && node dist/index.js start -p $serverPort -t $serverToken"
+$serverProcess = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $serverCommand -WindowStyle Minimized -PassThru
+Write-Host ("[OK] Started CodeRemote server launcher (PID {0})" -f $serverProcess.Id) -ForegroundColor Green
 
-# 启动 HTTP 服务器
-Write-Host "[4/5] 启动 HTTP 服务器 (端口 8084)..." -ForegroundColor Yellow
-$httpJob = Start-Job -ScriptBlock {
-    Set-Location $using:projectRoot\web
-    npx http-server -p 8084 -c-1
-} -Name "HTTP Server"
-
-# 等待 HTTP 服务器
-Start-Sleep -Seconds 3
-
-# 启动 CLI 服务器
-Write-Host "[5/5] 启动 WebSocket 服务器 (端口 8085)..." -ForegroundColor Yellow
-$cliJob = Start-Job -ScriptBlock {
-    Set-Location $using:projectRoot\cli
-    npx code-remote start --port 8085
-} -Name "CLI Server"
-
-# 等待 CLI 服务器
 Start-Sleep -Seconds 4
 
-# 启动 ngrok 隧道 (如果可用)
-if ($ngrokPath) {
-    Write-Host ""
-    Write-Host "启动 ngrok 隧道..." -ForegroundColor Yellow
-    $tunnelJob = Start-Job -ScriptBlock {
-        & $using:ngrokPath http 8085
-    } -Name "ngrok Tunnel"
-
-    # 等待 ngrok 启动
-    Start-Sleep -Seconds 8
+Write-Host "[3/3] Reading tunnel metadata..." -ForegroundColor Yellow
+$publicHttpUrl = Get-TunnelPublicUrl
+$publicWsUrl = $null
+if ($publicHttpUrl) {
+    $publicWsUrl = $publicHttpUrl -replace '^https://', 'wss://' -replace '^http://', 'ws://'
 }
 
-# 获取 ngrok URL
-Write-Host ""
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   启动完成！" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "本地测试: http://localhost:8084/cr-debug.html" -ForegroundColor White
-Write-Host ""
+Write-Section "Services Started"
+Write-Host ("Local UI:         {0}" -f $localHttpUrl) -ForegroundColor White
+Write-Host ("Local WebSocket:  {0}" -f $localWsUrl) -ForegroundColor White
+Write-Host ("Token:            {0}" -f $serverToken) -ForegroundColor White
+Write-Host ("Default Remote WS:{0}{1}" -f ($(if ($defaultRemoteWsUrl.Length -lt 24) { " " } else { "" })), $defaultRemoteWsUrl) -ForegroundColor White
 
-if ($ngrokPath) {
-    try {
-        $tunnels = Invoke-RestMethod "http://127.0.0.1:4040/api/tunnels" -ErrorAction Stop
-        $url = $tunnels.tunnels[0].public_url
-
-        Write-Host "外网地址: $url" -ForegroundColor Green
-        $wsUrl = $url -replace '^https://', 'wss://'
-        Write-Host "WebSocket: $wsUrl" -ForegroundColor Green
-        Write-Host ""
-    } catch {
-        Write-Host "ngrok 隧道启动中，请稍候..." -ForegroundColor Yellow
-    }
+if ($publicHttpUrl -and $publicWsUrl) {
+    Write-Host ("Tunnel HTTP:      {0}" -f $publicHttpUrl) -ForegroundColor Green
+    Write-Host ("Tunnel WebSocket: {0}" -f $publicWsUrl) -ForegroundColor Green
+} else {
+    Write-Host "[WARN] Tunnel metadata not available at http://127.0.0.1:4040." -ForegroundColor Yellow
 }
 
-Write-Host "Token: 请查看 CLI 服务器输出" -ForegroundColor White
 Write-Host ""
-Write-Host "服务已在后台运行" -ForegroundColor Cyan
-Write-Host "运行 Stop-Job 可停止服务" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "The server keeps running in a separate window." -ForegroundColor Cyan
+Write-Host "Open the local UI in your browser to start testing." -ForegroundColor Cyan
 
-# 打开浏览器
-Start-Sleep -Seconds 2
-Start-Process "http://localhost:8084/cr-debug.html"
-
-# 保持脚本运行
-Write-Host "按 Ctrl+C 退出或关闭此窗口" -ForegroundColor Yellow
-while ($true) {
-    Start-Sleep -Seconds 10
+try {
+    Start-Process $localHttpUrl | Out-Null
+} catch {
+    Write-Host ("[WARN] Failed to open browser automatically: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
 }

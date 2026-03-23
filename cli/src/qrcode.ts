@@ -22,8 +22,8 @@ export class QRCodeGenerator {
     const qrData = `code-remote://${wsUrl.replace('ws://', '').replace('wss://', '')}?token=${token}`;
 
     console.log();
-    console.log(chalk.bold.cyan('📱 Scan QR Code to Connect'));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.bold.cyan('Scan QR Code to Connect'));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
 
     // Generate QR code
@@ -32,18 +32,18 @@ export class QRCodeGenerator {
     });
 
     console.log();
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
     console.log(chalk.bold('Or enter manually:'));
     console.log();
     console.log(chalk.cyan('Server URL:'), chalk.white(wsUrl));
     console.log(chalk.cyan('Token:'),     chalk.yellow(token));
     console.log();
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
 
     // Show manual connection info
     console.log();
-    console.log(chalk.yellow('💡 Manual Connection (if scan fails):'));
+    console.log(chalk.yellow('Manual Connection (if scan fails):'));
     console.log();
     console.log(chalk.gray('1. Open CodeRemote app on your phone'));
     console.log(chalk.gray('2. Enter the URL above'));
@@ -54,21 +54,21 @@ export class QRCodeGenerator {
 
   static displayTunnelUrl(url: string) {
     console.log();
-    console.log(chalk.green('✓'), `Tunnel Active: ${chalk.cyan(url)}`);
-    console.log(chalk.yellow('→'), 'You can now connect from anywhere!');
+    console.log(chalk.green('[ok]'), `Tunnel Active: ${chalk.cyan(url)}`);
+    console.log(chalk.yellow('[info]'), 'You can now connect from anywhere.');
     console.log();
   }
 
   static displayInstructions() {
     console.log();
-    console.log(chalk.bold.cyan('📲 Getting the App'));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.bold.cyan('Getting the App'));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
     console.log(chalk.yellow('1. Android:'), 'Install from Google Play (coming soon)');
     console.log(chalk.yellow('2. iOS:'),     'Install from App Store (coming soon)');
     console.log(chalk.yellow('3. Dev:'),     'Build from source: flutter build apk');
     console.log();
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
   }
 }

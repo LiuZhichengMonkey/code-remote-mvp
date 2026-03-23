@@ -52,6 +52,7 @@ interface SessionRunState {
   isRunning: boolean;
   accumulatedContent: string;
   accumulatedThinking: string;
+  bufferedLogs: LogMessage[];
 }
 
 export class ClaudeHandler {
@@ -79,6 +80,79 @@ export class ClaudeHandler {
 
   private createEngine(provider: Provider): ProviderEngine {
     return provider === 'codex' ? new CodexCodeEngine() : new ClaudeCodeEngine();
+  }
+
+  private normalizeProviderError(
+    errorMessage: string,
+    provider: Provider
+  ): { code: string; message: string } {
+    const normalized = errorMessage.trim();
+    const lower = normalized.toLowerCase();
+    const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+
+    if (
+      lower.includes('stream disconnected before completion')
+      || lower.includes('error decoding response body')
+      || lower.includes('transport error')
+      || lower.includes('network error')
+    ) {
+      return {
+        code: 'STREAM_ERROR',
+        message: `${providerLabel} upstream stream disconnected. This usually indicates the configured API proxy or network interrupted the response. Original error: ${normalized}`
+      };
+    }
+
+    if (
+      lower.includes('session not found')
+      || lower.includes('no session found')
+      || lower.includes('could not find session')
+    ) {
+      return {
+        code: 'SESSION_NOT_FOUND',
+        message: normalized
+      };
+    }
+
+    return {
+      code: this.getErrorCode(normalized),
+      message: normalized
+    };
+  }
+
+  private flushBufferedState(sessionId: string, state: SessionRunState): void {
+    if (!state.ws || state.ws.readyState !== 1) {
+      return;
+    }
+
+    for (const log of state.bufferedLogs) {
+      state.ws.send(JSON.stringify({
+        type: 'claude_log',
+        level: log.level,
+        message: log.message,
+        sessionId,
+        provider: state.provider,
+        timestamp: log.timestamp
+      }));
+    }
+    state.bufferedLogs = [];
+
+    if (!state.accumulatedContent && !state.accumulatedThinking) {
+      return;
+    }
+
+    state.ws.send(JSON.stringify({
+      type: 'claude_stream',
+      content: state.accumulatedContent,
+      thinking: state.accumulatedThinking,
+      done: false,
+      replace: true,
+      sessionId,
+      provider: state.provider,
+      timestamp: Date.now()
+    }));
+
+    state.accumulatedContent = '';
+    state.accumulatedThinking = '';
   }
 
   private getProjectIdForSession(session: ClaudeSession): string | undefined {
@@ -238,23 +312,11 @@ export class ClaudeHandler {
     }
 
     const state = this.runningSessions.get(sessionId);
-    if (!state || !state.ws || state.ws.readyState !== 1 || (!state.accumulatedContent && !state.accumulatedThinking)) {
+    if (!state || !state.ws || state.ws.readyState !== 1) {
       return;
     }
 
-    state.ws.send(JSON.stringify({
-      type: 'claude_stream',
-      content: state.accumulatedContent,
-      thinking: state.accumulatedThinking,
-      done: false,
-      replace: true,
-      sessionId,
-      provider: state.provider,
-      timestamp: Date.now()
-    }));
-
-    state.accumulatedContent = '';
-    state.accumulatedThinking = '';
+    this.flushBufferedState(sessionId, state);
   }
 
   getActiveSession(): string | null {
@@ -268,9 +330,12 @@ export class ClaudeHandler {
   updateRunningWebSocket(ws: WebSocket): boolean {
     let updated = false;
 
-    for (const [, state] of this.runningSessions) {
+    for (const [sessionId, state] of this.runningSessions) {
       if (state.isRunning) {
         state.ws = ws;
+        if (this.activeSessionId === sessionId) {
+          this.flushBufferedState(sessionId, state);
+        }
         updated = true;
       }
     }
@@ -454,23 +519,25 @@ export class ClaudeHandler {
 
     let sessionState = this.runningSessions.get(currentSessionId);
     if (!sessionState) {
-      sessionState = {
-        sessionId: currentSessionId,
-        provider: providerForRun,
-        engine: this.createEngine(providerForRun),
-        ws,
-        isRunning: false,
-        accumulatedContent: '',
-        accumulatedThinking: ''
-      };
-      this.runningSessions.set(currentSessionId, sessionState);
-    }
+        sessionState = {
+          sessionId: currentSessionId,
+          provider: providerForRun,
+          engine: this.createEngine(providerForRun),
+          ws,
+          isRunning: false,
+          accumulatedContent: '',
+          accumulatedThinking: '',
+          bufferedLogs: []
+        };
+        this.runningSessions.set(currentSessionId, sessionState);
+      }
 
     sessionState.provider = providerForRun;
     sessionState.ws = ws;
     sessionState.isRunning = true;
     sessionState.accumulatedContent = '';
     sessionState.accumulatedThinking = '';
+    sessionState.bufferedLogs = [];
 
     if (!this.activeSessionId) {
       this.activeSessionId = currentSessionId;
@@ -570,7 +637,12 @@ export class ClaudeHandler {
         (log: LogMessage) => {
           const state = this.runningSessions.get(sessionIdForCallbacks);
           const currentWs = state?.ws;
-          if (!state || !currentWs || currentWs.readyState !== 1 || !this.isActiveSession(sessionIdForCallbacks)) {
+          if (!state || !currentWs || currentWs.readyState !== 1) {
+            return;
+          }
+
+          if (!this.isActiveSession(sessionIdForCallbacks)) {
+            state.bufferedLogs.push(log);
             return;
           }
 
@@ -640,7 +712,8 @@ export class ClaudeHandler {
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      sendError(this.getErrorCode(errorMessage), errorMessage);
+      const normalizedError = this.normalizeProviderError(errorMessage, providerForRun);
+      sendError(normalizedError.code, normalizedError.message);
     } finally {
       const state = this.runningSessions.get(sessionIdForCallbacks);
       if (state) {
@@ -874,16 +947,26 @@ export class ClaudeHandler {
   }
 
   private getErrorCode(errorMessage: string): string {
-    if (errorMessage.includes('CLI') || errorMessage.includes('claude') || errorMessage.includes('codex')) {
+    const lower = errorMessage.toLowerCase();
+
+    if (
+      lower.includes('not found')
+      || lower.includes('enoent')
+      || lower.includes('is not recognized as an internal or external command')
+      || lower.includes('no such file or directory')
+    ) {
       return 'CLI_NOT_FOUND';
     }
-    if (errorMessage.includes('API Key') || errorMessage.includes('apiKey')) {
+    if (lower.includes('api key') || lower.includes('apikey') || lower.includes('auth token')) {
       return 'API_KEY_MISSING';
     }
-    if (errorMessage.includes('rate limit') || errorMessage.includes('429')) {
+    if (lower.includes('rate limit') || lower.includes('429')) {
       return 'RATE_LIMITED';
     }
-    if (errorMessage.includes('busy')) {
+    if (lower.includes('session not found')) {
+      return 'SESSION_NOT_FOUND';
+    }
+    if (lower.includes('busy')) {
       return 'SESSION_BUSY';
     }
     return 'STREAM_ERROR';

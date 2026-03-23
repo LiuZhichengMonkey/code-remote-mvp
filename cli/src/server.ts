@@ -1,16 +1,21 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import { existsSync } from 'fs';
 import { extname, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { ImageSuccessResponse, ImageErrorResponse } from './types/image';
 import { ClaudeHandler } from './handlers/claude';
 import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
+import { getImageErrorCode, ImageErrorCode } from './imageErrorCode';
 import { Provider } from './session/provider';
 import { UiPreferences, UiPreferencesStorage } from './uiPreferences';
+import { broadcastJsonToAuthenticatedClients } from './clientBroadcast';
+import {
+  listRuntimeProfiles,
+  saveRuntimeProfile,
+  switchRuntimeProfile
+} from './runtimeProfiles';
 
 export interface Client {
   id: string;
@@ -56,9 +61,9 @@ export interface ClientMessage {
   settingsName?: string;
   uiPreferences?: UiPreferences;
   envDetails?: {
-    ANTHROPIC_BASE_URL?: string;
-    ANTHROPIC_AUTH_TOKEN?: string;
-    ANTHROPIC_MODEL?: string;
+    baseUrl?: string;
+    authToken?: string;
+    model?: string;
   };
   sessionId?: string;
   projectId?: string;
@@ -93,6 +98,7 @@ export class CodeRemoteServer {
   private uiPreferencesStorage: UiPreferencesStorage;
   private workspaceRoot: string;
   private staticPath?: string;
+  private readonly debugLoggingEnabled = process.env.CODEREMOTE_DEBUG === '1';
   private imageConfig = {
     savePath: 'E:/CodeRemote/Uploads',
     maxSize: 50 * 1024 * 1024,
@@ -150,10 +156,23 @@ export class CodeRemoteServer {
     res.end('Not Found');
   }
 
+  private logDebug(...args: unknown[]) {
+    if (this.debugLoggingEnabled) {
+      console.log(chalk.cyan('[debug]'), ...args);
+    }
+  }
+
+  private broadcastJson(payload: unknown) {
+    broadcastJsonToAuthenticatedClients(this.clients.entries(), payload, (clientId) => {
+      console.error(chalk.red('Error broadcasting to'), clientId);
+      this.clients.delete(clientId);
+    });
+  }
+
   private setupServer() {
     this.httpServer.listen(this.port, () => {
-      console.log(chalk.green('✓'), chalk.bold('CodeRemote Server Started'));
-      console.log(chalk.gray('─'.repeat(50)));
+      console.log(chalk.green('[server]'), chalk.bold('CodeRemote server started'));
+      console.log(chalk.gray('-'.repeat(50)));
       console.log(`  Port:      ${chalk.cyan(this.port)}`);
       console.log(`  Token:     ${chalk.yellow(this.token)}`);
       console.log(`  WebSocket: ${chalk.cyan(`ws://localhost:${this.port}`)}`);
@@ -161,21 +180,15 @@ export class CodeRemoteServer {
         console.log(`  HTTP:      ${chalk.cyan(`http://localhost:${this.port}`)}`);
         console.log(`  Static:    ${chalk.gray(this.staticPath)}`);
       }
-      console.log(chalk.gray('─'.repeat(50)));
+      console.log(chalk.gray('-'.repeat(50)));
     });
 
     this.wss.on('connection', (ws: WebSocket, req) => {
       const clientIp = req.socket.remoteAddress || 'unknown';
-      console.log(chalk.blue('→'), `New connection from ${clientIp}`);
+      console.log(chalk.blue('[ws]'), `New connection from ${clientIp}`);
 
       ws.on('message', (data: Buffer, isBinary: boolean) => {
         const dataStr = data.toString();
-        console.log(chalk.cyan('[DEBUG]'), '=== WS MESSAGE ===');
-        console.log(chalk.cyan('[DEBUG]'), `Total data length: ${data.length}`);
-        console.log(chalk.cyan('[DEBUG]'), `isBinary: ${isBinary}`);
-        console.log(chalk.cyan('[DEBUG]'), `String length: ${dataStr.length}`);
-        console.log(chalk.cyan('[DEBUG]'), `Full raw data:\n${dataStr}`);
-        console.log(chalk.cyan('[DEBUG]'), '==================');
 
         if (isBinary) {
           this.handleBinaryMessage(ws, data);
@@ -184,21 +197,21 @@ export class CodeRemoteServer {
 
         try {
           const message: ClientMessage = JSON.parse(dataStr);
-          console.log(chalk.cyan('[DEBUG]'), '=== PARSED MESSAGE ===');
-          console.log(chalk.cyan('[DEBUG]'), `type: ${message.type}`);
-          console.log(chalk.cyan('[DEBUG]'), `content: ${(message as any).content}`);
-          console.log(chalk.cyan('[DEBUG]'), `content length: ${(message as any).content?.length || 0}`);
-          console.log(chalk.cyan('[DEBUG]'), '==================');
+          this.logDebug(`ws message type=${message.type}`, {
+            action: message.action,
+            provider: message.provider,
+            sessionId: message.sessionId
+          });
           this.handleMessage(ws, message);
         } catch (error) {
-          console.error(chalk.red('[DEBUG]'), 'JSON parse error:', error);
+          console.error(chalk.red('Error:'), 'Failed to parse WebSocket message', error);
           this.sendError(ws, 'Invalid message format');
         }
       });
 
       ws.on('close', () => {
         this.handleDisconnection(ws);
-        console.log(chalk.red('×'), `Client disconnected from ${clientIp}`);
+        console.log(chalk.red('[ws]'), `Client disconnected from ${clientIp}`);
       });
 
       ws.on('error', (error) => {
@@ -226,13 +239,11 @@ export class CodeRemoteServer {
         break;
 
       case 'claude':
-        console.log(
-          chalk.yellow('📎'),
-          'Received claude message, attachments:',
-          message.attachments?.length || 0,
-          '| content:',
-          message.content?.substring(0, 30)
-        );
+        this.logDebug('Received chat request', {
+          provider: message.provider || 'claude',
+          attachments: message.attachments?.length || 0,
+          sessionId: message.sessionId
+        });
         this.handleClaudeMessage(ws, message);
         break;
 
@@ -245,7 +256,11 @@ export class CodeRemoteServer {
         break;
 
       case 'stop': {
-        console.log(chalk.yellow('⏹'), 'Received stop request', message.sessionId ? `for session: ${message.sessionId}` : '(all)');
+        console.log(
+          chalk.yellow('[chat]'),
+          'Received stop request',
+          message.sessionId ? `for session: ${message.sessionId}` : '(all)'
+        );
         const stopped = message.sessionId
           ? this.claudeHandler.stopSession(message.sessionId)
           : this.claudeHandler.stop();
@@ -261,7 +276,7 @@ export class CodeRemoteServer {
       }
 
       case 'discussion':
-        console.log(chalk.magenta('💬'), 'Received discussion request');
+        console.log(chalk.magenta('[Discussion]'), 'Received discussion request');
         this.discussionHandler.handleRequest(ws, message as any as DiscussionRequest);
         break;
 
@@ -271,7 +286,7 @@ export class CodeRemoteServer {
         break;
 
       case 'session_focus':
-        console.log(chalk.blue('🔍'), `Session focus changed to: ${message.sessionId || 'none'}`);
+        this.logDebug(`Session focus changed to ${message.sessionId || 'none'}`);
         this.claudeHandler.setActiveSession(message.sessionId || null);
         ws.send(JSON.stringify({
           type: 'session_focus_ack',
@@ -281,7 +296,10 @@ export class CodeRemoteServer {
         break;
 
       case 'settings':
-        console.log(chalk.blue('[Settings]'), 'Received settings request, action:', (message as any).action);
+        this.logDebug('Received settings request', {
+          action: message.action,
+          provider: message.provider || 'claude'
+        });
         this.handleSettingsRequest(ws, message);
         break;
 
@@ -292,7 +310,7 @@ export class CodeRemoteServer {
 
   private handleSettingsRequest(ws: WebSocket, message: ClientMessage) {
     const action = (message as any).action || 'list';
-    const claudeDir = path.join(os.homedir(), '.claude');
+    const provider = message.provider || 'claude';
 
     if (action === 'get_ui_preferences') {
       try {
@@ -307,6 +325,7 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Failed to load UI preferences',
           timestamp: Date.now()
         }));
@@ -317,16 +336,17 @@ export class CodeRemoteServer {
     if (action === 'save_ui_preferences') {
       try {
         const uiPreferences = this.uiPreferencesStorage.save(message.uiPreferences);
-        ws.send(JSON.stringify({
+        this.broadcastJson({
           type: 'ui_preferences_saved',
           uiPreferences,
           timestamp: Date.now()
-        }));
+        });
       } catch (error) {
         console.error(chalk.red('[Settings]'), 'Failed to save UI preferences:', error);
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Failed to save UI preferences',
           timestamp: Date.now()
         }));
@@ -336,36 +356,14 @@ export class CodeRemoteServer {
 
     if (action === 'list') {
       try {
-        const files = readdirSync(claudeDir).filter(file =>
-          file.startsWith('settings_key') && file.endsWith('.json')
-        );
-
-        const settingsList = files.map(file => {
-          const filePath = path.join(claudeDir, file);
-          const content = readFileSync(filePath, 'utf-8');
-          const config = JSON.parse(content);
-          const envKeys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL'];
-          const envDetails: Record<string, string> = {};
-
-          if (config.env) {
-            for (const key of envKeys) {
-              if (config.env[key]) {
-                envDetails[key] = config.env[key];
-              }
-            }
-          }
-
-          return {
-            name: file.replace('.json', ''),
-            model: config.model || 'default',
-            env: config.env ? Object.keys(config.env).length : 0,
-            envDetails
-          };
-        });
+        const result = listRuntimeProfiles(provider);
 
         ws.send(JSON.stringify({
           type: 'settings_list',
-          settings: settingsList,
+          provider,
+          settings: result.profiles,
+          activeProfile: result.activeProfile,
+          selectedProfileName: result.selectedProfileName,
           timestamp: Date.now()
         }));
       } catch (error) {
@@ -373,6 +371,7 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Failed to list settings',
           timestamp: Date.now()
         }));
@@ -386,49 +385,23 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Missing settingsName',
           timestamp: Date.now()
         }));
         return;
       }
 
-      const sourcePath = path.join(claudeDir, `${settingsName}.json`);
-      const targetPath = path.join(claudeDir, 'settings.json');
-
       try {
-        if (!existsSync(sourcePath)) {
-          ws.send(JSON.stringify({
-            type: 'settings_error',
-            action,
-            error: `Settings file not found: ${settingsName}`,
-            timestamp: Date.now()
-          }));
-          return;
-        }
-
-        const backupPath = path.join(claudeDir, 'settings.json.backup');
-        if (existsSync(targetPath)) {
-          const currentContent = readFileSync(targetPath, 'utf-8');
-          const newContent = readFileSync(sourcePath, 'utf-8');
-          if (currentContent !== newContent) {
-            console.log(chalk.blue('[Settings]'), `Switching to ${settingsName}.json`);
-          }
-        }
-
-        const newContent = readFileSync(sourcePath, 'utf-8');
-        if (existsSync(targetPath)) {
-          const backupContent = readFileSync(targetPath, 'utf-8');
-          writeFileSync(backupPath, backupContent, 'utf-8');
-          console.log(chalk.blue('[Settings]'), 'Backed up current settings.json');
-        }
-
-        writeFileSync(targetPath, newContent, 'utf-8');
-        console.log(chalk.green('[Settings]'), `Switched to ${settingsName}.json`);
+        const result = switchRuntimeProfile(provider, settingsName);
 
         ws.send(JSON.stringify({
           type: 'settings_switched',
-          settingsName,
-          message: `配置已切换到 ${settingsName}，请重启 Claude Code 以应用新配置`,
+          provider,
+          settingsName: result.selectedProfileName,
+          activeProfile: result.activeProfile,
+          selectedProfileName: result.selectedProfileName,
+          message: result.message,
           timestamp: Date.now()
         }));
       } catch (error) {
@@ -436,7 +409,8 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
-          error: 'Failed to switch settings',
+          provider,
+          error: error instanceof Error ? error.message : 'Failed to switch settings',
           timestamp: Date.now()
         }));
       }
@@ -449,41 +423,22 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Missing envDetails',
           timestamp: Date.now()
         }));
         return;
       }
 
-      const targetPath = path.join(claudeDir, 'settings.json');
-      const backupPath = path.join(claudeDir, 'settings.json.backup');
-
       try {
-        const config = {
-          env: {
-            ANTHROPIC_BASE_URL: envDetails.ANTHROPIC_BASE_URL || '',
-            ANTHROPIC_AUTH_TOKEN: envDetails.ANTHROPIC_AUTH_TOKEN || '',
-            ANTHROPIC_MODEL: envDetails.ANTHROPIC_MODEL || ''
-          },
-          model: envDetails.ANTHROPIC_MODEL || 'opus[1m]',
-          permissions: {
-            defaultMode: 'bypassPermissions'
-          },
-          skipDangerousModePermissionPrompt: true
-        };
-
-        if (existsSync(targetPath)) {
-          const backupContent = readFileSync(targetPath, 'utf-8');
-          writeFileSync(backupPath, backupContent, 'utf-8');
-          console.log(chalk.blue('[Settings]'), 'Backed up current settings.json');
-        }
-
-        writeFileSync(targetPath, JSON.stringify(config, null, 2), 'utf-8');
-        console.log(chalk.green('[Settings]'), 'Saved manual config to settings.json');
+        const result = saveRuntimeProfile(provider, envDetails);
 
         ws.send(JSON.stringify({
           type: 'settings_saved',
-          message: '配置已保存，请重启 Claude Code 以应用新配置',
+          provider,
+          activeProfile: result.activeProfile,
+          selectedProfileName: result.selectedProfileName,
+          message: result.message,
           timestamp: Date.now()
         }));
       } catch (error) {
@@ -491,18 +446,28 @@ export class CodeRemoteServer {
         ws.send(JSON.stringify({
           type: 'settings_error',
           action,
+          provider,
           error: 'Failed to save settings',
           timestamp: Date.now()
         }));
       }
+      return;
     }
+
+    ws.send(JSON.stringify({
+      type: 'settings_error',
+      action,
+      provider,
+      error: `Unsupported settings action: ${action}`,
+      timestamp: Date.now()
+    }));
   }
 
   private handleAuth(ws: WebSocket, token?: string) {
     if (token !== this.token) {
       const response: ServerMessage = { type: 'auth_failed' };
       ws.send(JSON.stringify(response));
-      console.log(chalk.red('✗'), 'Authentication failed - invalid token');
+      console.log(chalk.red('[auth]'), 'Authentication failed: invalid token');
       ws.close();
       return;
     }
@@ -523,13 +488,13 @@ export class CodeRemoteServer {
     };
     ws.send(JSON.stringify(response));
 
-    console.log(chalk.green('✓'), `Client ${chalk.cyan(clientId)} authenticated`);
+    console.log(chalk.green('[auth]'), `Client ${chalk.cyan(clientId)} authenticated`);
 
     this.claudeHandler.cleanupStaleSessions();
 
     const runningSessionSummaries = this.claudeHandler.getRunningSessionSummaries();
     if (runningSessionSummaries.length > 0) {
-      console.log(chalk.yellow('🔄'), `Found ${runningSessionSummaries.length} running session(s)`);
+      console.log(chalk.yellow('[session]'), `Found ${runningSessionSummaries.length} running session(s)`);
       ws.send(JSON.stringify({
         type: 'running_sessions',
         sessions: runningSessionSummaries,
@@ -541,7 +506,7 @@ export class CodeRemoteServer {
     if (this.discussionHandler.isRunning()) {
       const runningDiscussionId = this.discussionHandler.getRunningDiscussionId();
       if (runningDiscussionId) {
-        console.log(chalk.yellow('🔄'), `Reconnecting to running discussion: ${runningDiscussionId}`);
+        console.log(chalk.yellow('[discussion]'), `Reconnecting to running discussion: ${runningDiscussionId}`);
         this.discussionHandler.updateRunningWebSocket(ws);
         ws.send(JSON.stringify({
           type: 'discussion_running',
@@ -578,7 +543,7 @@ export class CodeRemoteServer {
       this.messageHandler(clientId, content);
     }
 
-    console.log(chalk.blue('Message:'), content);
+    this.logDebug('Client message received', { clientId, length: content?.length || 0 });
   }
 
   private handleClaudeMessage(ws: WebSocket, message: ClientMessage) {
@@ -600,20 +565,19 @@ export class CodeRemoteServer {
     const projectId = message.projectId;
     const attachments = message.attachments;
 
-    console.log(chalk.gray('   📎 Attachments in handleClaudeMessage:'), attachments?.length || 0);
-    console.log(chalk.magenta('🤖'), 'Claude request received:');
-    console.log(chalk.gray('   Content:'), content.substring(0, 100));
-    console.log(chalk.gray('   SessionId:'), sessionId);
-    console.log(chalk.gray('   ProjectId:'), projectId || '(none)');
-    console.log(chalk.gray('   Provider:'), message.provider || '(default)');
-    console.log(chalk.gray('   Attachments:'), attachments?.length || 0);
-    console.log(chalk.gray('   ClientId:'), clientId);
+    console.log(chalk.magenta('[Chat]'), 'Request received', {
+      provider: message.provider || 'claude',
+      sessionId: sessionId || '(new)',
+      projectId: projectId || '(none)',
+      attachments: attachments?.length || 0,
+      clientId
+    });
 
     this.claudeHandler.handleClaudeMessage(
       ws,
       content,
       (code, errorMsg) => {
-        console.log(chalk.red('✗'), `Claude error: ${errorMsg}`);
+        console.log(chalk.red('[chat]'), `Chat error: ${errorMsg}`);
         ws.send(JSON.stringify({
           type: 'claude_error',
           error: errorMsg,
@@ -681,8 +645,11 @@ export class CodeRemoteServer {
       startTime: Date.now()
     };
 
-    console.log(chalk.yellow('📁'), `准备接收文件: ${message.fileName} (${(message.size! / 1024).toFixed(1)} KB)`);
-    console.log(chalk.gray('   MIME类型:'), message.mimeType);
+    console.log(
+      chalk.yellow('[image]'),
+      `Ready to receive file: ${message.fileName} (${(message.size! / 1024).toFixed(1)} KB)`
+    );
+    console.log(chalk.gray('  MIME type:'), message.mimeType);
   }
 
   private handleDisconnection(ws: WebSocket) {
@@ -721,7 +688,7 @@ export class CodeRemoteServer {
     }
 
     if (!client.imageTransfer?.inProgress || !client.imageTransfer.meta) {
-      this.sendError(ws, '协议错误：未预期的二进制数据');
+      this.sendError(ws, 'Protocol error: unexpected binary data');
       return;
     }
 
@@ -742,7 +709,7 @@ export class CodeRemoteServer {
       };
 
       client.ws.send(JSON.stringify(response));
-      console.log(chalk.green('✓'), `文件已保存: ${savedPath}`);
+      console.log(chalk.green('[image]'), `Saved file: ${savedPath}`);
       client.imageTransfer = undefined;
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -754,16 +721,13 @@ export class CodeRemoteServer {
       };
 
       client.ws.send(JSON.stringify(errorResponse));
-      console.log(chalk.red('✗'), `图片处理失败: ${errorMsg}`);
+      console.log(chalk.red('[image]'), `Failed to process image: ${errorMsg}`);
       client.imageTransfer = undefined;
     }
   }
 
-  private getErrorCode(message: string): 'TOO_LARGE' | 'INVALID_TYPE' | 'TIMEOUT' | 'DISK_FULL' | 'PROTOCOL_ERROR' {
-    if (message.includes('图片过大')) return 'TOO_LARGE';
-    if (message.includes('不支持的文件类型')) return 'INVALID_TYPE';
-    if (message.includes('磁盘空间')) return 'DISK_FULL';
-    return 'PROTOCOL_ERROR';
+  private getErrorCode(message: string): ImageErrorCode {
+    return getImageErrorCode(message);
   }
 
   private sendError(ws: WebSocket, message: string) {
@@ -873,11 +837,11 @@ export class CodeRemoteServer {
       }));
 
       client.ws.send(buffer);
-      console.log(chalk.yellow('📷'), `发送图片到客户端 ${clientId}: ${meta.fileName}`);
+      console.log(chalk.yellow('[image]'), `Sent image to client ${clientId}: ${meta.fileName}`);
       return true;
     } catch (error: unknown) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(chalk.red('发送图片失败:'), errorMsg);
+      console.error(chalk.red('[image]'), `Failed to send image: ${errorMsg}`);
       return false;
     }
   }
@@ -894,6 +858,6 @@ export class CodeRemoteServer {
     this.clients.clear();
     this.wss.close();
     this.httpServer.close();
-    console.log(chalk.yellow('→'), 'Server closed');
+    console.log(chalk.yellow('[server]'), 'Server closed');
   }
 }

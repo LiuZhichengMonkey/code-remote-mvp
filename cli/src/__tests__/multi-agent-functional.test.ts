@@ -141,7 +141,7 @@ describe('Multi-Agent 功能测试', () => {
 
     test('请求超时应该返回 null', async () => {
       const slowHandler = jest.fn().mockImplementation(async () => {
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(() => undefined);
         return undefined;
       });
 

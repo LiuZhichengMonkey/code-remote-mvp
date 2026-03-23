@@ -17,41 +17,41 @@ export class ImageHandler {
     }
   }
 
-  async handleImage(clientId: string, buffer: Buffer, meta: ImageMeta): Promise<string> {
-    // 验证文件大小
+  async handleImage(_clientId: string, buffer: Buffer, meta: ImageMeta): Promise<string> {
     if (meta.size > this.maxSize) {
-      throw new Error(`文件过大 (${meta.size} 字节)，最大支持 ${this.maxSize} 字节`);
+      throw new Error(`File too large (${meta.size} bytes). Max allowed is ${this.maxSize} bytes.`);
     }
 
-    // 如果 allowedTypes 为空或包含 '*'，则允许所有类型
     if (this.allowedTypes.length > 0 && !this.allowedTypes.includes('*')) {
-      // 验证文件类型（支持通配符如 image/*, text/*）
-      const isAllowed = this.allowedTypes.some(allowed => {
-        if (allowed === '*') return true;
+      const isAllowed = this.allowedTypes.some((allowed) => {
+        if (allowed === '*') {
+          return true;
+        }
+
         if (allowed.endsWith('/*')) {
           const category = allowed.slice(0, -2);
-          return meta.mimeType.startsWith(category + '/');
+          return meta.mimeType.startsWith(`${category}/`);
         }
+
         return allowed === meta.mimeType;
       });
 
       if (!isAllowed) {
-        throw new Error(`不支持的文件类型: ${meta.mimeType}`);
+        throw new Error(`Unsupported file type: ${meta.mimeType}`);
       }
     }
 
-    // 生成文件名
     const fileName = this.generateFileName(meta.fileName);
     const filePath = path.join(this.savePath, fileName);
 
-    // 写入文件
     try {
       fs.writeFileSync(filePath, buffer);
       return filePath;
     } catch (error: any) {
       if (error.code === 'ENOSPC') {
-        throw new Error('磁盘空间不足，请清理磁盘空间');
+        throw new Error('Disk space is full. Free up space and try again.');
       }
+
       throw error;
     }
   }
@@ -81,37 +81,38 @@ export class ImageHandler {
     const ext = path.extname(originalName);
     const baseName = path.basename(originalName, ext);
     const timestamp = this.getTimestamp();
-    // 保留原始文件名，添加时间戳避免冲突
     return `${baseName}_${timestamp}${ext}`;
   }
 
   private validateImageHeader(buffer: Buffer, mimeType: string): void {
     const signatures: Record<string, number[]> = {
-      'image/png': [0x89, 0x50, 0x4E, 0x47],
-      'image/jpeg': [0xFF, 0xD8, 0xFF],
+      'image/png': [0x89, 0x50, 0x4e, 0x47],
+      'image/jpeg': [0xff, 0xd8, 0xff],
       'image/gif': [0x47, 0x49, 0x46, 0x38],
       'image/webp': [0x52, 0x49, 0x46, 0x46]
     };
 
     const expected = signatures[mimeType];
-    if (!expected) return;
+    if (!expected) {
+      return;
+    }
 
-    for (let i = 0; i < expected.length; i++) {
+    for (let i = 0; i < expected.length; i += 1) {
       if (buffer[i] !== expected[i]) {
-        throw new Error('文件内容与声明的类型不匹配');
+        throw new Error('File content does not match the declared MIME type.');
       }
     }
   }
 
   private getTimestamp(): string {
     const now = new Date();
-    const date = now.getFullYear().toString() +
-                 (now.getMonth() + 1).toString().padStart(2, '0') +
-                 now.getDate().toString().padStart(2, '0');
-    const time = now.getHours().toString().padStart(2, '0') +
-                 now.getMinutes().toString().padStart(2, '0') +
-                 now.getSeconds().toString().padStart(2, '0') +
-                 now.getMilliseconds().toString().padStart(3, '0');
+    const date = now.getFullYear().toString()
+      + (now.getMonth() + 1).toString().padStart(2, '0')
+      + now.getDate().toString().padStart(2, '0');
+    const time = now.getHours().toString().padStart(2, '0')
+      + now.getMinutes().toString().padStart(2, '0')
+      + now.getSeconds().toString().padStart(2, '0')
+      + now.getMilliseconds().toString().padStart(3, '0');
     return `${date}_${time}`;
   }
 }

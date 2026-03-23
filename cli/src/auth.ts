@@ -38,9 +38,9 @@ export class AuthManager {
   }
 
   displayInfo() {
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log(chalk.bold('Authentication Info'));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log(`Token:      ${chalk.yellow(this.token)}`);
     if (this.expiresAt) {
       const timeLeft = Math.max(0, this.expiresAt.getTime() - Date.now());
@@ -50,7 +50,7 @@ export class AuthManager {
     } else {
       console.log(`Expires:    ${chalk.green('Never')}`);
     }
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
   }
 
   refresh() {

@@ -27,7 +27,7 @@ export class TunnelManager {
 
   async start(): Promise<TunnelStatus> {
     if (!this.config.enabled) {
-      console.log(chalk.yellow('→'), 'Tunnel disabled. Direct connection only.');
+      console.log(chalk.yellow('[info]'), 'Tunnel disabled. Direct connection only.');
       return { active: false };
     }
 
@@ -61,11 +61,11 @@ export class TunnelManager {
   }
 
   private async startCloudflareTunnel(): Promise<TunnelStatus> {
-    console.log(chalk.blue('→'), 'Checking for cloudflared...');
+    console.log(chalk.blue('[check]'), 'Checking for cloudflared...');
 
     const exists = await this.checkCommandExists('cloudflared');
     if (!exists) {
-      console.log(chalk.red('✗'), 'cloudflared not found!');
+      console.log(chalk.red('[error]'), 'cloudflared not found.');
       console.log();
       console.log(chalk.yellow('To install cloudflared:'));
       console.log(chalk.gray('  On macOS:'), 'brew install cloudflared');
@@ -81,7 +81,7 @@ export class TunnelManager {
     }
 
     try {
-      console.log(chalk.blue('→'), 'Starting Cloudflare tunnel...');
+      console.log(chalk.blue('[start]'), 'Starting Cloudflare tunnel...');
 
       // Start quick tunnel
       this.process = exec(`cloudflared tunnel --url http://localhost:${this.config.port}`);
@@ -92,8 +92,8 @@ export class TunnelManager {
         const urlMatch = output.match(/https:\/\/[a-z0-9\-]+\.trycloudflare\.com/);
         if (urlMatch) {
           const url = urlMatch[0];
-          console.log(chalk.green('✓'), `Tunnel URL: ${chalk.cyan(url)}`);
-          console.log(chalk.gray('─'.repeat(50)));
+          console.log(chalk.green('[ok]'), `Tunnel URL: ${chalk.cyan(url)}`);
+          console.log(chalk.gray('-'.repeat(50)));
         }
       });
 
@@ -112,17 +112,17 @@ export class TunnelManager {
   }
 
   private async startNgrokTunnel(): Promise<TunnelStatus> {
-    console.log(chalk.blue('→'), 'Checking for ngrok...');
+    console.log(chalk.blue('[check]'), 'Checking for ngrok...');
 
     const exists = await this.checkCommandExists('ngrok');
     if (!exists) {
-      console.log(chalk.red('✗'), 'ngrok not found!');
+      console.log(chalk.red('[error]'), 'ngrok not found.');
       console.log(chalk.yellow('Please install ngrok from:'), 'https://ngrok.com/download');
       return { active: false };
     }
 
     try {
-      console.log(chalk.blue('→'), 'Starting ngrok tunnel...');
+      console.log(chalk.blue('[start]'), 'Starting ngrok tunnel...');
       this.process = exec(`ngrok http ${this.config.port}`);
 
       this.process.stdout?.on('data', (data: string) => {
@@ -140,18 +140,18 @@ export class TunnelManager {
   }
 
   private async startFrpTunnel(): Promise<TunnelStatus> {
-    console.log(chalk.yellow('→'), 'FRP requires manual configuration.');
+    console.log(chalk.yellow('[info]'), 'FRP requires manual configuration.');
     console.log(chalk.gray('Please configure your frpc client manually.'));
     return { active: false };
   }
 
   private async startCustomTunnel(): Promise<TunnelStatus> {
     if (!this.config.host) {
-      console.log(chalk.red('✗'), 'Custom tunnel requires a host.');
+      console.log(chalk.red('[error]'), 'Custom tunnel requires a host.');
       return { active: false };
     }
 
-    console.log(chalk.green('✓'), `Using custom tunnel: ${this.config.host}`);
+    console.log(chalk.green('[ok]'), `Using custom tunnel: ${this.config.host}`);
     return { active: true, type: 'custom', url: `wss://${this.config.host}` };
   }
 
@@ -159,14 +159,14 @@ export class TunnelManager {
     if (this.process) {
       this.process.kill();
       this.process = null;
-      console.log(chalk.yellow('→'), 'Tunnel stopped.');
+      console.log(chalk.yellow('[stop]'), 'Tunnel stopped.');
     }
   }
 
   displayInstructions() {
     console.log();
-    console.log(chalk.bold.cyan('🌐 Tunnel Options'));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.bold.cyan('Tunnel Options'));
+    console.log(chalk.gray('-'.repeat(50)));
     console.log();
     console.log(chalk.yellow('1. Cloudflare Tunnel (Recommended - Free)'));
     console.log(chalk.gray('   Install:'), 'brew install cloudflared (macOS)');
