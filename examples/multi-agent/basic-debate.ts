@@ -9,7 +9,8 @@ import {
   EventBus,
   GlobalBlackboardManager,
   ClaudeCLIAdapter
-} from '../multi-agent';
+} from '../../apps/server/src/multi-agent';
+import path from 'path';
 
 // ============================================
 // 示例 1: 基础辩论
@@ -51,7 +52,7 @@ async function basicDebate() {
 
   // 设置 LLM 适配器（使用 Claude CLI）
   const adapter = new ClaudeCLIAdapter({
-    sessionsDir: './multi-agent-sessions'
+    sessionsDir: path.resolve(process.cwd(), 'runtime', 'discussions', 'sessions')
   });
   debate.setLLMAdapter(adapter);
 

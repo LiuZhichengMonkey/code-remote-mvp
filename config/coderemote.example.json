@@ -1,0 +1,40 @@
+{
+  "server": {
+    "port": 8085,
+    "token": "change-me-local-token",
+    "workspaceRoot": "."
+  },
+  "ui": {
+    "openBrowserOnStart": true
+  },
+  "tunnel": {
+    "mode": "disabled",
+    "ngrokPath": "",
+    "customPublicWsUrl": ""
+  },
+  "providers": {
+    "claude": {
+      "enabled": true,
+      "cliCommand": "claude",
+      "baseUrl": "",
+      "authToken": "",
+      "model": ""
+    },
+    "codex": {
+      "enabled": true,
+      "cliCommand": "codex",
+      "baseUrl": "",
+      "authToken": "",
+      "model": ""
+    }
+  },
+  "paths": {
+    "logsDir": "./runtime/logs",
+    "uploadsDir": "./runtime/uploads"
+  },
+  "autostart": {
+    "taskName": "CodeRemote",
+    "openBrowserOnLogin": false,
+    "startMinimized": true
+  }
+}

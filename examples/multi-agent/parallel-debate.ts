@@ -8,7 +8,7 @@ import {
   ParallelOrchestrator,
   EventBus,
   createParallelOrchestrator
-} from '../multi-agent';
+} from '../../apps/server/src/multi-agent';
 
 // ============================================
 // 示例 1: 基础并行辩论

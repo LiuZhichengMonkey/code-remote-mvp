@@ -4,7 +4,7 @@
  * 展示如何使用 EventBus 进行 Agent 间通信
  */
 
-import { EventBus, AgentMessage } from '../multi-agent/bus/EventBus';
+import { EventBus, AgentMessage } from '../../apps/server/src/multi-agent/bus/EventBus';
 
 // ============================================
 // 示例 1: 基础注册和广播

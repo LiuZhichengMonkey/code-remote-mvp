@@ -1,244 +1,148 @@
-# Testing Guide
+# CodeRemote 测试清单
 
-This guide covers how to test the CodeRemote MVP.
+## 1. 首次环境验证
 
-## Test Environment
+1. 复制配置文件：
 
-You'll need:
-1. A computer for running the CLI
-2. A mobile device or emulator for the app
-3. Both devices on the same network (for local testing)
+```powershell
+Copy-Item .\config\coderemote.example.json .\config\coderemote.local.json
+```
 
-## Test Scenarios
+2. 在 `config/coderemote.local.json` 中确认：
 
-### 1. Local Network Testing
+- `server.port`
+- `server.token`
+- `server.workspaceRoot`
+- `providers.claude.enabled`
+- `providers.codex.enabled`
+- `tunnel.mode`
 
-#### Step 1: Start the CLI
-```bash
-cd cli
-npm install
+3. 运行安装脚本：
+
+```powershell
+.\scripts\windows\setup.ps1
+```
+
+预期结果：
+
+- 依赖安装成功
+- `apps/server/dist/index.js` 存在
+- `apps/web/dist/index.html` 存在
+- `runtime/logs`
+- `runtime/uploads`
+- `runtime/reports`
+- `runtime/discussions/sessions`
+
+## 2. 启动验证
+
+运行：
+
+```powershell
+.\scripts\windows\start.ps1
+```
+
+预期结果：
+
+- `http://localhost:<port>` 可打开
+- `ws://localhost:<port>` 可连接
+- `runtime/logs/server.out.log` 与 `runtime/logs/server.err.log` 生成
+- `/health` 返回 200
+
+## 3. Claude / Codex 基础冒烟
+
+### Claude 会话
+
+1. 打开页面
+2. 选择 `Claude`
+3. 新建会话并发送一条消息
+
+检查点：
+
+- 会话创建成功
+- 返回内容正常
+- 当前会话 provider 固定为 `Claude`
+- 历史列表显示正确 provider
+
+### Codex 会话
+
+1. 切换到 `Codex`
+2. 新建会话并发送一条消息
+
+检查点：
+
+- 会话创建成功
+- 返回内容正常
+- 当前会话 provider 固定为 `Codex`
+- 切到历史记录时不会错误显示为 Claude
+
+## 4. 刷新恢复
+
+在 Claude 和 Codex 各做一次：
+
+1. 发起一个较长任务
+2. 在任务仍运行时刷新页面
+
+检查点：
+
+- 页面刷新后还能看到最近一条历史记录
+- 正在运行的会话仍显示 `Running`
+- 重新连上后能继续看到后续输出
+- 任务完成后状态从 `Running` 切回完成态
+
+## 5. 历史与 provider 对齐
+
+检查点：
+
+- 历史列表标题不再把 Codex 会话归到 Claude
+- 点击某个 Codex 历史会话后，顶部 provider 按钮同步为 Codex
+- Claude 与 Codex 会话互不串线
+
+## 6. 设置面板
+
+检查点：
+
+- 设置菜单可以打开和关闭
+- 手机端设置面板可以滚动
+- Process 面板的显示项开关可点击
+- 开关切换后能动态影响当前运行中的展示
+
+## 7. 多智能体运行产物
+
+如果测试讨论功能，检查运行产物写入：
+
+- `runtime/discussions/sessions`
+- `runtime/reports`
+
+而不是仓库根目录。
+
+## 8. 自动启动
+
+安装：
+
+```powershell
+.\scripts\windows\install-autostart.ps1
+```
+
+卸载：
+
+```powershell
+.\scripts\windows\uninstall-autostart.ps1
+```
+
+检查点：
+
+- 计划任务创建成功
+- 计划任务删除成功
+- `autostart.openBrowserOnLogin` 生效
+
+## 9. 构建回归
+
+```powershell
+cd .\apps\server
 npm run build
-npm start
+
+cd ..\web
+npm run build
 ```
 
-Expected output:
-- Server started message
-- Port number (default: 8080)
-- Token (random UUID)
-- QR code displayed
-- Connection instructions
-
-#### Step 2: Find Your Computer's IP
-
-**macOS/Linux:**
-```bash
-ifconfig | grep "inet " | grep -v 127.0.0.1
-```
-
-**Windows:**
-```bash
-ipconfig
-```
-Look for "IPv4 Address" (e.g., 192.168.1.100)
-
-#### Step 3: Run the Mobile App
-
-```bash
-cd app
-flutter pub get
-flutter run
-```
-
-#### Step 4: Connect
-1. Tap the link icon (🔗) in the app
-2. Enter: `ws://YOUR_IP:8080` (e.g., `ws://192.168.1.100:8080`)
-3. Enter the token from CLI output
-4. Tap Connect
-
-Expected: Green status indicator, "Connected!" message
-
-#### Step 5: Send Message
-1. Type "Hello" in the input field
-2. Tap Send
-
-Expected: Message appears in app, CLI logs the message
-
----
-
-### 2. Remote Testing (with Tunnel)
-
-#### Step 1: Install Cloudflare Tunnel
-
-**macOS:**
-```bash
-brew install cloudflared
-```
-
-**Windows:**
-```bash
-winget install --id Cloudflare.cloudflared
-```
-
-**Linux:**
-```bash
-wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-sudo chmod +x /usr/local/bin/cloudflared
-```
-
-#### Step 2: Start CLI with Tunnel
-```bash
-npm start
-```
-
-Expected: Tunnel URL displayed (e.g., `https://abc123.trycloudflare.com`)
-
-#### Step 3: Connect from Anywhere
-1. Open the mobile app
-2. Enter: `wss://abc123.trycloudflare.com`
-3. Enter the token
-4. Tap Connect
-
-#### Step 4: Test Across Networks
-- Connect to WiFi, then switch to mobile data
-- Connection should remain active
-
----
-
-### 3. Test Cases
-
-| Test | Expected Result |
-|------|----------------|
-| **CLI starts** | Server starts, displays info, no errors |
-| **Invalid token** | "Authentication failed" error |
-| **Invalid URL** | Connection error message |
-| **Disconnect** | Status changes to disconnected |
-| **Reconnect** | Can reconnect with same credentials |
-| **Multiple messages** | All messages sent/received |
-| **Long message** | Message handled correctly |
-| **Special characters** | Characters preserved |
-| **Empty message** | Not sent (validation) |
-| **Server restart** | Client disconnects, can reconnect |
-
----
-
-### 4. Performance Tests
-
-| Metric | Expected |
-|--------|----------|
-| Connection time | < 5 seconds (local) |
-| Message latency | < 100ms (local) |
-| App startup | < 3 seconds |
-| Memory usage | Stable, no leaks |
-
----
-
-### 5. Cross-Platform Testing
-
-#### Android
-- [ ] Emulator (various API levels)
-- [ ] Physical device
-- [ ] Different screen sizes
-- [ ] Dark mode
-
-#### iOS (if available)
-- [ ] Simulator
-- [ ] Physical device
-- [ ] Dark mode
-
-#### Web (optional)
-- [ ] Chrome
-- [ ] Safari
-- [ ] Firefox
-
----
-
-### 6. Network Conditions
-
-| Condition | Expected |
-|-----------|----------|
-| Strong WiFi | Smooth operation |
-| Weak WiFi | May see delays |
-| 4G/5G | Should work (with tunnel) |
-| No internet | Only local connections |
-
----
-
-### 7. Error Handling Tests
-
-1. **CLI stopped while connected**
-   - App shows "Connection lost"
-   - Can reconnect when CLI starts
-
-2. **Network change**
-   - App detects disconnect
-   - Manual reconnect required
-
-3. **Token changed**
-   - Old connections rejected
-   - New connections work with new token
-
----
-
-### 8. Troubleshooting Common Issues
-
-#### "Connection refused"
-- CLI is not running
-- Wrong port number
-- Firewall blocking connection
-
-#### "Authentication failed"
-- Wrong token
-- Token has spaces (trim needed)
-
-#### "Socket error"
-- Network issue
-- Tunnel not active
-
-#### App crashes
-- Check `flutter logs`
-- Try clearing app data
-- Report bug with logs
-
----
-
-### 9. Test Checklist
-
-Before declaring MVP ready:
-
-- [ ] CLI starts without errors
-- [ ] QR code displays correctly
-- [ ] App connects to local CLI
-- [ ] App connects via tunnel
-- [ ] Messages sent from app appear in CLI
-- [ ] Messages from CLI appear in app
-- [ ] Disconnect works properly
-- [ ] Reconnect works properly
-- [ ] Invalid token rejected
-- [ ] Invalid URL shows error
-- [ ] UI is responsive
-- [ ] No memory leaks
-- [ ] Credentials saved correctly
-
----
-
-### 10. Acceptance Criteria
-
-The MVP is considered successful when:
-
-1. **CLI starts reliably** - Every time, under 5 seconds
-2. **Connection works** - App can connect to CLI
-3. **Messages work** - Bidirectional communication successful
-4. **Tunneling works** - Can connect from anywhere
-5. **Basic UX** - Intuitive enough for testing
-
----
-
-## Reporting Issues
-
-When reporting issues, include:
-1. Device info (make, model, OS version)
-2. CLI version (`code-remote --version`)
-3. Exact error messages
-4. Steps to reproduce
-5. Expected vs actual behavior
+两边都必须通过，且不能再依赖旧的根目录 `cli/`、`chat-ui/`、`web/` 路径。

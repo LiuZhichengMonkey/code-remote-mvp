@@ -9,35 +9,36 @@ yarn-error.log*
 *.tsbuildinfo
 
 # Build outputs
-cli/dist/
-cli/*.log
+apps/server/dist/
+apps/server/*.log
+apps/web/dist/
 
 # Flutter
-app/.dart_tool/
-app/.flutter-plugins
-app/.flutter-plugins-dependencies
-app/.packages
-app/pubspec.lock
-app/build/
-app/.flutter-plugins
-app/.flutter-plugins-dependencies
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/.packages
+apps/mobile/pubspec.lock
+apps/mobile/build/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
 
 # Android
-app/android/.gradle/
-app/android/captures/
-app/android/gradlew
-app/android/gradlew.bat
-app/android/local.properties
-app/android/**/*.keystore
-app/android/app/release/
+apps/mobile/android/.gradle/
+apps/mobile/android/captures/
+apps/mobile/android/gradlew
+apps/mobile/android/gradlew.bat
+apps/mobile/android/local.properties
+apps/mobile/android/**/*.keystore
+apps/mobile/android/app/release/
 
 # iOS
-app/ios/DerivedData/
-app/ios/Flutter/App.framework
-app/ios/Flutter/Flutter.framework
-app/ios/Flutter/Flutter.podspec
-app/ios/Pods/
-app/ios/Symlinks/
+apps/mobile/ios/DerivedData/
+apps/mobile/ios/Flutter/App.framework
+apps/mobile/ios/Flutter/Flutter.framework
+apps/mobile/ios/Flutter/Flutter.podspec
+apps/mobile/ios/Pods/
+apps/mobile/ios/Symlinks/
 
 # IDE
 .idea/
@@ -52,6 +53,7 @@ app/ios/Symlinks/
 .env
 .env.local
 *.secret
+config/coderemote.local.json
 
 # Logs
 *.log
@@ -59,5 +61,14 @@ logs/
 
 # Local runtime state
 .coderemote/
-cli/.coderemote/
+apps/server/.coderemote/
 bg-test.txt
+runtime/
+apps/server/node_modules/
+apps/web/node_modules/
+
+# Legacy root leftovers from the pre-apps layout
+cli/
+web/
+debate-reports/
+multi-agent-sessions/
