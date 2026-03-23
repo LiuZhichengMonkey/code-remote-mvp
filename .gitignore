@@ -8,6 +8,10 @@ yarn-error.log*
 # TypeScript
 *.tsbuildinfo
 
+# Python
+__pycache__/
+*.pyc
+
 # Build outputs
 apps/server/dist/
 apps/server/*.log
