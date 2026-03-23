@@ -1,14 +1,15 @@
 # WebSocket 协议示例
 
-本示例展示如何通过 WebSocket 连接 CodeRemote CLI 服务器。
+本示例展示如何通过 WebSocket 连接 CodeRemote 后端服务器。
 
 ## 快速开始
 
 ```bash
-# 1. 启动 CLI 服务器
-cd cli
-npm install && npm run build
-npm start
+# 1. 启动后端服务器
+cd apps/server
+npm install
+npm run build
+node .\\dist\\index.js start
 
 # 服务器会显示:
 # - URL: ws://localhost:8080

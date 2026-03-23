@@ -1,4 +1,4 @@
-# Chat-UI E2E 测试
+# Web UI E2E 测试
 
 使用 Playwright 进行端到端测试。
 
@@ -17,8 +17,8 @@ python -m playwright install chromium
 ### 运行所有测试
 
 ```bash
-# 进入 chat-ui 目录
-cd chat-ui/e2e
+# 进入 apps/web/e2e 目录
+cd apps/web/e2e
 
 # 运行所有测试
 python run_all.py
@@ -142,15 +142,15 @@ screenshots/
 
 ## 前置条件
 
-1. **启动 Chat-UI**:
+1. **启动 Web UI**:
    ```bash
-   cd chat-ui
+   cd apps/web
    npm run dev
    ```
 
-2. **启动 CLI 服务器** (可选，部分测试需要):
+2. **启动后端服务器** (可选，部分测试需要):
    ```bash
-   cd cli
+   cd apps/server
    npm start
    ```
 

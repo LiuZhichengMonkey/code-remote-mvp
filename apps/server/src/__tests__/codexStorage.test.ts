@@ -82,7 +82,7 @@ describe('CodexSessionStorage', () => {
           type: 'custom_tool_call',
           name: 'apply_patch',
           call_id: 'custom-tool-1',
-          arguments: JSON.stringify({ path: 'chat-ui/src/App.tsx' })
+          arguments: JSON.stringify({ path: 'apps/web/src/App.tsx' })
         }
       },
       {
@@ -162,7 +162,7 @@ describe('CodexSessionStorage', () => {
         type: 'tool_use',
         toolName: 'apply_patch',
         toolUseId: 'custom-tool-1',
-        toolInput: { path: 'chat-ui/src/App.tsx' }
+        toolInput: { path: 'apps/web/src/App.tsx' }
       }),
       expect.objectContaining({
         type: 'tool_result',

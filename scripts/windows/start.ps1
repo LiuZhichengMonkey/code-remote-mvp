@@ -1,9 +1,20 @@
 param(
-    [switch]$Autostart
+    [switch]$Autostart,
+    [switch]$Foreground
 )
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\modules\Common.ps1"
+
+function Format-CodeRemoteCmdArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) {
+        return '""'
+    }
+
+    return '"' + $Value.Replace('"', '""') + '"'
+}
 
 $repoRoot = Get-CodeRemoteRepoRoot -ScriptPath $PSCommandPath
 $paths = Get-CodeRemotePaths -RepoRoot $repoRoot
@@ -16,6 +27,7 @@ $logsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.pa
 $uploadsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.paths.uploadsDir)
 $serverOutLog = Join-Path $logsDir "server.out.log"
 $serverErrLog = Join-Path $logsDir "server.err.log"
+$launcherScript = Join-Path $paths.RuntimeTempDir "start-server.cmd"
 $openBrowser = if ($Autostart) { [bool]$config.autostart.openBrowserOnLogin } else { [bool]$config.ui.openBrowserOnStart }
 
 Write-CodeRemoteSection "CodeRemote Start"
@@ -44,6 +56,7 @@ if ($config.providers.codex.enabled) {
 }
 
 Ensure-CodeRemoteDirectory -PathValue $paths.RuntimeDir
+Ensure-CodeRemoteDirectory -PathValue $paths.RuntimeTempDir
 Ensure-CodeRemoteDirectory -PathValue $logsDir
 Ensure-CodeRemoteDirectory -PathValue $uploadsDir
 
@@ -100,20 +113,41 @@ switch ($tunnelMode) {
     }
 }
 
+$nodeCommand = (Get-Command node -ErrorAction Stop).Source
+
+if ($Foreground) {
+    Write-Host "[2/3] Starting CodeRemote server in foreground..." -ForegroundColor Yellow
+    Write-Host "[3/3] Streaming live logs. Press Ctrl+C to stop." -ForegroundColor Yellow
+    Write-Host ""
+    & $nodeCommand $serverArgs
+    exit $LASTEXITCODE
+}
+
 Write-Host "[2/3] Starting CodeRemote server..." -ForegroundColor Yellow
 if (Test-Path $serverOutLog) { Remove-Item $serverOutLog -Force }
 if (Test-Path $serverErrLog) { Remove-Item $serverErrLog -Force }
+if (Test-Path $launcherScript) { Remove-Item $launcherScript -Force }
 
-$nodeCommand = (Get-Command node -ErrorAction Stop).Source
-$process = Start-Process -FilePath $nodeCommand `
-    -ArgumentList $serverArgs `
-    -WorkingDirectory $paths.ServerDir `
-    -RedirectStandardOutput $serverOutLog `
-    -RedirectStandardError $serverErrLog `
+$quotedArgs = $serverArgs | ForEach-Object { Format-CodeRemoteCmdArgument -Value ([string]$_) }
+$launcherLines = @(
+    '@echo off',
+    'setlocal',
+    ('cd /d {0}' -f (Format-CodeRemoteCmdArgument -Value $paths.ServerDir)),
+    ('set "CLAUDE_CLI_COMMAND={0}"' -f $claudeCommand),
+    ('set "CODEX_CLI_COMMAND={0}"' -f $codexCommand),
+    ('set "CODEREMOTE_DEFAULT_WORKSPACE={0}"' -f $workspaceRoot),
+    ('set "CODEREMOTE_MCP_CONFIG={0}"' -f $paths.McpConfigFile),
+    ('{0} {1} 1>> {2} 2>> {3}' -f (Format-CodeRemoteCmdArgument -Value $nodeCommand), ($quotedArgs -join ' '), (Format-CodeRemoteCmdArgument -Value $serverOutLog), (Format-CodeRemoteCmdArgument -Value $serverErrLog))
+)
+$launcherContent = ($launcherLines -join "`r`n") + "`r`n"
+[System.IO.File]::WriteAllText($launcherScript, $launcherContent, [System.Text.Encoding]::ASCII)
+
+$process = Start-Process -FilePath 'cmd.exe' `
+    -ArgumentList '/c', (Format-CodeRemoteCmdArgument -Value $launcherScript) `
     -PassThru `
     -WindowStyle Minimized
 
-Write-Host ("[OK] Started PID {0}" -f $process.Id) -ForegroundColor Green
+Write-Host ("[OK] Started launcher PID {0}" -f $process.Id) -ForegroundColor Green
 
 Write-Host "[3/3] Waiting for health check..." -ForegroundColor Yellow
 $healthUrl = "http://localhost:$serverPort/health"

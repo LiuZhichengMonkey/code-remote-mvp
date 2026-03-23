@@ -1,7 +1,7 @@
 {
-  "name": "code-remote-cli",
+  "name": "coderemote-server",
   "version": "1.0.0",
-  "description": "CLI tool for CodeRemote - remote Claude Code control via mobile",
+  "description": "CodeRemote backend server for Claude and Codex CLI sessions",
   "main": "dist/index.js",
   "bin": {
     "code-remote": "./bin/code-remote.js"
@@ -18,7 +18,8 @@
     "cli",
     "remote",
     "websocket",
-    "claude"
+    "claude",
+    "codex"
   ],
   "author": "",
   "license": "MIT",

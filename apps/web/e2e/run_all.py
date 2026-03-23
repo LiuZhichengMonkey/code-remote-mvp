@@ -1,5 +1,5 @@
 """
-CodeRemote Chat-UI E2E 测试运行器
+CodeRemote Web UI E2E 测试运行器
 
 运行所有 E2E 测试
 
@@ -46,7 +46,7 @@ def save_screenshot(page, name: str):
 def run_all_tests(headless: bool = True):
     """运行所有测试"""
     print("=" * 70)
-    print("  CodeRemote Chat-UI E2E 测试套件")
+    print("  CodeRemote Web UI E2E 测试套件")
     print("=" * 70)
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  URL: {CHAT_UI_URL}")
@@ -194,13 +194,13 @@ def run_all_tests(headless: bool = True):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CodeRemote Chat-UI E2E 测试")
+    parser = argparse.ArgumentParser(description="CodeRemote Web UI E2E 测试")
     parser.add_argument("--headless", type=str, default="true",
                        help="是否无头模式 (true/false)")
     parser.add_argument("--test", type=str, default="all",
                        help="要运行的测试组 (all/connection/messaging/sessions)")
     parser.add_argument("--url", type=str, default=CHAT_UI_URL,
-                       help="Chat-UI URL")
+                       help="Web UI URL")
     args = parser.parse_args()
 
     headless = args.headless.lower() != "false"

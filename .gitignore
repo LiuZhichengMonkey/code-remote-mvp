@@ -72,3 +72,9 @@ cli/
 web/
 debate-reports/
 multi-agent-sessions/
+
+# Local scratch datasets and archives
+IMAGDressing-main.zip
+IMAGDressing.zip
+IMAGDressing_local/
+IMAGDressing_unpacked/

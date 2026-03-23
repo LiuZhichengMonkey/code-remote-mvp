@@ -1,7 +1,7 @@
 {
   "server": {
     "port": 8085,
-    "token": "change-me-local-token",
+    "token": "test123",
     "workspaceRoot": "."
   },
   "ui": {

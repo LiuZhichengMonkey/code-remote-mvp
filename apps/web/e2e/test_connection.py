@@ -1,7 +1,7 @@
 """
-Chat-UI E2E 测试套件
+Web UI E2E 测试套件
 
-测试 CodeRemote Chat-UI 的核心功能
+测试 CodeRemote Web UI 的核心功能
 
 运行方式:
     python e2e/test_connection.py
@@ -37,10 +37,10 @@ except ImportError:
 # ============================================
 
 CHAT_UI_URL = "http://localhost:3001"
-CLI_URL = "http://localhost:8080"
+SERVER_URL = "http://localhost:8080"
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
 
-# 测试 Token (需要与 CLI 服务器一致)
+# 测试 Token (需要与 后端服务器一致)
 TEST_TOKEN = None  # 将在运行时获取
 
 
@@ -58,18 +58,18 @@ def save_screenshot(page, name: str):
     print(f"  截图保存: {path}")
 
 
-def get_cli_token():
-    """从 CLI 获取 Token"""
+def get_server_token():
+    """从 后端服务获取 Token"""
     global TEST_TOKEN
     if TEST_TOKEN:
         return TEST_TOKEN
 
-    # 尝试从 CLI 获取 Token
+    # 尝试从 后端服务获取 Token
     try:
         import urllib.request
-        with urllib.request.urlopen(f"{CLI_URL}/health") as response:
+        with urllib.request.urlopen(f"{SERVER_URL}/health") as response:
             data = json.loads(response.read().decode())
-            # 如果 CLI 返回了 token
+            # 如果后端返回了 token
             if 'token' in data:
                 TEST_TOKEN = data['token']
                 return TEST_TOKEN
@@ -362,11 +362,11 @@ def test_responsive_design():
 
 
 # ============================================
-# 测试 5: WebSocket 连接测试 (需要运行 CLI)
+# 测试 5: WebSocket 连接测试 (需要运行后端服务)
 # ============================================
 
 def test_websocket_connection():
-    """测试 WebSocket 连接 (需要 CLI 服务器运行)"""
+    """测试 WebSocket 连接 (需要 后端服务器运行)"""
     print("\n=== 测试: WebSocket 连接 ===")
 
     # 检查 CLI 是否运行
@@ -376,8 +376,8 @@ def test_websocket_connection():
     sock.close()
 
     if result != 0:
-        print("  ⚠ CLI 服务器未运行，跳过 WebSocket 测试")
-        print("  提示: 运行 'cd cli && npm start' 启动服务器")
+        print("  ⚠ 后端服务器未运行，跳过 WebSocket 测试")
+        print("  提示: 运行 '.\\scripts\\windows\\start.ps1' 启动服务器")
         return
 
     with sync_playwright() as p:
@@ -419,7 +419,7 @@ def test_websocket_connection():
 def run_all_tests():
     """运行所有测试"""
     print("=" * 60)
-    print("CodeRemote Chat-UI E2E 测试")
+    print("CodeRemote Web UI E2E 测试")
     print("=" * 60)
 
     tests = [

@@ -8,7 +8,7 @@ export interface MessageContext {
 
 export class MessageHandler {
   private history: MessageContext[] = [];
-  private maxHistory: number = 100;
+  private maxHistory = 100;
 
   async handleMessage(clientId: string, content: string): Promise<string> {
     const context: MessageContext = {
@@ -17,38 +17,31 @@ export class MessageHandler {
       timestamp: new Date()
     };
 
-    // Store in history
     this.history.push(context);
     if (this.history.length > this.maxHistory) {
       this.history.shift();
     }
 
-    // Log message
     console.log();
-    console.log(chalk.gray('─'.repeat(50)));
-    console.log(chalk.blue('📱'), `Client ${chalk.cyan(clientId)} says:`);
+    console.log(chalk.gray('-'.repeat(50)));
+    console.log(chalk.blue('msg'), `Client ${chalk.cyan(clientId)} says:`);
     console.log(chalk.white(content));
-    console.log(chalk.gray('─'.repeat(50)));
+    console.log(chalk.gray('-'.repeat(50)));
 
-    // For MVP, echo back with confirmation
-    // In production, this would interface with Claude Code CLI
-    const response = this.generateResponse(content);
-
-    return response;
+    return this.generateResponse(content);
   }
 
   private generateResponse(content: string): string {
-    // Simple MVP responses
     const lowerContent = content.toLowerCase();
 
     if (lowerContent.includes('hello') || lowerContent.includes('hi')) {
-      return '👋 Hello! I\'m CodeRemote, your remote Claude Code assistant. How can I help you today?';
+      return 'Hello! I\'m CodeRemote, your remote Claude/Codex assistant. How can I help you today?';
     }
 
     if (lowerContent.includes('help') || lowerContent.includes('?')) {
-      return `📖 CodeRemote Commands (MVP):
+      return `CodeRemote Commands (MVP):
 - Just type your message and I'll respond
-- This is a demo - full Claude Code integration coming soon!
+- This is a demo shell. The full provider runtime handles Claude and Codex sessions.
 
 Status:
 - Server: Running
@@ -56,19 +49,19 @@ Status:
     }
 
     if (lowerContent.includes('status')) {
-      return `✅ CodeRemote Status:
+      return `CodeRemote Status:
 - Server: Running
 - Message History: ${this.history.length} messages
 - Ready to help!`;
     }
 
     if (lowerContent.includes('time')) {
-      return `🕐 Current time: ${new Date().toLocaleString()}`;
+      return `Current time: ${new Date().toLocaleString()}`;
     }
 
-    // Default echo response
-    return `📨 Received: "${content}"
-\nThis is the MVP - full Claude Code integration will allow me to execute code, read files, and more!`;
+    return `Received: "${content}"
+
+This is the MVP shell. The full provider runtime can execute code, read files, and manage sessions.`;
   }
 
   getHistory(limit?: number): MessageContext[] {
