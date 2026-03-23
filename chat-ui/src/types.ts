@@ -15,6 +15,7 @@ export interface ToolUse {
 }
 
 export type Provider = 'claude' | 'codex';
+export type Language = 'zh-CN' | 'en-US';
 
 export interface ProcessPanelPreferences {
   showStatus: boolean;

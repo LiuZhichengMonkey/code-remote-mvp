@@ -7,14 +7,17 @@ import { AlertCircle, Brain, Check, ChevronDown, Copy, RotateCcw, Sparkles } fro
 import { ChatOption, Message, MessageProcess, MessageProcessEvent, ProcessPanelPreferences } from '../../types';
 import { cn } from '../../utils';
 import {
-  PROCESS_STATE_LABELS,
   getProcessEventDotClass,
   getProcessEventLabel,
   getProcessEventSummary,
+  getProcessStateLabel,
   getProcessStateBadgeClass,
+  getReconnectPlaceholderContent,
   normalizeLegacyDisplayText
 } from '../../chatUiShared';
 import { filterProcessForDisplay } from '../../uiPreferences';
+import { useI18n } from '../../i18n';
+import { RECONNECT_PLACEHOLDER_MESSAGE_PREFIX } from '../../state/chatStateCache';
 
 const highlightCode = (code: string, language: string): string => {
   const keywords: Record<string, string[]> = {
@@ -69,6 +72,7 @@ const renderMarkdownParagraph = ({ children }: { children: React.ReactNode }) =>
 );
 
 const CodeBlock = ({ code, language }: { code: string; language: string }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -84,13 +88,13 @@ const CodeBlock = ({ code, language }: { code: string; language: string }) => {
   return (
     <div className="relative group/mycode">
       <div className="flex items-center justify-between px-3 py-2 bg-black/30 rounded-t-lg border-b border-white/10 text-xs">
-        <span className="text-white/50 font-mono">{language || 'code'}</span>
+        <span className="text-white/50 font-mono">{language || t('common.code')}</span>
         <button
           onClick={handleCopy}
           className="flex items-center gap-1 text-white/50 hover:text-white transition-colors"
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
-          <span>{copied ? 'Copied' : 'Copy'}</span>
+          <span>{copied ? t('common.copied') : t('common.copy')}</span>
         </button>
       </div>
       <pre className="!mt-0 !rounded-t-none">
@@ -101,6 +105,7 @@ const CodeBlock = ({ code, language }: { code: string; language: string }) => {
 };
 
 const MermaidBlock = ({ code }: { code: string }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [svg, setSvg] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -170,13 +175,13 @@ const MermaidBlock = ({ code }: { code: string }) => {
           className="flex items-center gap-1 text-white/50 hover:text-white transition-colors"
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
-          <span>{copied ? 'Copied' : 'Copy'}</span>
+          <span>{copied ? t('common.copied') : t('common.copy')}</span>
         </button>
       </div>
       <div className="overflow-x-auto rounded-b-lg border border-white/10 border-t-0 bg-[#0b1020] p-4">
         {error ? (
           <div className="space-y-2">
-            <div className="text-sm text-red-300">Failed to render diagram.</div>
+            <div className="text-sm text-red-300">{t('bubble.mermaid.failed')}</div>
             <div className="text-xs text-red-200/80 whitespace-pre-wrap">{error}</div>
             <pre className="!m-0 whitespace-pre-wrap rounded-lg border border-red-400/20 bg-black/30 p-3 text-xs text-white/70">
               {code}
@@ -188,7 +193,7 @@ const MermaidBlock = ({ code }: { code: string }) => {
             dangerouslySetInnerHTML={{ __html: svg }}
           />
         ) : (
-          <div className="text-sm text-white/50">Rendering diagram...</div>
+          <div className="text-sm text-white/50">{t('bubble.mermaid.rendering')}</div>
         )}
       </div>
     </div>
@@ -202,6 +207,7 @@ const ProcessPanel = ({
   process?: MessageProcess;
   isStreaming?: boolean;
 }) => {
+  const { t } = useI18n();
   const [isExpanded, setIsExpanded] = useState(false);
   const eventCount = process?.events.length || 0;
 
@@ -224,12 +230,12 @@ const ProcessPanel = ({
         <div className="w-5 h-5 rounded-full bg-sky-500/10 flex items-center justify-center group-hover/process:bg-sky-500/20 transition-colors">
           <Sparkles size={12} className="text-sky-300" />
         </div>
-        <span>Process</span>
+        <span>{t('bubble.process')}</span>
         <span className={cn(
           'rounded-full border px-2 py-0.5 text-[9px]',
           getProcessStateBadgeClass(process.state)
         )}>
-          {PROCESS_STATE_LABELS[process.state]}
+          {getProcessStateLabel(process.state, t)}
         </span>
         <span className="text-white/20">{eventCount}</span>
         <motion.div
@@ -254,7 +260,7 @@ const ProcessPanel = ({
           >
             <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3 space-y-2">
               {process.events.map((event, index) => {
-                const summary = getProcessEventSummary(event);
+                const summary = getProcessEventSummary(event, t);
                 const showToolInput = event.type === 'tool_use' && event.toolInput && Object.keys(event.toolInput).length > 0;
                 const showToolResult = event.type === 'tool_result' && typeof event.result === 'string' && event.result.trim() !== '';
                 const eventKey = ('toolUseId' in event && event.toolUseId)
@@ -268,7 +274,7 @@ const ProcessPanel = ({
                   >
                     <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/35">
                       <span className={cn('inline-flex h-2 w-2 rounded-full', getProcessEventDotClass(event))} />
-                      <span>{getProcessEventLabel(event)}</span>
+                      <span>{getProcessEventLabel(event, t)}</span>
                     </div>
                     {summary && (
                       <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-white/80">
@@ -315,12 +321,16 @@ export const ChatBubble = React.memo(({
   onOptionClick,
   processPanelPreferences
 }: ChatBubbleProps) => {
+  const { t } = useI18n();
   const isUser = message.role === 'user';
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
   const [isAgentExpanded, setIsAgentExpanded] = useState(false);
 
   let thinkingContent = normalizeLegacyDisplayText(message.thinking || '');
   let displayContent = normalizeLegacyDisplayText(message.content);
+  if (message.id.startsWith(RECONNECT_PLACEHOLDER_MESSAGE_PREFIX)) {
+    displayContent = getReconnectPlaceholderContent(message.process?.provider || 'claude', t);
+  }
   const visibleProcess = filterProcessForDisplay(message.process, processPanelPreferences);
   const hasProcess = !!visibleProcess?.events?.length;
   const processPanelPreferenceKey = [
@@ -332,7 +342,7 @@ export const ChatBubble = React.memo(({
   const agentMessageMatch = displayContent.match(/^([^\s]+)\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)(?:\s+\*R(\d+)\*)?\n\n([\s\S]*)$/);
   const isAgentMessage = !isUser && agentMessageMatch !== null && !isStreaming;
   const agentIcon = agentMessageMatch?.[1] || '@';
-  const agentName = agentMessageMatch?.[2] || 'Agent';
+  const agentName = agentMessageMatch?.[2] || t('bubble.agentFallbackName');
   const agentRole = agentMessageMatch?.[3] || '';
   const agentRound = agentMessageMatch?.[4] ? `R${agentMessageMatch[4]}` : '';
   const agentContent = agentMessageMatch?.[5] || displayContent;
@@ -426,7 +436,7 @@ export const ChatBubble = React.memo(({
   const shouldRenderNormalMessage = !isAgentMessage && (hasDisplayContent || (isStreaming && !thinkingContent && !hasProcess));
 
   const groupedOptions = message.options?.reduce((acc, opt) => {
-    const category = opt.category || 'Suggestions';
+    const category = opt.category || t('bubble.suggestions');
     if (!acc[category]) {
       acc[category] = [];
     }
@@ -486,7 +496,7 @@ export const ChatBubble = React.memo(({
                 <div className="w-5 h-5 rounded-full bg-accent/10 flex items-center justify-center group-hover/thinking:bg-accent/20 transition-colors">
                   <Brain size={12} className="text-accent" />
                 </div>
-                <span>Thinking Process</span>
+                <span>{t('bubble.thinkingProcess')}</span>
                 <motion.div
                   animate={{ rotate: isThinkingExpanded ? 180 : 0 }}
                   transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
@@ -633,15 +643,18 @@ export const ChatBubble = React.memo(({
 
           {!isStreaming && allChoices.length > 0 && (
             <div className="mt-4 grid grid-cols-1 gap-3">
-              {allChoices.map((choice, idx) => (
+              {allChoices.map((choice, idx) => {
+                const choiceCategory = choice.category === 'Suggestions' ? t('bubble.suggestions') : choice.category;
+
+                return (
                 <button
                   key={idx}
                   onClick={() => onOptionClick?.(choice.description || choice.label)}
                   className="w-full text-left p-4 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-accent/50 transition-all active:scale-[0.98]"
                 >
-                  {choice.category && (
+                  {choiceCategory && (
                     <span className="text-[10px] font-bold text-accent uppercase tracking-widest block mb-1">
-                      {choice.category}
+                      {choiceCategory}
                     </span>
                   )}
                   <div className="flex items-start gap-3">
@@ -653,7 +666,8 @@ export const ChatBubble = React.memo(({
                     </div>
                   </div>
                 </button>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -681,7 +695,7 @@ export const ChatBubble = React.memo(({
           {Object.entries(groupedOptions).map(([category, opts]) => (
             <div key={category} className="flex flex-col gap-2">
               <span className="text-[11px] font-bold text-white/30 uppercase tracking-widest ml-1">
-                {category}
+                {category === 'Suggestions' ? t('bubble.suggestions') : category}
               </span>
               <div className="flex flex-wrap gap-2">
                 {opts?.map((opt, idx) => (

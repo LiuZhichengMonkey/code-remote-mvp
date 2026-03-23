@@ -48,10 +48,11 @@ import { debugLog } from './debugLog';
 import {
   appendMessageProcessEvent,
   createReconnectedRunningMessage,
+  getProcessPanelSettingOptions,
   getProviderBadgeClass,
   getProviderLabel,
+  localizeSessionTitle,
   normalizeLegacyDisplayText,
-  PROCESS_PANEL_SETTING_OPTIONS,
   setMessageProcessState,
   updateRunningModelMessage,
   upsertToolRecord
@@ -82,6 +83,7 @@ import { Header as HeaderView } from './components/layout/Header';
 import { InputArea as InputAreaView } from './components/chat/InputArea';
 import { ScrollIndex as ScrollIndexView } from './components/chat/ScrollIndex';
 import { ChatBubble as ChatBubbleView } from './components/chat/ChatBubble';
+import { SUPPORTED_LANGUAGES, useI18n } from './i18n';
 
 interface ProjectInfo {
   id: string;
@@ -151,7 +153,9 @@ const ConnectionPanel = ({
   processPreferencesSaving: boolean;
   onProcessPanelPreferenceChange: (key: keyof ProcessPanelPreferences, value: boolean) => void;
 }) => {
+  const { language, setLanguage, t } = useI18n();
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
+  const processPanelSettingOptions = useMemo(() => getProcessPanelSettingOptions(t), [t]);
 
   // Used to dismiss the dropdown on outside clicks
   const settingsDropdownRef = useRef<HTMLDivElement>(null);
@@ -179,21 +183,25 @@ const ConnectionPanel = ({
   const selectedSettingsItem = runtimeProfileState.activeProfile
     || runtimeProfileState.settingsList.find(settings => settings.name === runtimeProfileState.selectedProfileName)
     || null;
-  const runtimeProfileProviderLabel = getProviderLabel(runtimeProfileProvider);
+  const runtimeProfileProviderLabel = getProviderLabel(runtimeProfileProvider, t);
   const runtimeProfileSummaryText = selectedSettingsItem
-    ? `${selectedSettingsItem.model || 'Unknown model'}${selectedSettingsItem.valueCount ? ` · ${selectedSettingsItem.valueCount} values` : ''}`
-    : `Load a saved ${runtimeProfileProviderLabel} profile or edit the active local configuration.`;
+    ? `${selectedSettingsItem.model || t('settings.runtime.unknownModel')}${selectedSettingsItem.valueCount ? t('settings.runtime.valuesSuffix', { count: selectedSettingsItem.valueCount }) : ''}`
+    : t('settings.runtime.summaryFallback', { provider: runtimeProfileProviderLabel });
   const runtimeProfileEmptyText = runtimeProfileProvider === 'codex'
-    ? 'No saved Codex profiles found. Manual override edits the active local Codex configuration.'
-    : 'No saved Claude profiles found.';
-  const connectionStatusLabel = isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected';
+    ? t('settings.runtime.empty.codex')
+    : t('settings.runtime.empty.claude');
+  const connectionStatusLabel = isConnected
+    ? t('settings.bridge.connected')
+    : isConnecting
+      ? t('common.connecting')
+      : t('settings.bridge.disconnected');
   const processPreferencesStatusText = isConnected
     ? (processPreferencesSaving
-      ? 'Syncing preferences to the current workspace...'
+      ? t('settings.process.status.syncing')
       : (processPreferencesLoaded
-        ? 'Synced across devices for this workspace.'
-        : 'Using current values while sync finishes.'))
-    : 'Connect to load synced workspace preferences.';
+        ? t('settings.process.status.synced')
+        : t('settings.process.status.loading')))
+    : t('settings.process.status.offline');
   const canToggleProcessPreferences = isConnected && !processPreferencesSaving;
 
   return (
@@ -212,10 +220,10 @@ const ConnectionPanel = ({
               {isConnected ? <Wifi size={18} /> : <WifiOff size={18} />}
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Bridge Connection</div>
-              <div className="mt-1 text-sm font-medium text-white">Local CLI transport for Claude and Codex sessions</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">{t('settings.bridge.title')}</div>
+              <div className="mt-1 text-sm font-medium text-white">{t('settings.bridge.subtitle')}</div>
               <div className="mt-1 text-[11px] leading-5 text-white/45">
-                This connection also carries synced UI preferences for the current workspace.
+                {t('settings.bridge.description')}
               </div>
             </div>
           </div>
@@ -235,32 +243,32 @@ const ConnectionPanel = ({
 
         <div className="mt-3 flex flex-wrap gap-2">
           <div className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-white/45">
-            URL {url ? 'ready' : 'missing'}
+            {url ? t('settings.bridge.urlReady') : t('settings.bridge.urlMissing')}
           </div>
           <div className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-white/45">
-            Token {token ? 'ready' : 'missing'}
+            {token ? t('settings.bridge.tokenReady') : t('settings.bridge.tokenMissing')}
           </div>
         </div>
 
         <div className="mt-3 space-y-2">
           <label className="block">
-            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">WebSocket URL</span>
+            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">{t('common.webSocketUrl')}</span>
             <input
               type="text"
               value={url}
               onChange={(e) => onUrlChange(e.target.value)}
-              placeholder="WebSocket URL (ws://...)"
+              placeholder={t('settings.bridge.urlPlaceholder')}
               className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
               disabled={isConnected}
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">Token</span>
+            <span className="mb-1 block text-[11px] font-medium uppercase tracking-[0.08em] text-white/45">{t('common.token')}</span>
             <input
               type="password"
               value={token}
               onChange={(e) => onTokenChange(e.target.value)}
-              placeholder="Token"
+              placeholder={t('common.token')}
               className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
               disabled={isConnected}
             />
@@ -273,7 +281,7 @@ const ConnectionPanel = ({
               onClick={onDisconnect}
               className="w-full rounded-xl bg-red-500/20 py-2 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/30"
             >
-              Disconnect
+              {t('common.disconnect')}
             </button>
           ) : (
             <button
@@ -281,7 +289,7 @@ const ConnectionPanel = ({
               disabled={isConnecting || !url || !token}
               className="w-full rounded-xl bg-accent py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
             >
-              {isConnecting ? 'Connecting...' : 'Connect'}
+              {isConnecting ? t('common.connecting') : t('common.connect')}
             </button>
           )}
         </div>
@@ -292,10 +300,10 @@ const ConnectionPanel = ({
         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Runtime Profile</div>
-              <div className="mt-1 text-sm font-medium text-white">Manage local Claude and Codex runtime settings</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">{t('settings.runtime.title')}</div>
+              <div className="mt-1 text-sm font-medium text-white">{t('settings.runtime.subtitle')}</div>
               <div className="mt-1 text-[11px] leading-5 text-white/45">
-                Sessions keep their provider, but this panel lets you switch or edit the local runtime configuration for either CLI.
+                {t('settings.runtime.description')}
               </div>
             </div>
             <button
@@ -311,7 +319,7 @@ const ConnectionPanel = ({
                   : 'border-white/10 bg-white/5 text-white/65 hover:bg-white/10'
               )}
             >
-              {runtimeProfileState.isEditing ? 'Close editor' : 'Manual override'}
+              {runtimeProfileState.isEditing ? t('settings.runtime.closeEditor') : t('settings.runtime.manualOverride')}
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -330,7 +338,7 @@ const ConnectionPanel = ({
                     : 'border-white/10 bg-white/5 text-white/55 hover:bg-white/10'
                 )}
               >
-                {getProviderLabel(provider)}
+                {getProviderLabel(provider, t)}
               </button>
             ))}
           </div>
@@ -349,8 +357,8 @@ const ConnectionPanel = ({
               <div className="min-w-0">
                 <div className={cn('truncate text-sm font-medium', selectedSettingsItem ? 'text-white' : 'text-white/40')}>
                   {runtimeProfileState.loading
-                    ? `Loading ${runtimeProfileProviderLabel} profiles...`
-                    : (runtimeProfileState.selectedProfileName || selectedSettingsItem?.name || `Select ${runtimeProfileProviderLabel} profile`)}
+                    ? t('settings.runtime.loadingProfiles', { provider: runtimeProfileProviderLabel })
+                    : (runtimeProfileState.selectedProfileName || selectedSettingsItem?.name || t('settings.runtime.selectProfile', { provider: runtimeProfileProviderLabel }))}
                 </div>
                 <div className="mt-1 text-[11px] text-white/40">
                   {runtimeProfileSummaryText}
@@ -388,13 +396,13 @@ const ConnectionPanel = ({
                       {(settings.baseUrl || settings.model || settings.authTokenConfigured) && (
                         <div className="mt-1.5 space-y-1 text-[11px] text-white/45">
                           {settings.baseUrl && (
-                            <div className="truncate">URL: {settings.baseUrl}</div>
+                            <div className="truncate">{t('common.baseUrl')}: {settings.baseUrl}</div>
                           )}
                           {settings.model && (
-                            <div className="truncate">Model: {settings.model}</div>
+                            <div className="truncate">{t('common.model')}: {settings.model}</div>
                           )}
                           {settings.authTokenConfigured && (
-                            <div>Auth token configured</div>
+                            <div>{t('settings.runtime.authTokenConfigured')}</div>
                           )}
                         </div>
                       )}
@@ -413,33 +421,33 @@ const ConnectionPanel = ({
             <div className="mt-3 grid gap-2 sm:grid-cols-3">
               {selectedSettingsItem.baseUrl && (
                 <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Base URL</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">{t('common.baseUrl')}</div>
                   <div className="mt-1 truncate text-xs text-white/75">{selectedSettingsItem.baseUrl}</div>
                 </div>
               )}
               {selectedSettingsItem.model && (
                 <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Model</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">{t('common.model')}</div>
                   <div className="mt-1 truncate text-xs text-white/75">{selectedSettingsItem.model}</div>
                 </div>
               )}
               {selectedSettingsItem.authTokenConfigured && (
                 <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">Auth</div>
-                  <div className="mt-1 text-xs text-white/75">Token configured</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/45">{t('common.auth')}</div>
+                  <div className="mt-1 text-xs text-white/75">{t('settings.runtime.tokenConfigured')}</div>
                 </div>
               )}
             </div>
           )}
           {runtimeProfileState.isEditing && (
             <div className="mt-3 rounded-2xl border border-accent/15 bg-white/[0.04] p-3">
-              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Manual Override</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">{t('settings.runtime.manualOverrideTitle')}</div>
               <div className="mt-1 text-[11px] leading-5 text-white/45">
-                Edit the active {runtimeProfileProviderLabel} configuration. Leave the auth token blank to keep the current token.
+                {t('settings.runtime.manualOverrideDescription', { provider: runtimeProfileProviderLabel })}
               </div>
               <div className="mt-3 space-y-2">
                 <label className="block">
-                  <span className="mb-1 block text-[11px] text-white/45">Base URL</span>
+                  <span className="mb-1 block text-[11px] text-white/45">{t('common.baseUrl')}</span>
                   <input
                     type="text"
                     value={runtimeProfileState.editForm.baseUrl}
@@ -449,7 +457,7 @@ const ConnectionPanel = ({
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] text-white/45">Auth Token</span>
+                  <span className="mb-1 block text-[11px] text-white/45">{t('common.authToken')}</span>
                   <input
                     type="password"
                     value={runtimeProfileState.editForm.authToken}
@@ -459,7 +467,7 @@ const ConnectionPanel = ({
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[11px] text-white/45">Model</span>
+                  <span className="mb-1 block text-[11px] text-white/45">{t('common.model')}</span>
                   <input
                     type="text"
                     value={runtimeProfileState.editForm.model}
@@ -473,17 +481,45 @@ const ConnectionPanel = ({
                 onClick={onSaveRuntimeProfile}
                 className="mt-3 w-full rounded-xl bg-accent py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80"
               >
-                Save and apply
+                {t('common.saveAndApply')}
               </button>
             </div>
           )}
         </div>
       )}
       <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">{t('settings.language.title')}</div>
+          <div className="mt-1 text-sm font-medium text-white">{t('settings.language.subtitle')}</div>
+          <div className="mt-1 text-[11px] leading-5 text-white/45">
+            {t('settings.language.description')}
+          </div>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {SUPPORTED_LANGUAGES.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => setLanguage(option)}
+              className={cn(
+                'rounded-2xl border px-3 py-3 text-left transition-all',
+                language === option
+                  ? 'border-accent/35 bg-accent/15 text-white'
+                  : 'border-white/10 bg-black/15 text-white/70 hover:bg-white/[0.05]'
+              )}
+            >
+              <div className="text-sm font-medium">{t(`settings.language.option.${option}` as 'settings.language.option.zh-CN')}</div>
+              <div className="mt-1 text-[11px] text-white/45">{option}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">Process Panel</div>
-            <div className="mt-1 text-sm font-medium text-white">Choose which process channels are visible</div>
+            <div className="text-xs font-semibold uppercase tracking-[0.08em] text-white/55">{t('settings.process.title')}</div>
+            <div className="mt-1 text-sm font-medium text-white">{t('settings.process.subtitle')}</div>
             <div className="mt-1 text-[11px] leading-5 text-white/45">
               {processPreferencesStatusText}
             </div>
@@ -504,13 +540,13 @@ const ConnectionPanel = ({
                   : 'border-white/10 bg-white/5 text-white/40'
               )}
             >
-              {isConnected ? (processPreferencesLoaded ? 'Workspace synced' : 'Pending sync') : 'Offline'}
+              {isConnected ? (processPreferencesLoaded ? t('common.workspaceSynced') : t('common.pendingSync')) : t('common.offline')}
             </span>
           </div>
         </div>
 
         <div className="mt-3 space-y-2">
-          {PROCESS_PANEL_SETTING_OPTIONS.map((option) => {
+          {processPanelSettingOptions.map((option) => {
             const enabled = processPanelPreferences[option.key];
 
             return (
@@ -552,7 +588,7 @@ const ConnectionPanel = ({
                         : 'border-white/10 bg-black/20 text-white/35'
                     )}
                   >
-                    {enabled ? 'On' : 'Off'}
+                    {enabled ? t('common.on') : t('common.off')}
                   </div>
                 </div>
               </button>
@@ -561,7 +597,7 @@ const ConnectionPanel = ({
         </div>
 
         <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] leading-5 text-white/45">
-          `Status` covers lifecycle updates. `Log` covers commentary and runtime logs. `Tool` combines both `tool_use` and `tool_result`.
+          {t('settings.process.note')}
         </div>
       </div>
     </div>
@@ -607,6 +643,7 @@ const removeCachedRunningSessionEntry = (sessionId: string): void => removeCache
 const createReconnectPlaceholderSession = (entry: RunningSessionCacheEntry): ChatSession => createReconnectPlaceholderSessionStore(entry);
 
 export default function App() {
+  const { t } = useI18n();
   // WebSocket state
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -723,7 +760,7 @@ export default function App() {
         pendingUiPreferencesRollbackRef.current = null;
         setProcessPreferencesSaving(false);
         setProcessPreferencesLoaded(true);
-        alert('Saving process panel preferences timed out. Restart the backend so it picks up the new UI preferences API.');
+        alert(t('settings.process.saveTimeout'));
         return;
       }
 
@@ -811,7 +848,7 @@ export default function App() {
 
   const handleSwitchRuntimeProfile = useCallback((provider: Provider, settingsName: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      alert('Connect to the server before switching runtime profiles.');
+      alert(t('settings.runtime.connectBeforeSwitch'));
       return;
     }
 
@@ -834,7 +871,7 @@ export default function App() {
 
   const handleSaveRuntimeProfile = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      alert('Connect to the server before editing runtime profiles.');
+      alert(t('settings.runtime.connectBeforeEdit'));
       return;
     }
 
@@ -866,7 +903,7 @@ export default function App() {
     value: boolean
   ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      alert('Connect to the server before changing synced process panel preferences.');
+      alert(t('settings.process.connectBeforeChange'));
       return;
     }
 
@@ -1688,7 +1725,7 @@ export default function App() {
             setUiPreferences(pendingUiPreferencesRollbackRef.current || lastSavedUiPreferencesRef.current);
             setProcessPreferencesSaving(false);
             pendingUiPreferencesRollbackRef.current = null;
-            alert(`Failed to save process panel preferences: ${msg.error || 'Unknown error'}`);
+            alert(t('settings.process.saveFailed', { error: msg.error || t('common.unknownError') }));
           } else {
             const fallbackPreferences = normalizeUiPreferences(lastSavedUiPreferencesRef.current);
             setUiPreferences(fallbackPreferences);
@@ -1716,7 +1753,7 @@ export default function App() {
             ...prev,
             [provider]: applyRuntimeProfileError(prev[provider], msg.error)
           }));
-          alert(`Runtime profile error: ${msg.error || 'Unknown error'}`);
+          alert(t('settings.runtime.error', { error: msg.error || t('common.unknownError') }));
         } else if (msg.type === 'running_sessions') {
           // Rehydrated list of running sessions after reconnecting
           debugLog('Running sessions on server:', msg.sessions);
@@ -2046,7 +2083,7 @@ export default function App() {
           // Mark this session as done (error)
           const errorSessionId = targetSessionId;
           const errorTimestamp = msg.timestamp || Date.now();
-          const errorMessage = msg.error || 'Unknown error';
+          const errorMessage = msg.error || t('common.unknownError');
           if (errorSessionId) {
             clearRunningSessionState(errorSessionId);
           }
@@ -2059,8 +2096,8 @@ export default function App() {
               messages: updateRunningModelMessage(session.messages, provider, errorTimestamp, (lastMsg) => ({
                 ...lastMsg,
                 content: lastMsg.content?.trim()
-                  ? `${lastMsg.content}\n\nError: ${errorMessage}`
-                  : `Error: ${errorMessage}`,
+                  ? `${lastMsg.content}\n\n${t('process.state.error')}: ${errorMessage}`
+                  : `${t('process.state.error')}: ${errorMessage}`,
                 timestamp: errorTimestamp,
                 status: 'error',
                 process: appendMessageProcessEvent(
@@ -3067,7 +3104,7 @@ export default function App() {
       <HeaderView
         onMenuClick={() => setIsSidebarOpen(true)}
         onNewChat={handleNewChat}
-        title={currentSession?.title || 'New Chat'}
+        title={localizeSessionTitle(currentSession?.title || '', t)}
         onTitleChange={handleTitleChange}
         onTitleBlur={handleTitleBlur}
         onSettingsClick={() => setShowSettings(!showSettings)}
@@ -3139,12 +3176,12 @@ export default function App() {
               className="fixed top-0 left-0 bottom-0 w-[280px] bg-card border-r border-white/10 z-[70] flex flex-col"
             >
               <div className="p-6 flex items-center justify-between">
-                <h2 className="text-xl font-semibold">History</h2>
+                <h2 className="text-xl font-semibold">{t('common.history')}</h2>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => loadProjects(true)}
                     className="text-white/40 hover:text-white transition-colors"
-                    title="Refresh projects"
+                    title={t('common.refreshProjects')}
                   >
                     <RefreshCw size={18} />
                   </button>
@@ -3158,7 +3195,7 @@ export default function App() {
                 {runningSessions.size > 0 && (
                   <div className="space-y-1 pb-2">
                     <div className="px-2 pt-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-white/35">
-                      Running Now
+                      {t('sidebar.runningNow')}
                     </div>
                     {Array.from(runningSessions).map(sessionId => {
                       const { title, projectId, provider } = resolveRunningSessionDetails(sessionId);
@@ -3186,9 +3223,9 @@ export default function App() {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 min-w-0">
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-yellow-500/20 text-yellow-300 flex-shrink-0 whitespace-nowrap">
-                                Running
+                                {t('process.state.running')}
                               </span>
-                              <span className="truncate text-sm font-medium">{title}</span>
+                              <span className="truncate text-sm font-medium">{localizeSessionTitle(title, t)}</span>
                             </div>
                             <div className="mt-1 flex items-center gap-2 text-[10px] text-white/45">
                               <span className="font-mono truncate">{sessionId.substring(0, 8)}...</span>
@@ -3197,7 +3234,7 @@ export default function App() {
                                   'rounded-full border px-2 py-0.5 text-[10px] font-medium',
                                   getProviderBadgeClass(provider)
                                 )}>
-                                  {getProviderLabel(provider)}
+                                  {getProviderLabel(provider, t)}
                                 </span>
                               )}
                             </div>
@@ -3211,7 +3248,7 @@ export default function App() {
 
                 {projects.length === 0 ? (
                   <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-sm text-white/60">
-                    {isConnected ? 'No saved projects found yet' : 'Connect to view history'}
+                    {isConnected ? t('sidebar.noProjects.connected') : t('sidebar.noProjects.disconnected')}
                   </div>
                 ) : (
                   projects.map(project => (
@@ -3234,7 +3271,7 @@ export default function App() {
                           'rounded-full border px-2 py-0.5 text-[10px] font-medium',
                           getProviderBadgeClass(project.provider)
                         )}>
-                          {getProviderLabel(project.provider)}
+                          {getProviderLabel(project.provider, t)}
                         </span>
                         <span className="text-xs text-white/40 bg-white/10 px-2 py-0.5 rounded-full">
                           {project.sessionCount}
@@ -3251,7 +3288,7 @@ export default function App() {
                         <div className="pl-4 space-y-1">
                           {loadingProjects.has(project.id) ? (
                             <div className="p-3 text-sm text-white/40 text-center">
-                              Loading...
+                              {t('sidebar.loadingProjects')}
                             </div>
                           ) : (
                             (projectSessions[project.id] || []).map(session => {
@@ -3290,16 +3327,16 @@ export default function App() {
                                   <div className="flex items-center gap-2">
                                     {isRunning ? (
                                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-yellow-500/20 text-yellow-400 flex-shrink-0 whitespace-nowrap animate-pulse">
-                                        Running
+                                        {t('process.state.running')}
                                       </span>
                                     ) : isCompleted ? (
                                       <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-green-500/20 text-green-400 flex-shrink-0 whitespace-nowrap">
-                                        Completed
+                                        {t('process.state.completed')}
                                       </span>
                                     ) : null}
                                     <span className="truncate flex items-center gap-1 min-w-0 flex-1">
                                       <FileText size={12} className="inline opacity-50 flex-shrink-0" />
-                                      <span className="truncate">{normalizeLegacyDisplayText(session.title)}</span>
+                                      <span className="truncate">{localizeSessionTitle(normalizeLegacyDisplayText(session.title), t)}</span>
                                     </span>
                                   </div>
                                   <div className="text-white/30 text-[10px] font-mono truncate mt-0.5">
@@ -3312,7 +3349,7 @@ export default function App() {
                                     deleteSessionById(session.id, project.id, session.provider);
                                   }}
                                   className="text-white/30 hover:text-red-400 transition-all p-1 touch-manipulation"
-                                  title="Delete session"
+                                  title={t('common.deleteSession')}
                                 >
                                   <Trash2 size={14} />
                                 </button>
@@ -3322,7 +3359,7 @@ export default function App() {
                           )}
                           {projectSessions[project.id]?.length === 0 && !loadingProjects.has(project.id) && (
                             <div className="p-2 text-xs text-white/40 text-center">
-                              No sessions
+                              {t('common.noSessions')}
                             </div>
                           )}
                         </div>
@@ -3338,7 +3375,7 @@ export default function App() {
                   className="w-full flex items-center justify-center gap-2 py-3 bg-white/10 rounded-xl text-sm font-medium hover:bg-white/20 transition-colors"
                 >
                   <Plus size={18} />
-                  New Chat
+                  {t('common.newChat')}
                 </button>
               </div>
             </motion.div>
@@ -3363,12 +3400,12 @@ export default function App() {
               {isLoadingMore ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white/70 rounded-full animate-spin" />
-                  <span>Loading...</span>
+                  <span>{t('common.loading')}</span>
                 </>
               ) : (
                 <>
                   <ChevronUp size={16} />
-                  <span>Load earlier messages ({totalMessages - messages.length} more)</span>
+                  <span>{t('messages.loadEarlier', { count: totalMessages - messages.length })}</span>
                 </>
               )}
             </button>
@@ -3408,17 +3445,17 @@ export default function App() {
                       </div>
                       <div className="flex-1 text-left">
                         <div className="flex items-center gap-2">
-                          <div className="text-sm font-medium text-white truncate">{displayTitle}</div>
+                          <div className="text-sm font-medium text-white truncate">{localizeSessionTitle(displayTitle, t)}</div>
                           {provider && (
                             <span className={cn(
                               'rounded-full border px-2 py-0.5 text-[10px] font-medium',
                               getProviderBadgeClass(provider)
                             )}>
-                              {getProviderLabel(provider)}
+                              {getProviderLabel(provider, t)}
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-white/50">Running · Tap to view</div>
+                        <div className="text-xs text-white/50">{t('sidebar.runningTapToView')}</div>
                       </div>
                       <ChevronRight size={16} className="text-white/30" />
                     </motion.div>
@@ -3436,12 +3473,12 @@ export default function App() {
             </motion.div>
             <h1 className="text-2xl font-bold mb-2">CodeRemote</h1>
             <p className="text-white/40 text-[15px] max-w-[240px]">
-              Connect to your development environment and control Claude Code or Codex CLI from anywhere.
+              {t('empty.description')}
             </p>
             <div className="mt-6 text-xs text-white/30">
               <div className="flex items-center gap-2 mb-2">
                 <Hash size={12} />
-                <span>Commands: /read, /ls, /glob, /grep, /help</span>
+                <span>{t('empty.commands')}</span>
               </div>
             </div>
           </div>
@@ -3508,7 +3545,7 @@ export default function App() {
                   <Sparkles className="w-3 h-3 text-purple-400 absolute -top-1 -right-1 animate-pulse" />
                 </div>
                 <div className="flex flex-col flex-1">
-                  <span className="text-sm font-medium text-white">{getProviderLabel(currentProvider)} is processing...</span>
+                  <span className="text-sm font-medium text-white">{t('stream.processingProvider', { provider: getProviderLabel(currentProvider, t) })}</span>
                   {serverLogs.length > 0 && (
                     <span className="text-xs text-white/50 truncate">
                       {normalizeLegacyDisplayText(serverLogs[serverLogs.length - 1].message)}

@@ -4,6 +4,7 @@ import { FileText, Mic, Paperclip, Send, Square, X } from 'lucide-react';
 import { Attachment } from '../../types';
 import { cn } from '../../utils';
 import { debugLog } from '../../debugLog';
+import { useI18n } from '../../i18n';
 
 interface InputAreaProps {
   onSend: (text: string, files: Attachment[]) => void;
@@ -20,6 +21,7 @@ export const InputArea = ({
   isConnected,
   onFocus
 }: InputAreaProps) => {
+  const { t } = useI18n();
   const [input, setInput] = useState('');
   const [files, setFiles] = useState<Attachment[]>([]);
   const [isRecording, setIsRecording] = useState(false);
@@ -32,20 +34,20 @@ export const InputArea = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const skills = [
-    { id: 'git-commit', name: 'Git Commit', description: 'Create and push a git commit', trigger: '/git-workflow' },
-    { id: 'create-readme', name: 'Create README', description: 'Generate a project README', trigger: '/create-readme' },
-    { id: 'simplify', name: 'Simplify Code', description: 'Refactor and simplify code', trigger: '/simplify' },
-    { id: 'brainstorm', name: 'Brainstorm', description: 'Explore ideas for a new feature', trigger: '/brainstorming' },
+    { id: 'git-commit', name: t('input.skill.gitCommit.name'), description: t('input.skill.gitCommit.description'), trigger: '/git-workflow' },
+    { id: 'create-readme', name: t('input.skill.createReadme.name'), description: t('input.skill.createReadme.description'), trigger: '/create-readme' },
+    { id: 'simplify', name: t('input.skill.simplify.name'), description: t('input.skill.simplify.description'), trigger: '/simplify' },
+    { id: 'brainstorm', name: t('input.skill.brainstorm.name'), description: t('input.skill.brainstorm.description'), trigger: '/brainstorming' },
   ];
 
   const agents = [
-    { id: 'code-reviewer', name: 'Code Reviewer', alias: 'code-reviewer', icon: 'CR', color: '#4CAF50', description: 'Code quality, bugs, and best practices' },
-    { id: 'architect', name: 'Architect', alias: 'architect', icon: 'AR', color: '#2196F3', description: 'System design and architecture decisions' },
-    { id: 'tester', name: 'Tester', alias: 'tester', icon: 'TS', color: '#FF9800', description: 'Coverage, edge cases, and validation' },
-    { id: 'security', name: 'Security', alias: 'security', icon: 'SEC', color: '#F44336', description: 'Security risks and authentication flows' },
-    { id: 'performance', name: 'Performance', alias: 'performance', icon: 'PF', color: '#9C27B0', description: 'Performance bottlenecks and optimization' },
-    { id: 'product', name: 'Product', alias: 'product', icon: 'PM', color: '#00BCD4', description: 'Requirements and user experience' },
-    { id: 'devops', name: 'DevOps', alias: 'devops', icon: 'OP', color: '#607D8B', description: 'Deployment, monitoring, and CI/CD' },
+    { id: 'code-reviewer', name: t('input.agent.codeReviewer.name'), alias: 'code-reviewer', icon: 'CR', color: '#4CAF50', description: t('input.agent.codeReviewer.description') },
+    { id: 'architect', name: t('input.agent.architect.name'), alias: 'architect', icon: 'AR', color: '#2196F3', description: t('input.agent.architect.description') },
+    { id: 'tester', name: t('input.agent.tester.name'), alias: 'tester', icon: 'TS', color: '#FF9800', description: t('input.agent.tester.description') },
+    { id: 'security', name: t('input.agent.security.name'), alias: 'security', icon: 'SEC', color: '#F44336', description: t('input.agent.security.description') },
+    { id: 'performance', name: t('input.agent.performance.name'), alias: 'performance', icon: 'PF', color: '#9C27B0', description: t('input.agent.performance.description') },
+    { id: 'product', name: t('input.agent.product.name'), alias: 'product', icon: 'PM', color: '#00BCD4', description: t('input.agent.product.description') },
+    { id: 'devops', name: t('input.agent.devops.name'), alias: 'devops', icon: 'OP', color: '#607D8B', description: t('input.agent.devops.description') },
   ];
 
   const filteredSkills = skillFilter
@@ -184,7 +186,7 @@ export const InputArea = ({
                 {file.type.startsWith('image/') ? (
                   <img
                     src={file.url}
-                    alt="preview"
+                    alt={t('input.filePreviewAlt')}
                     className="w-16 h-16 object-cover rounded-lg border border-white/10"
                   />
                 ) : (
@@ -229,13 +231,13 @@ export const InputArea = ({
                 <div className="w-1 h-6 bg-accent animate-pulse rounded-full delay-75" />
                 <div className="w-1 h-3 bg-accent animate-pulse rounded-full delay-150" />
                 <div className="w-1 h-5 bg-accent animate-pulse rounded-full delay-100" />
-                <span className="text-xs text-white/40 ml-2">Listening...</span>
+                <span className="text-xs text-white/40 ml-2">{t('input.listening')}</span>
               </div>
               <button
                 onClick={toggleRecording}
                 className="text-accent text-[14px] font-medium"
               >
-                Done
+                {t('common.done')}
               </button>
             </div>
           ) : (
@@ -245,7 +247,7 @@ export const InputArea = ({
               value={input}
               onChange={handleTextareaChange}
               onFocus={onFocus}
-              placeholder={isConnected ? 'Message... (/ for commands, @ for multi-agent discussion)' : 'Connect to start...'}
+              placeholder={isConnected ? t('input.placeholder.connected') : t('input.placeholder.disconnected')}
               className="w-full bg-transparent text-white px-4 py-2.5 resize-none focus:outline-none text-[16px] max-h-[120px] disabled:opacity-50"
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -261,11 +263,11 @@ export const InputArea = ({
           {showSkills && (
             <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
               <div className="p-2 border-b border-white/10">
-                <span className="text-xs text-white/50">Select a skill</span>
+                <span className="text-xs text-white/50">{t('input.skills.title')}</span>
               </div>
               <div className="max-h-[200px] overflow-y-auto">
                 {filteredSkills.length === 0 ? (
-                  <div className="p-3 text-xs text-white/40">No matching skills found</div>
+                  <div className="p-3 text-xs text-white/40">{t('input.skills.empty')}</div>
                 ) : (
                   filteredSkills.map(skill => (
                     <button
@@ -288,11 +290,11 @@ export const InputArea = ({
           {showAgents && (
             <div className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-white/10 rounded-xl shadow-lg overflow-hidden z-50">
               <div className="p-2 border-b border-white/10">
-                <span className="text-xs text-white/50">@ Choose agents (multi-select)</span>
+                <span className="text-xs text-white/50">{t('input.agents.title')}</span>
               </div>
               <div className="max-h-[280px] overflow-y-auto">
                 {filteredAgents.length === 0 ? (
-                  <div className="p-3 text-xs text-white/40">No matching agents found</div>
+                  <div className="p-3 text-xs text-white/40">{t('input.agents.empty')}</div>
                 ) : (
                   filteredAgents.map(agent => (
                     <button

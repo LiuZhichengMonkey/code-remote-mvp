@@ -1,5 +1,8 @@
 import { ChatSession, Provider } from '../types';
-import { getProviderLabel, RECONNECTING_AFTER_REFRESH_STATUS_LABEL } from '../chatUiShared';
+import {
+  getReconnectPlaceholderContent,
+  RECONNECTING_AFTER_REFRESH_STATUS_LABEL
+} from '../chatUiShared';
 
 export const RUNNING_SESSIONS_STORAGE_KEY = 'coderemote_running_sessions';
 export const ACTIVE_RUNNING_SESSION_STORAGE_KEY = 'coderemote_active_running_session';
@@ -141,7 +144,6 @@ export const removeCachedRunningSessionEntry = (sessionId: string): void => {
 export const createReconnectPlaceholderSession = (entry: RunningSessionCacheEntry): ChatSession => {
   const timestamp = Date.now();
   const provider = entry.provider || 'claude';
-  const providerLabel = getProviderLabel(provider);
 
   return {
     id: entry.sessionId,
@@ -151,7 +153,7 @@ export const createReconnectPlaceholderSession = (entry: RunningSessionCacheEntr
     messages: [{
       id: `${RECONNECT_PLACEHOLDER_MESSAGE_PREFIX}${entry.sessionId}`,
       role: 'model',
-      content: `${providerLabel} is still running. Restoring live progress after refresh...`,
+      content: getReconnectPlaceholderContent(provider),
       timestamp,
       status: 'sent',
       process: {
