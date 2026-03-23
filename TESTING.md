@@ -41,12 +41,25 @@ Copy-Item .\config\coderemote.example.json .\config\coderemote.local.json
 .\scripts\windows\start.ps1
 ```
 
+如果浏览器提示连接被拒绝，改用：
+
+```powershell
+.\scripts\windows\start.ps1 -Foreground
+```
+
 预期结果：
 
 - `http://localhost:<port>` 可打开
 - `ws://localhost:<port>` 可连接
 - `runtime/logs/server.out.log` 与 `runtime/logs/server.err.log` 生成
 - `/health` 返回 200
+
+建议额外确认：
+
+- `http://127.0.0.1:<port>` 可打开
+- `ws://127.0.0.1:<port>` 可连接
+
+如果本机使用 `localhost` 有问题，但 `127.0.0.1` 正常，优先继续使用 `127.0.0.1` 测试。
 
 ## 3. Claude / Codex 基础冒烟
 

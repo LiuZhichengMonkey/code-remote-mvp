@@ -10,7 +10,7 @@ config        仓库级配置模板与本地配置
 scripts       启动、安装、自启动脚本
 runtime       日志、上传、讨论会话、报告等运行产物
 examples      集成示例与多智能体示例
-tests         根目录补充测试与截图
+tests         仓库级补充测试，浏览器冒烟脚本位于 tests/e2e/agent-browser
 ```
 
 约束：
@@ -86,6 +86,12 @@ flutter run
 ```powershell
 .\scripts\windows\setup.ps1
 .\scripts\windows\start.ps1
+```
+
+如果要排查启动或本地连接问题，优先使用：
+
+```powershell
+.\scripts\windows\start.ps1 -Foreground
 ```
 
 只在需要单独调试某个应用时，才直接进入 `apps/server` 或 `apps/web` 运行命令。
