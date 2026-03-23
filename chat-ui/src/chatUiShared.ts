@@ -5,6 +5,9 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   codex: 'Codex'
 };
 
+export const RECONNECTING_AFTER_REFRESH_STATUS_LABEL = 'Reconnecting after refresh';
+export const RESTORED_RUNNING_STATUS_LABEL = 'Restored after refresh. Waiting for the next live update...';
+
 export const getProviderLabel = (provider?: Provider): string => PROVIDER_LABELS[provider || 'claude'];
 
 const LEGACY_MOJIBAKE_REPLACEMENTS: Array<[string, string]> = [
@@ -201,7 +204,7 @@ export const createReconnectedRunningMessage = (provider: Provider, timestamp: n
   ...createStreamingModelMessage(provider, timestamp),
   process: appendMessageProcessEvent(undefined, provider, {
     type: 'status',
-    label: 'Restored after refresh. Waiting for the next live update...',
+    label: RESTORED_RUNNING_STATUS_LABEL,
     timestamp
   })
 });

@@ -73,6 +73,7 @@ import {
   findLocalSession as findLocalSessionInCollections,
   mergeResumedSession,
   mergeSessionSummaryList,
+  restoreRunningSessionMessage,
   resolveRunningSessionDetails as resolveRunningSessionDetailsInCollections,
   resolveSessionProvider as resolveSessionProviderInCollections,
   sessionHasRenderableResult as sessionHasRenderableResultInCollections
@@ -1178,6 +1179,9 @@ export default function App() {
       ? existingDetails.projectId
       : options.projectId || undefined;
     const provider = options?.provider || existingDetails.provider || 'claude';
+    const nextRunningSessions = new Set(runningSessionsRef.current);
+    nextRunningSessions.add(sessionId);
+    runningSessionsRef.current = nextRunningSessions;
 
     setRunningSessions(prev => {
       if (prev.has(sessionId)) {
@@ -1205,6 +1209,10 @@ export default function App() {
     if (!sessionId) {
       return;
     }
+
+    const nextRunningSessions = new Set(runningSessionsRef.current);
+    nextRunningSessions.delete(sessionId);
+    runningSessionsRef.current = nextRunningSessions;
 
     setRunningSessions(prev => {
       if (!prev.has(sessionId)) {
@@ -1251,6 +1259,10 @@ export default function App() {
       ? existingDetails.projectId
       : options.projectId || undefined;
     const provider = options?.provider || existingDetails.provider || 'claude';
+    const nextRunningSessions = new Set(runningSessionsRef.current);
+    nextRunningSessions.delete(oldSessionId);
+    nextRunningSessions.add(newSessionId);
+    runningSessionsRef.current = nextRunningSessions;
 
     setRunningSessions(prev => {
       if (!prev.has(oldSessionId) && prev.has(newSessionId)) {
@@ -1276,6 +1288,99 @@ export default function App() {
       provider
     });
   }, [markSessionAsRunning, resolveRunningSessionDetails]);
+
+  const ensureRunningSessionShell = useCallback((
+    sessionId: string,
+    options?: {
+      title?: string;
+      projectId?: string | null;
+      provider?: Provider;
+      timestamp?: number;
+    }
+  ) => {
+    const timestamp = options?.timestamp || Date.now();
+    const provider = options?.provider || 'claude';
+    const title = normalizeLegacyDisplayText(options?.title || sessionId.substring(0, 12));
+    const projectId = options?.projectId || undefined;
+    const shell: ChatSession = {
+      id: sessionId,
+      title,
+      createdAt: timestamp,
+      provider,
+      messages: [createReconnectedRunningMessage(provider, timestamp)]
+    };
+
+    setSessions(prev => (
+      prev.some(session => session.id === sessionId)
+        ? prev
+        : [shell, ...prev]
+    ));
+
+    if (projectId) {
+      setProjectSessions(prev => {
+        const projectList = prev[projectId] || [];
+        if (projectList.some(session => session.id === sessionId)) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [projectId]: [shell, ...projectList]
+        };
+      });
+    }
+  }, []);
+
+  const applyRunningSessionSnapshot = useCallback((
+    sessionId?: string | null,
+    options?: {
+      title?: string;
+      projectId?: string | null;
+      provider?: Provider;
+      timestamp?: number;
+    }
+  ) => {
+    if (!sessionId) {
+      return;
+    }
+
+    const existingDetails = resolveRunningSessionDetails(sessionId);
+    const title = normalizeLegacyDisplayText(options?.title || existingDetails.title || sessionId.substring(0, 12));
+    const projectId = options?.projectId === undefined
+      ? existingDetails.projectId
+      : options.projectId || undefined;
+    const provider = options?.provider || existingDetails.provider || 'claude';
+    const timestamp = options?.timestamp || Date.now();
+
+    markSessionAsRunning(sessionId, {
+      title,
+      projectId,
+      provider
+    });
+
+    const localSession = findLocalSession(sessionId, projectId || null);
+    if (!localSession) {
+      ensureRunningSessionShell(sessionId, {
+        title,
+        projectId,
+        provider,
+        timestamp
+      });
+      return;
+    }
+
+    updateSessionAcrossCollections(sessionId, session => restoreRunningSessionMessage({
+      ...session,
+      title,
+      provider
+    }, provider, timestamp));
+  }, [
+    ensureRunningSessionShell,
+    findLocalSession,
+    markSessionAsRunning,
+    resolveRunningSessionDetails,
+    updateSessionAcrossCollections
+  ]);
 
   const sessionHasRenderableResult = useCallback((
     sessionId?: string | null,
@@ -1525,10 +1630,13 @@ export default function App() {
 
             runningSessionRehydrationTimeoutRef.current = window.setTimeout(() => {
               const confirmedSessionIds = serverRehydratedRunningSessionsRef.current;
+              const nextRunningSessions = new Set(
+                Array.from(runningSessionsRef.current).filter(sessionId => confirmedSessionIds.has(sessionId))
+              );
 
-              setRunningSessions(prev => (
-                new Set(Array.from(prev).filter(sessionId => confirmedSessionIds.has(sessionId)))
-              ));
+              runningSessionsRef.current = nextRunningSessions;
+
+              setRunningSessions(nextRunningSessions);
               setRunningSessionsInfo(prev => {
                 const next = new Map(prev);
                 for (const sessionId of Array.from(next.keys())) {
@@ -1632,18 +1740,13 @@ export default function App() {
             });
 
             serverRehydratedRunningSessionsRef.current = new Set(newRunningSet);
+            const nextRunningSessions = shouldPreserveLocalRunningState
+              ? new Set([...runningSessionsRef.current, ...newRunningSet])
+              : new Set(newRunningSet);
 
-            setRunningSessions(prev => {
-              if (!shouldPreserveLocalRunningState) {
-                return newRunningSet;
-              }
+            runningSessionsRef.current = nextRunningSessions;
 
-              const next = new Set(prev);
-              for (const sessionId of newRunningSet) {
-                next.add(sessionId);
-              }
-              return next;
-            });
+            setRunningSessions(nextRunningSessions);
             setRunningSessionsInfo(prev => {
               if (!shouldPreserveLocalRunningState) {
                 return newInfoMap;
@@ -1662,6 +1765,12 @@ export default function App() {
               const preferredSession = msg.sessions.find(session => (session.sessionId || session.id) === preferredSessionId) || msg.sessions[0];
               const preferredRunningSessionId = preferredSession.sessionId || preferredSession.id;
               if (preferredRunningSessionId) {
+                ensureRunningSessionShell(preferredRunningSessionId, {
+                  title: preferredSession.title,
+                  projectId: preferredSession.projectId,
+                  provider: preferredSession.provider,
+                  timestamp: msg.timestamp || Date.now()
+                });
                 setCurrentSessionId(preferredRunningSessionId);
                 currentSessionIdRef.current = preferredRunningSessionId;
                 setCurrentProjectId(preferredSession.projectId || null);
@@ -1684,13 +1793,28 @@ export default function App() {
             currentSessionIdRef.current = msg.sessionId;
             setCurrentProjectId(msg.projectId || null);
             syncNewSessionProvider(msg.provider);
-            markSessionAsRunning(msg.sessionId, {
+            applyRunningSessionSnapshot(msg.sessionId, {
               title: msg.title,
               projectId: msg.projectId,
-              provider: msg.provider
+              provider: msg.provider,
+              timestamp: msg.timestamp || Date.now()
             });
             sendResumeRequest(newWs, msg.sessionId, msg.projectId, msg.provider);
             debugLog('Reconnected to running session:', msg.sessionId);
+          }
+        } else if (msg.type === 'session_running_state') {
+          debugLog('Running session snapshot on server:', msg.sessionId, msg.reason);
+          if (msg.sessionId) {
+            serverRehydratedRunningSessionsRef.current.add(msg.sessionId);
+            if (pendingRunningSessionRestoreRef.current?.sessionId === msg.sessionId) {
+              pendingRunningSessionRestoreRef.current = null;
+            }
+            applyRunningSessionSnapshot(msg.sessionId, {
+              title: msg.title,
+              projectId: msg.projectId,
+              provider: msg.provider,
+              timestamp: msg.timestamp || Date.now()
+            });
           }
         } else if (msg.type === 'discussion_running') {
           // Rehydrated running discussion after reconnecting
@@ -2390,10 +2514,12 @@ export default function App() {
     wsRef.current = newWs;
     setWs(newWs);
   }, [
+    applyRunningSessionSnapshot,
     clearRunningSessionState,
     clearRunningSessionRehydrationTimeout,
     clearUiPreferencesTimeout,
     currentProvider,
+    ensureRunningSessionShell,
     markSessionAsRunning,
     renameRunningSessionState,
     requestUiPreferences,

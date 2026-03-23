@@ -5,6 +5,7 @@ import {
   mergeResumedSession,
   mergeSessionSummaryList,
   renameRunningSessionCollections,
+  restoreRunningSessionMessage,
   resolveRunningSessionDetails,
   resolveSessionProvider,
   sessionHasRenderableResult
@@ -313,5 +314,71 @@ describe('chatSessionState helpers', () => {
     };
 
     expect(sessionHasRenderableResult([placeholderOnly], {}, 'running-3')).toBe(false);
+  });
+
+  it('restores a running placeholder into a sending model message', () => {
+    const session: ChatSession = {
+      id: 'running-4',
+      title: 'Running session',
+      createdAt: 50,
+      provider: 'codex',
+      messages: [{
+        id: 'reconnect_running-4',
+        role: 'model',
+        content: 'Codex is still running. Restoring live progress after refresh...',
+        timestamp: 51,
+        status: 'sent',
+        process: {
+          provider: 'codex',
+          state: 'running',
+          events: [{
+            type: 'status',
+            label: 'Reconnecting after refresh',
+            timestamp: 51
+          }]
+        }
+      }]
+    };
+
+    const restored = restoreRunningSessionMessage(session, 'codex', 52);
+
+    expect(restored.messages).toHaveLength(1);
+    expect(restored.messages[0]?.status).toBe('sending');
+    expect(restored.messages[0]?.process?.state).toBe('running');
+    expect(restored.messages[0]?.process?.events.some(event => (
+      event.type === 'status'
+      && event.label === 'Restored after refresh. Waiting for the next live update...'
+    ))).toBe(true);
+  });
+
+  it('does not duplicate the restored-after-refresh status event', () => {
+    const session: ChatSession = {
+      id: 'running-5',
+      title: 'Running session',
+      createdAt: 60,
+      provider: 'codex',
+      messages: [{
+        id: 'm1',
+        role: 'model',
+        content: '',
+        timestamp: 61,
+        status: 'sending',
+        process: {
+          provider: 'codex',
+          state: 'running',
+          events: [{
+            type: 'status',
+            label: 'Restored after refresh. Waiting for the next live update...',
+            timestamp: 61
+          }]
+        }
+      }]
+    };
+
+    const restored = restoreRunningSessionMessage(session, 'codex', 62);
+
+    expect(restored.messages[0]?.process?.events).toHaveLength(1);
+    expect(restored.messages[0]?.timestamp).toBe(62);
+    expect(restored.messages[0]?.status).toBe('sending');
   });
 });

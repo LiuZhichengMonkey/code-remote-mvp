@@ -1,5 +1,5 @@
 import { ChatSession, Provider } from '../types';
-import { getProviderLabel } from '../chatUiShared';
+import { getProviderLabel, RECONNECTING_AFTER_REFRESH_STATUS_LABEL } from '../chatUiShared';
 
 export const RUNNING_SESSIONS_STORAGE_KEY = 'coderemote_running_sessions';
 export const ACTIVE_RUNNING_SESSION_STORAGE_KEY = 'coderemote_active_running_session';
@@ -159,7 +159,7 @@ export const createReconnectPlaceholderSession = (entry: RunningSessionCacheEntr
         state: 'running',
         events: [{
           type: 'status',
-          label: 'Reconnecting after refresh',
+          label: RECONNECTING_AFTER_REFRESH_STATUS_LABEL,
           timestamp
         }]
       }

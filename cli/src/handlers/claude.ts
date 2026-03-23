@@ -55,6 +55,8 @@ interface SessionRunState {
   bufferedLogs: LogMessage[];
 }
 
+type RunningStateSnapshotReason = 'reconnect' | 'focus' | 'resume';
+
 export class ClaudeHandler {
   private sessionManager: SessionManager;
   private commandHandler: CommandHandler;
@@ -153,6 +155,29 @@ export class ClaudeHandler {
 
     state.accumulatedContent = '';
     state.accumulatedThinking = '';
+  }
+
+  private sendRunningStateSnapshot(
+    sessionId: string,
+    state: SessionRunState,
+    reason: RunningStateSnapshotReason
+  ): void {
+    if (!state.ws || state.ws.readyState !== 1) {
+      return;
+    }
+
+    const session = this.sessionManager.get(sessionId, state.provider);
+    state.ws.send(JSON.stringify({
+      type: 'session_running_state',
+      sessionId,
+      title: session?.title || sessionId.substring(0, 12),
+      projectId: session ? this.getProjectIdForSession(session) : undefined,
+      provider: session?.provider || state.provider,
+      hasBufferedContent: Boolean(state.accumulatedContent || state.accumulatedThinking),
+      hasBufferedLogs: state.bufferedLogs.length > 0,
+      reason,
+      timestamp: Date.now()
+    }));
   }
 
   private getProjectIdForSession(session: ClaudeSession): string | undefined {
@@ -316,6 +341,7 @@ export class ClaudeHandler {
       return;
     }
 
+    this.sendRunningStateSnapshot(sessionId, state, 'focus');
     this.flushBufferedState(sessionId, state);
   }
 
@@ -333,6 +359,7 @@ export class ClaudeHandler {
     for (const [sessionId, state] of this.runningSessions) {
       if (state.isRunning) {
         state.ws = ws;
+        this.sendRunningStateSnapshot(sessionId, state, 'reconnect');
         if (this.activeSessionId === sessionId) {
           this.flushBufferedState(sessionId, state);
         }
@@ -844,6 +871,15 @@ export class ClaudeHandler {
           totalMessages: result.totalMessages,
           timestamp: Date.now()
         }));
+
+        const runningState = this.runningSessions.get(result.session.id);
+        if (runningState?.isRunning) {
+          runningState.ws = ws;
+          this.sendRunningStateSnapshot(result.session.id, runningState, 'resume');
+          if (this.activeSessionId === result.session.id) {
+            this.flushBufferedState(result.session.id, runningState);
+          }
+        }
         break;
       }
 

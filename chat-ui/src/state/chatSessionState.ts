@@ -1,5 +1,12 @@
 import { ChatSession, Message, Provider } from '../types';
-import { normalizeLegacyDisplayText } from '../chatUiShared';
+import {
+  RESTORED_RUNNING_STATUS_LABEL,
+  RECONNECTING_AFTER_REFRESH_STATUS_LABEL,
+  appendMessageProcessEvent,
+  createReconnectedRunningMessage,
+  normalizeLegacyDisplayText,
+  setMessageProcessState
+} from '../chatUiShared';
 import { RECONNECT_PLACEHOLDER_MESSAGE_PREFIX } from './chatStateCache';
 
 export interface RunningSessionInfo {
@@ -9,8 +16,8 @@ export interface RunningSessionInfo {
 }
 
 const RECONNECT_PLACEHOLDER_STATUS_LABELS = new Set([
-  'Reconnecting after refresh',
-  'Restored after refresh. Waiting for the next live update...'
+  RECONNECTING_AFTER_REFRESH_STATUS_LABEL,
+  RESTORED_RUNNING_STATUS_LABEL
 ]);
 
 const isReconnectPlaceholderMessage = (message: Message): boolean => {
@@ -365,6 +372,46 @@ export const mergeResumedSession = (
   return mergeResumedSessionWithLocalState(existingSession, resumedSession, {
     preserveRunningState: isRunning
   });
+};
+
+export const restoreRunningSessionMessage = (
+  session: ChatSession,
+  provider: Provider,
+  timestamp: number
+): ChatSession => {
+  const lastMessage = session.messages[session.messages.length - 1];
+
+  if (lastMessage && lastMessage.role === 'model' && lastMessage.status !== 'error') {
+    const alreadyMarkedAsRestored = lastMessage.process?.events.some(event => (
+      event.type === 'status' && event.label === RESTORED_RUNNING_STATUS_LABEL
+    )) || false;
+
+    return {
+      ...session,
+      provider,
+      messages: [
+        ...session.messages.slice(0, -1),
+        {
+          ...lastMessage,
+          timestamp,
+          status: 'sending',
+          process: alreadyMarkedAsRestored
+            ? setMessageProcessState(lastMessage.process, provider, 'running')
+            : appendMessageProcessEvent(lastMessage.process, provider, {
+                type: 'status',
+                label: RESTORED_RUNNING_STATUS_LABEL,
+                timestamp
+              }, 'running')
+        }
+      ]
+    };
+  }
+
+  return {
+    ...session,
+    provider,
+    messages: [...session.messages, createReconnectedRunningMessage(provider, timestamp)]
+  };
 };
 
 export const renameRunningSessionCollections = (

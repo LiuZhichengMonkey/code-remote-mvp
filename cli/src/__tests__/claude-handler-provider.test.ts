@@ -350,4 +350,39 @@ describe('ClaudeHandler provider behavior', () => {
 
     expect(sendError).toHaveBeenCalledWith('CLI_NOT_FOUND', 'Codex CLI not found');
   });
+
+  test('reconnect emits a running state snapshot for a silent codex task', async () => {
+    const handler = new ClaudeHandler('E:/code-remote-mvp');
+    const ws = createWebSocketMock();
+    const reconnectWs = createWebSocketMock();
+    const sendError = jest.fn();
+    let resolveRun: ((value: { response: string; providerSessionId: string }) => void) | undefined;
+
+    mockCodexEngine.sendMessage.mockImplementation(async () => {
+      return await new Promise(resolve => {
+        resolveRun = resolve as (value: { response: string; providerSessionId: string }) => void;
+      });
+    });
+
+    const runPromise = handler.handleClaudeMessage(ws, 'hello codex', sendError, undefined, undefined, undefined, 'codex');
+
+    await Promise.resolve();
+
+    expect(handler.updateRunningWebSocket(reconnectWs)).toBe(true);
+
+    const sent = parseSentMessages(reconnectWs);
+    expect(sent).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'session_running_state',
+        sessionId: 'temp-codex-1',
+        provider: 'codex',
+        reason: 'reconnect'
+      })
+    ]));
+
+    resolveRun?.({ response: 'codex response', providerSessionId: 'codex-real-session' });
+    await runPromise;
+
+    expect(sendError).not.toHaveBeenCalled();
+  });
 });
