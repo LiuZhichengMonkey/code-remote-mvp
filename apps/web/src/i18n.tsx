@@ -43,6 +43,7 @@ const messages = {
     'common.unknownError': 'Unknown error',
 
     'header.newProviderSession': 'New {provider} session',
+    'header.testModeBadge': 'Test · {ownerId}',
 
     'session.defaultTitle': 'New Chat',
 
@@ -56,6 +57,8 @@ const messages = {
     'settings.bridge.tokenReady': 'Token ready',
     'settings.bridge.tokenMissing': 'Token missing',
     'settings.bridge.urlPlaceholder': 'WebSocket URL (ws://...)',
+    'settings.access.testerBadge': 'Tester · {ownerId}',
+    'settings.access.testerNotice': 'Connected in tester mode as {ownerId}. You can only view and manage your own test sessions. Shared runtime and workspace settings are hidden.',
 
     'settings.runtime.title': 'Runtime Profile',
     'settings.runtime.subtitle': 'Manage local Claude and Codex runtime settings',
@@ -209,6 +212,7 @@ const messages = {
     'common.unknownError': '未知错误',
 
     'header.newProviderSession': '新建 {provider} 会话',
+    'header.testModeBadge': '测试 · {ownerId}',
 
     'session.defaultTitle': '新会话',
 
@@ -222,6 +226,8 @@ const messages = {
     'settings.bridge.tokenReady': '令牌已就绪',
     'settings.bridge.tokenMissing': '令牌缺失',
     'settings.bridge.urlPlaceholder': 'WebSocket 地址 (ws://...)',
+    'settings.access.testerBadge': '测试用户 · {ownerId}',
+    'settings.access.testerNotice': '当前以测试模式连接，身份为 {ownerId}。你只能查看和管理自己的测试会话，共享运行配置和工作区设置已被隐藏。',
 
     'settings.runtime.title': '运行配置',
     'settings.runtime.subtitle': '管理本地 Claude 与 Codex 运行时设置',

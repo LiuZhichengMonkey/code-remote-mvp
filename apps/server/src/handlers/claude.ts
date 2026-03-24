@@ -17,8 +17,11 @@ import { SessionStorage } from '../claude/storage';
 import { CodexCodeEngine } from '../codex';
 import { CodexProjectInfo, CodexSessionStorage } from '../codexStorage';
 import { parseAgentMentions, hasAgentMention, listAvailableAgents, loadAgentContext, AgentContext } from '../agent';
+import { AccessIdentity, createAdminAccessIdentity, isAdminAccess } from '../accessControl';
+import { SessionAccessStore } from '../sessionAccess';
 import { CommandHandler } from './commands';
 import { DEFAULT_PROVIDER, Provider, decodeProjectId, encodeProjectId } from '../session/provider';
+import { resolveSessionWorkspace } from '../sessionWorkspace';
 
 interface ProviderProjectInfo {
   id: string;
@@ -60,6 +63,7 @@ type RunningStateSnapshotReason = 'reconnect' | 'focus' | 'resume';
 export class ClaudeHandler {
   private sessionManager: SessionManager;
   private commandHandler: CommandHandler;
+  private accessStore: SessionAccessStore;
   private workspaceRoot?: string;
   private runningSessions: Map<string, SessionRunState> = new Map();
   private activeSessionId: string | null = null;
@@ -76,12 +80,47 @@ export class ClaudeHandler {
   constructor(workspaceRoot?: string) {
     this.sessionManager = new SessionManager(workspaceRoot);
     this.commandHandler = new CommandHandler(workspaceRoot);
+    this.accessStore = new SessionAccessStore(workspaceRoot);
     this.workspaceRoot = workspaceRoot;
     console.log(`[ClaudeHandler] Workspace: ${workspaceRoot || process.cwd()}`);
   }
 
   private createEngine(provider: Provider): ProviderEngine {
     return provider === 'codex' ? new CodexCodeEngine() : new ClaudeCodeEngine();
+  }
+
+  private resolveSessionWorkspaceContext(accessIdentity?: AccessIdentity): { cwd: string; projectId: string } {
+    const context = resolveSessionWorkspace(this.workspaceRoot || process.cwd(), accessIdentity);
+    return {
+      cwd: context.workspacePath,
+      projectId: context.projectId
+    };
+  }
+
+  private applySessionWorkspaceContext(session: ClaudeSession, accessIdentity?: AccessIdentity): ClaudeSession {
+    const context = this.resolveSessionWorkspaceContext(accessIdentity);
+
+    if (!session.cwd) {
+      session.cwd = context.cwd;
+    }
+
+    if (!session.projectId) {
+      session.projectId = context.projectId;
+    }
+
+    return session;
+  }
+
+  private sessionAlreadyContainsAssistantResponse(session: ClaudeSession | null, response: string): boolean {
+    if (!session || !response.trim()) {
+      return false;
+    }
+
+    const lastAssistantMessage = [...session.messages]
+      .reverse()
+      .find(message => message.role === 'assistant');
+
+    return lastAssistantMessage?.content.trim() === response.trim();
   }
 
   private normalizeProviderError(
@@ -181,13 +220,129 @@ export class ClaudeHandler {
   }
 
   private getProjectIdForSession(session: ClaudeSession): string | undefined {
-    const rawProjectId = session.projectId || this.sessionManager.getProjectId(session.provider);
+    const rawProjectId = session.projectId
+      || (session.cwd ? resolveSessionWorkspace(session.cwd).projectId : undefined)
+      || this.sessionManager.getProjectId(session.provider);
     return rawProjectId ? encodeProjectId(session.provider, rawProjectId) : undefined;
+  }
+
+  private getRawProjectIdForSession(session: Pick<ClaudeSession, 'provider' | 'projectId' | 'cwd'>): string {
+    return session.projectId
+      || (session.cwd ? resolveSessionWorkspace(session.cwd).projectId : '')
+      || this.sessionManager.getProjectId(session.provider);
+  }
+
+  private getEffectiveAccessIdentity(accessIdentity?: AccessIdentity): AccessIdentity {
+    return accessIdentity || createAdminAccessIdentity();
+  }
+
+  private assignSessionAccess(
+    sessionId: string,
+    provider: Provider,
+    projectId: string,
+    accessIdentity?: AccessIdentity
+  ): void {
+    this.accessStore.assignSession(provider, projectId, sessionId, this.getEffectiveAccessIdentity(accessIdentity));
+  }
+
+  private moveSessionAccess(
+    oldSessionId: string,
+    newSessionId: string,
+    provider: Provider,
+    projectId: string
+  ): void {
+    this.accessStore.moveSession(provider, projectId, oldSessionId, newSessionId);
+  }
+
+  private canAccessSessionInfo(
+    session: Pick<SessionInfo, 'id' | 'provider' | 'projectId'>,
+    accessIdentity?: AccessIdentity
+  ): boolean {
+    const identity = this.getEffectiveAccessIdentity(accessIdentity);
+    if (isAdminAccess(identity)) {
+      return true;
+    }
+
+    if (!session.projectId) {
+      return false;
+    }
+
+    const projectRef = decodeProjectId(session.projectId);
+    const rawProjectId = projectRef?.projectKey || session.projectId;
+    const provider = projectRef?.provider || session.provider;
+
+    return this.accessStore.canAccessSession(identity, provider, rawProjectId, session.id);
+  }
+
+  private filterSessionsByAccess(sessions: SessionInfo[], accessIdentity?: AccessIdentity): SessionInfo[] {
+    const identity = this.getEffectiveAccessIdentity(accessIdentity);
+    if (isAdminAccess(identity)) {
+      return sessions;
+    }
+
+    return sessions.filter(session => this.canAccessSessionInfo(session, identity));
+  }
+
+  private findSessionForAccess(sessionId: string, provider?: Provider): ClaudeSession | null {
+    const cachedSession = this.sessionManager.get(sessionId, provider);
+    if (cachedSession) {
+      return cachedSession;
+    }
+
+    const providersToTry: Provider[] = provider ? [provider] : ['claude', 'codex'];
+
+    for (const candidate of providersToTry) {
+      const storage = this.sessionManager.getStorageByProvider(candidate);
+      const session = storage.load(sessionId);
+      if (session) {
+        return session;
+      }
+    }
+
+    const record = this.accessStore.findRecordBySessionId(sessionId, provider);
+    if (!record) {
+      return null;
+    }
+
+    return this.loadCrossProjectSession(record.provider, record.projectId, sessionId);
+  }
+
+  canAccessSession(
+    sessionId: string,
+    accessIdentity?: AccessIdentity,
+    projectId?: string,
+    provider?: Provider
+  ): boolean {
+    const identity = this.getEffectiveAccessIdentity(accessIdentity);
+    if (isAdminAccess(identity)) {
+      return true;
+    }
+
+    if (projectId) {
+      const projectRef = decodeProjectId(projectId);
+      const rawProjectId = projectRef?.projectKey || projectId;
+      const effectiveProvider = projectRef?.provider || provider;
+      return effectiveProvider
+        ? this.accessStore.canAccessSession(identity, effectiveProvider, rawProjectId, sessionId)
+        : false;
+    }
+
+    const session = this.findSessionForAccess(sessionId, provider);
+    if (!session) {
+      return false;
+    }
+
+    return this.accessStore.canAccessSession(
+      identity,
+      session.provider,
+      this.getRawProjectIdForSession(session),
+      session.id
+    );
   }
 
   private resolveProvider(sessionId?: string, projectId?: string, provider?: Provider): Provider {
     if (sessionId) {
-      const existingSession = this.sessionManager.get(sessionId);
+      const existingSession = this.findSessionForAccess(sessionId, provider);
       if (existingSession) {
         return existingSession.provider;
       }
@@ -231,7 +386,7 @@ export class ClaudeHandler {
       : SessionStorage.renameSessionFromProject(rawProjectId, sessionId, newTitle);
   }
 
-  private listAllProjects(): ProviderProjectInfo[] {
+  private listAllProjects(accessIdentity?: AccessIdentity): ProviderProjectInfo[] {
     const claudeProjects: ProviderProjectInfo[] = SessionStorage.listAllProjects().map(project => ({
       id: encodeProjectId('claude', project.id),
       rawId: project.id,
@@ -250,10 +405,27 @@ export class ClaudeHandler {
       lastActivity: project.lastActivity
     }));
 
-    return [...claudeProjects, ...codexProjects].sort((a, b) => b.lastActivity - a.lastActivity);
+    const projects = [...claudeProjects, ...codexProjects].sort((a, b) => b.lastActivity - a.lastActivity);
+    const identity = this.getEffectiveAccessIdentity(accessIdentity);
+    if (isAdminAccess(identity)) {
+      return projects;
+    }
+
+    return projects.flatMap(project => {
+      const sessions = this.listSessionsByProject(project.id, 1000, identity);
+      if (sessions.length === 0) {
+        return [];
+      }
+
+      return [{
+        ...project,
+        sessionCount: sessions.length,
+        lastActivity: sessions.reduce((latest, session) => Math.max(latest, session.lastActivity || session.createdAt), 0)
+      }];
+    });
   }
 
-  private listSessionsByProject(projectId: string, limit: number = 1000): SessionInfo[] {
+  private listSessionsByProject(projectId: string, limit: number = 1000, accessIdentity?: AccessIdentity): SessionInfo[] {
     const projectRef = decodeProjectId(projectId);
     if (!projectRef) {
       return [];
@@ -263,11 +435,11 @@ export class ClaudeHandler {
       ? CodexSessionStorage.listSessionsByProject(projectRef.projectKey, limit)
       : SessionStorage.listSessionsByProject(projectRef.projectKey, limit);
 
-    return sessions.map(session => ({
+    return this.filterSessionsByAccess(sessions.map(session => ({
       ...session,
       provider: projectRef.provider,
       projectId: encodeProjectId(projectRef.provider, projectRef.projectKey)
-    }));
+    })), accessIdentity);
   }
 
   isRunning(): boolean {
@@ -314,7 +486,7 @@ export class ClaudeHandler {
       .map(([sessionId]) => sessionId);
   }
 
-  getRunningSessionSummaries(): Array<{ sessionId: string; title: string; projectId?: string; provider: Provider }> {
+  getRunningSessionSummaries(accessIdentity?: AccessIdentity): Array<{ sessionId: string; title: string; projectId?: string; provider: Provider }> {
     return Array.from(this.runningSessions.entries())
       .filter(([, state]) => state.isRunning)
       .map(([sessionId, state]) => {
@@ -325,7 +497,8 @@ export class ClaudeHandler {
           projectId: session ? this.getProjectIdForSession(session) : undefined,
           provider: session?.provider || state.provider
         };
-      });
+      })
+      .filter(session => this.canAccessSession(session.sessionId, accessIdentity, session.projectId, session.provider));
   }
 
   setActiveSession(sessionId: string | null): void {
@@ -353,18 +526,26 @@ export class ClaudeHandler {
     return this.activeSessionId === sessionId;
   }
 
-  updateRunningWebSocket(ws: WebSocket): boolean {
+  updateRunningWebSocket(ws: WebSocket, accessIdentity?: AccessIdentity): boolean {
     let updated = false;
 
     for (const [sessionId, state] of this.runningSessions) {
-      if (state.isRunning) {
-        state.ws = ws;
-        this.sendRunningStateSnapshot(sessionId, state, 'reconnect');
-        if (this.activeSessionId === sessionId) {
-          this.flushBufferedState(sessionId, state);
-        }
-        updated = true;
+      if (!state.isRunning) {
+        continue;
       }
+
+      const session = this.sessionManager.get(sessionId, state.provider);
+      const projectId = session ? this.getProjectIdForSession(session) : undefined;
+      if (!this.canAccessSession(sessionId, accessIdentity, projectId, state.provider)) {
+        continue;
+      }
+
+      state.ws = ws;
+      this.sendRunningStateSnapshot(sessionId, state, 'reconnect');
+      if (this.activeSessionId === sessionId) {
+        this.flushBufferedState(sessionId, state);
+      }
+      updated = true;
     }
 
     if (updated && this.runningState.isRunning) {
@@ -384,7 +565,11 @@ export class ClaudeHandler {
     return true;
   }
 
-  stopSession(sessionId: string): boolean {
+  stopSession(sessionId: string, accessIdentity?: AccessIdentity, projectId?: string, provider?: Provider): boolean {
+    if (!this.canAccessSession(sessionId, accessIdentity, projectId, provider)) {
+      return false;
+    }
+
     const state = this.runningSessions.get(sessionId);
     if (!state) {
       return false;
@@ -417,6 +602,20 @@ export class ClaudeHandler {
     return stopped;
   }
 
+  stopAccessibleSessions(accessIdentity?: AccessIdentity): boolean {
+    const identity = this.getEffectiveAccessIdentity(accessIdentity);
+    if (isAdminAccess(identity)) {
+      return this.stop();
+    }
+
+    let stopped = false;
+    for (const sessionId of Array.from(this.runningSessions.keys())) {
+      stopped = this.stopSession(sessionId, identity) || stopped;
+    }
+
+    return stopped;
+  }
+
   async handleClaudeMessage(
     ws: WebSocket,
     originalContent: string,
@@ -429,9 +628,15 @@ export class ClaudeHandler {
       type: string;
       data: string;
     }>,
-    provider?: Provider
+    provider?: Provider,
+    accessIdentity?: AccessIdentity
   ): Promise<void> {
-    const targetSessionId = sessionId || this.sessionManager.getCurrent()?.id;
+    if (sessionId && !this.canAccessSession(sessionId, accessIdentity, projectId, provider)) {
+      sendError('SESSION_NOT_FOUND', 'Session not found');
+      return;
+    }
+
+    const targetSessionId = sessionId;
     const requestedProvider = this.resolveProvider(sessionId, projectId, provider);
 
     if (targetSessionId && this.isSessionRunning(targetSessionId)) {
@@ -489,25 +694,42 @@ export class ClaudeHandler {
       }
     }
 
+    const defaultSessionWorkspace = this.resolveSessionWorkspaceContext(accessIdentity);
+    let workingSession: ClaudeSession | null = null;
+
     if (sessionId && projectId) {
       const projectRef = decodeProjectId(projectId);
       if (projectRef) {
         const crossProjectSession = this.loadCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId);
         if (crossProjectSession) {
           this.sessionManager.setSessionFromCrossProject(crossProjectSession);
+          workingSession = crossProjectSession;
         }
       }
     } else if (sessionId) {
-      this.sessionManager.resume(sessionId, requestedProvider);
+      workingSession = this.sessionManager.resume(sessionId, requestedProvider);
+      if (!workingSession) {
+        workingSession = this.findSessionForAccess(sessionId, requestedProvider);
+        if (workingSession) {
+          this.sessionManager.setSessionFromCrossProject(workingSession);
+        }
+      }
     }
 
-    if (!this.sessionManager.getCurrent()) {
-      this.sessionManager.createTemporary(undefined, requestedProvider);
+    if (!workingSession) {
+      workingSession = this.sessionManager.createTemporary(undefined, requestedProvider, defaultSessionWorkspace);
     }
 
-    const sessionBeforePrompt = this.sessionManager.getCurrent();
-    const providerForRun = sessionBeforePrompt?.provider || requestedProvider;
-    const cwd = sessionBeforePrompt?.cwd || this.workspaceRoot || process.cwd();
+    workingSession = this.applySessionWorkspaceContext(workingSession, accessIdentity);
+    this.assignSessionAccess(
+      workingSession.id,
+      workingSession.provider,
+      this.getRawProjectIdForSession(workingSession),
+      accessIdentity
+    );
+
+    const providerForRun = workingSession.provider || requestedProvider;
+    const cwd = workingSession.cwd || defaultSessionWorkspace.cwd;
 
     let promptToSend = content;
     let promptToStore = content;
@@ -538,11 +760,10 @@ export class ClaudeHandler {
     }
 
     const userMessage = createMessage('user', promptToStore);
-    this.sessionManager.addMessage(userMessage);
+    this.sessionManager.addMessageToSession(workingSession.id, userMessage, workingSession.provider);
 
-    const messages = this.sessionManager.getMessagesForAPI();
-    const sessionInfo = this.sessionManager.getCurrent();
-    const currentSessionId = targetSessionId || sessionInfo?.id || `temp-${Date.now()}`;
+    const messages = this.sessionManager.getMessagesForSession(workingSession.id, workingSession.provider);
+    const currentSessionId = targetSessionId || workingSession.id || `temp-${Date.now()}`;
 
     let sessionState = this.runningSessions.get(currentSessionId);
     if (!sessionState) {
@@ -586,9 +807,8 @@ export class ClaudeHandler {
     }));
 
     try {
-      const currentSession = this.sessionManager.getCurrent();
-      const providerSessionId = currentSession ? getProviderSessionId(currentSession) : undefined;
-      const sessionCwd = currentSession?.cwd || cwd;
+      const providerSessionId = getProviderSessionId(workingSession);
+      const sessionCwd = workingSession.cwd || cwd;
 
       const result = await sessionState.engine.sendMessage(
         promptToSend,
@@ -696,12 +916,17 @@ export class ClaudeHandler {
       const returnedProviderSessionId = providerForRun === 'claude'
         ? result.claudeSessionId || result.providerSessionId
         : result.providerSessionId;
-      const existingProviderSessionId = currentSession ? getProviderSessionId(currentSession) : undefined;
+      const existingProviderSessionId = getProviderSessionId(workingSession);
       const responseSessionId = returnedProviderSessionId || sessionIdForCallbacks;
+      let finalSession = workingSession;
 
       if ((!sessionId || sessionId === currentSessionId) && returnedProviderSessionId && returnedProviderSessionId !== currentSessionId) {
-        this.sessionManager.updateSessionId(returnedProviderSessionId);
-        const updatedSession = this.sessionManager.getCurrent();
+        const currentProjectId = this.getRawProjectIdForSession(workingSession);
+        const updatedSession = this.sessionManager.updateSessionIdForSession(currentSessionId, returnedProviderSessionId, providerForRun);
+        if (updatedSession) {
+          finalSession = this.applySessionWorkspaceContext(updatedSession, accessIdentity);
+        }
+        this.moveSessionAccess(currentSessionId, returnedProviderSessionId, providerForRun, currentProjectId);
         const state = this.runningSessions.get(sessionIdForCallbacks);
         const currentWs = state?.ws;
 
@@ -710,30 +935,53 @@ export class ClaudeHandler {
             type: 'session_id_updated',
             oldSessionId: currentSessionId,
             newSessionId: returnedProviderSessionId,
-            title: updatedSession?.title || content.substring(0, 50),
+            title: finalSession?.title || content.substring(0, 50),
             provider: providerForRun,
-            projectId: updatedSession ? this.getProjectIdForSession(updatedSession) : undefined,
+            projectId: finalSession ? this.getProjectIdForSession(finalSession) : undefined,
             timestamp: Date.now()
           }));
         }
       } else if (returnedProviderSessionId && returnedProviderSessionId !== existingProviderSessionId) {
-        this.sessionManager.setProviderSessionId(returnedProviderSessionId);
+        const updatedSession = this.sessionManager.setProviderSessionIdForSession(workingSession.id, returnedProviderSessionId, providerForRun);
+        if (updatedSession) {
+          finalSession = updatedSession;
+        }
       }
 
-      const assistantMessage = createMessage('assistant', result.response);
-      this.sessionManager.addMessage(assistantMessage);
+      let assistantMessageId = `done-${responseSessionId}`;
+      if (!this.sessionAlreadyContainsAssistantResponse(finalSession, result.response)) {
+        const assistantMessage = createMessage('assistant', result.response);
+        assistantMessageId = assistantMessage.id;
+        this.sessionManager.addMessageToSession(finalSession.id, assistantMessage, finalSession.provider);
+      } else {
+        const lastAssistantMessage = [...finalSession.messages]
+          .reverse()
+          .find(message => message.role === 'assistant');
+        if (lastAssistantMessage?.id) {
+          assistantMessageId = lastAssistantMessage.id;
+        }
+      }
+
+      if (finalSession) {
+        this.assignSessionAccess(
+          finalSession.id,
+          finalSession.provider,
+          this.getRawProjectIdForSession(finalSession),
+          accessIdentity
+        );
+      }
 
       const state = this.runningSessions.get(sessionIdForCallbacks);
       const currentWs = state?.ws;
       if (currentWs && currentWs.readyState === 1) {
         currentWs.send(JSON.stringify({
           type: 'claude_done',
-          messageId: assistantMessage.id,
+          messageId: assistantMessageId,
           sessionId: responseSessionId,
           provider: providerForRun,
           providerSessionId: returnedProviderSessionId,
           claudeSessionId: providerForRun === 'claude' ? returnedProviderSessionId : undefined,
-          projectId: this.sessionManager.getCurrent() ? this.getProjectIdForSession(this.sessionManager.getCurrent()!) : undefined,
+          projectId: finalSession ? this.getProjectIdForSession(finalSession) : undefined,
           timestamp: Date.now()
         }));
       }
@@ -762,12 +1010,26 @@ export class ClaudeHandler {
     title?: string,
     limit?: number,
     beforeIndex?: number,
-    provider?: Provider
+    provider?: Provider,
+    accessIdentity?: AccessIdentity
   ): void {
     switch (action) {
       case 'new': {
         const providerForNewSession = provider || DEFAULT_PROVIDER;
-        const newSession = this.sessionManager.createTemporary(title, providerForNewSession);
+        const newSession = this.applySessionWorkspaceContext(
+          this.sessionManager.createTemporary(
+            title,
+            providerForNewSession,
+            this.resolveSessionWorkspaceContext(accessIdentity)
+          ),
+          accessIdentity
+        );
+        this.assignSessionAccess(
+          newSession.id,
+          providerForNewSession,
+          this.getRawProjectIdForSession(newSession),
+          accessIdentity
+        );
         ws.send(JSON.stringify({
           type: 'session_created',
           session: {
@@ -778,7 +1040,7 @@ export class ClaudeHandler {
             isTemporary: true,
             provider: providerForNewSession
           },
-          projectId: encodeProjectId(providerForNewSession, this.sessionManager.getProjectId(providerForNewSession)),
+          projectId: this.getProjectIdForSession(newSession),
           provider: providerForNewSession,
           timestamp: Date.now()
         }));
@@ -786,7 +1048,7 @@ export class ClaudeHandler {
       }
 
       case 'list': {
-        const sessions = this.sessionManager.list(provider);
+        const sessions = this.filterSessionsByAccess(this.sessionManager.list(provider), accessIdentity);
         ws.send(JSON.stringify({
           type: 'session_list',
           sessions,
@@ -797,7 +1059,7 @@ export class ClaudeHandler {
       }
 
       case 'list_projects': {
-        const projects = this.listAllProjects();
+        const projects = this.listAllProjects(accessIdentity);
         ws.send(JSON.stringify({
           type: 'project_list',
           projects,
@@ -811,7 +1073,7 @@ export class ClaudeHandler {
           break;
         }
 
-        const sessions = this.listSessionsByProject(projectId, limit || 1000);
+        const sessions = this.listSessionsByProject(projectId, limit || 1000, accessIdentity);
         ws.send(JSON.stringify({
           type: 'session_list',
           projectId,
@@ -828,6 +1090,15 @@ export class ClaudeHandler {
 
         const loadLimit = limit || 3;
         let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
+
+        if (!this.canAccessSession(sessionId, accessIdentity, projectId, provider)) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            content: 'Session not found',
+            timestamp: Date.now()
+          }));
+          break;
+        }
 
         if (projectId) {
           const projectRef = decodeProjectId(projectId);
@@ -891,6 +1162,15 @@ export class ClaudeHandler {
         const loadLimit = limit || 20;
         let result: { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
 
+        if (!this.canAccessSession(sessionId, accessIdentity, projectId, provider)) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            content: 'Failed to load more messages',
+            timestamp: Date.now()
+          }));
+          break;
+        }
+
         if (projectId) {
           const projectRef = decodeProjectId(projectId);
           result = projectRef
@@ -935,9 +1215,20 @@ export class ClaudeHandler {
         let deleted = false;
         if (projectId) {
           const projectRef = decodeProjectId(projectId);
-          deleted = projectRef ? this.deleteCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId) : false;
+          deleted = projectRef && this.canAccessSession(sessionId, accessIdentity, projectId, projectRef.provider)
+            ? this.deleteCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId)
+            : false;
+          if (deleted && projectRef) {
+            this.accessStore.deleteSession(projectRef.provider, projectRef.projectKey, sessionId);
+          }
         } else {
-          deleted = this.sessionManager.delete(sessionId, provider);
+          const existingSession = this.findSessionForAccess(sessionId, provider);
+          deleted = this.canAccessSession(sessionId, accessIdentity, undefined, provider)
+            ? this.sessionManager.delete(sessionId, provider)
+            : false;
+          if (deleted && existingSession) {
+            this.accessStore.deleteSession(existingSession.provider, this.getRawProjectIdForSession(existingSession), sessionId);
+          }
         }
 
         ws.send(JSON.stringify({
@@ -962,9 +1253,13 @@ export class ClaudeHandler {
         if (projectId) {
           const projectRef = decodeProjectId(projectId);
           providerForRename = projectRef?.provider;
-          renamed = projectRef ? this.renameCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId, title) : false;
+          renamed = projectRef && this.canAccessSession(sessionId, accessIdentity, projectId, projectRef.provider)
+            ? this.renameCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId, title)
+            : false;
         } else {
-          renamed = this.sessionManager.rename(sessionId, title, provider);
+          renamed = this.canAccessSession(sessionId, accessIdentity, undefined, provider)
+            ? this.sessionManager.rename(sessionId, title, provider)
+            : false;
           providerForRename = providerForRename || this.sessionManager.get(sessionId)?.provider;
         }
 

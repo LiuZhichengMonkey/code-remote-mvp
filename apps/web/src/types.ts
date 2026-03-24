@@ -16,6 +16,18 @@ export interface ToolUse {
 
 export type Provider = 'claude' | 'codex';
 export type Language = 'zh-CN' | 'en-US';
+export type AccessMode = 'admin' | 'tester';
+
+export interface AccessPermissions {
+  canViewAllSessions: boolean;
+  canManageSettings: boolean;
+}
+
+export interface ServerAccessState {
+  accessMode: AccessMode;
+  ownerId?: string;
+  permissions: AccessPermissions;
+}
 
 export interface ProcessPanelPreferences {
   showStatus: boolean;

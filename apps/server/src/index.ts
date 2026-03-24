@@ -49,6 +49,7 @@ program
   .description('Start the CodeRemote server')
   .option('-p, --port <number>', 'Port to listen on', '8080')
   .option('-t, --token <token>', 'Custom auth token')
+  .option('-c, --config-file <path>', 'Repository config file for extended auth and bootstrap settings')
   .option('-w, --workspace <path>', 'Workspace root directory')
   .option('--static-path <path>', 'Static web UI directory')
   .option('--uploads-dir <path>', 'Uploads directory')
@@ -66,9 +67,16 @@ program
     ].join('\n')));
     console.log();
 
+    const repoConfig = options.configFile
+      ? loadRepoRuntimeConfig(resolve(options.configFile))
+      : null;
     const port = parseInt(options.port, 10);
     const verbose = options.verbose;
-    const workspace = options.workspace ? resolve(options.workspace) : process.cwd();
+    const workspace = options.workspace
+      ? resolve(options.workspace)
+      : repoConfig?.server.workspaceRoot
+        ? resolve(repoConfig.server.workspaceRoot)
+        : process.cwd();
     const staticPath = options.staticPath
       ? resolve(options.staticPath)
       : resolve(__dirname, '..', '..', 'web', 'dist');
@@ -78,7 +86,7 @@ program
     }
 
     // Create auth manager
-    const auth = new AuthManager(options.token);
+    const auth = new AuthManager(options.token || repoConfig?.server.token);
 
     // Create server with workspace and static files
     server = new CodeRemoteServer(
@@ -86,7 +94,8 @@ program
       auth.getToken(),
       workspace,
       staticPathExists ? staticPath : undefined,
-      options.uploadsDir ? resolve(options.uploadsDir) : undefined
+      options.uploadsDir ? resolve(options.uploadsDir) : undefined,
+      repoConfig?.server.testTokens || []
     );
 
     // Create message handler

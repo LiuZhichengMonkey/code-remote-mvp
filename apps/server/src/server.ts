@@ -4,13 +4,13 @@ import { existsSync } from 'fs';
 import { extname, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
+import { AccessIdentity, TokenAuthorizer, TestTokenConfig } from './accessControl';
 import { ImageSuccessResponse, ImageErrorResponse, ImageConfig } from './types/image';
 import { ClaudeHandler } from './handlers/claude';
 import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
 import { getImageErrorCode, ImageErrorCode } from './imageErrorCode';
 import { Provider } from './session/provider';
 import { UiPreferences, UiPreferencesStorage } from './uiPreferences';
-import { broadcastJsonToAuthenticatedClients } from './clientBroadcast';
 import {
   listRuntimeProfiles,
   saveRuntimeProfile,
@@ -22,6 +22,7 @@ export interface Client {
   ws: WebSocket;
   authenticated: boolean;
   connectedAt: Date;
+  accessIdentity: AccessIdentity;
   imageTransfer?: {
     inProgress: boolean;
     meta: import('./types/image').ImageMeta | null;
@@ -100,18 +101,21 @@ export class CodeRemoteServer {
   private staticPath?: string;
   private readonly debugLoggingEnabled = process.env.CODEREMOTE_DEBUG === '1';
   private imageConfig: ImageConfig;
+  private tokenAuthorizer: TokenAuthorizer;
 
   constructor(
     port: number = 8080,
     token?: string,
     workspaceRoot?: string,
     staticPath?: string,
-    uploadsDir?: string
+    uploadsDir?: string,
+    testTokens: TestTokenConfig[] = []
   ) {
     this.port = port;
     this.token = token || uuidv4();
     this.workspaceRoot = workspaceRoot || process.cwd();
     this.staticPath = staticPath;
+    this.tokenAuthorizer = new TokenAuthorizer(this.token, testTokens);
     this.imageConfig = {
       savePath: uploadsDir || join(this.workspaceRoot, '.coderemote', 'uploads'),
       maxSize: 50 * 1024 * 1024,
@@ -169,11 +173,41 @@ export class CodeRemoteServer {
     }
   }
 
-  private broadcastJson(payload: unknown) {
-    broadcastJsonToAuthenticatedClients(this.clients.entries(), payload, (clientId) => {
-      console.error(chalk.red('Error broadcasting to'), clientId);
-      this.clients.delete(clientId);
-    });
+  private getClientByWebSocket(ws: WebSocket): Client | null {
+    for (const [, client] of this.clients) {
+      if (client.ws === ws) {
+        return client;
+      }
+    }
+
+    return null;
+  }
+
+  private getClientIdByWebSocket(ws: WebSocket): string | null {
+    for (const [clientId, client] of this.clients) {
+      if (client.ws === ws) {
+        return clientId;
+      }
+    }
+
+    return null;
+  }
+
+  private broadcastJson(payload: unknown, shouldSend?: (client: Client) => boolean) {
+    const message = JSON.stringify(payload);
+
+    for (const [clientId, client] of this.clients) {
+      if (!client.authenticated || (shouldSend && !shouldSend(client))) {
+        continue;
+      }
+
+      try {
+        client.ws.send(message);
+      } catch {
+        console.error(chalk.red('Error broadcasting to'), clientId);
+        this.clients.delete(clientId);
+      }
+    }
   }
 
   private setupServer() {
@@ -263,14 +297,20 @@ export class CodeRemoteServer {
         break;
 
       case 'stop': {
+        const client = this.getClientByWebSocket(ws);
+        if (!client || !client.authenticated) {
+          this.sendError(ws, 'Not authenticated');
+          break;
+        }
+
         console.log(
           chalk.yellow('[chat]'),
           'Received stop request',
           message.sessionId ? `for session: ${message.sessionId}` : '(all)'
         );
         const stopped = message.sessionId
-          ? this.claudeHandler.stopSession(message.sessionId)
-          : this.claudeHandler.stop();
+          ? this.claudeHandler.stopSession(message.sessionId, client.accessIdentity, message.projectId, message.provider)
+          : this.claudeHandler.stopAccessibleSessions(client.accessIdentity);
 
         ws.send(JSON.stringify({
           type: 'stopped',
@@ -293,8 +333,24 @@ export class CodeRemoteServer {
         break;
 
       case 'session_focus':
-        this.logDebug(`Session focus changed to ${message.sessionId || 'none'}`);
-        this.claudeHandler.setActiveSession(message.sessionId || null);
+        {
+          const client = this.getClientByWebSocket(ws);
+          if (!client || !client.authenticated) {
+            this.sendError(ws, 'Not authenticated');
+            break;
+          }
+
+          if (
+            message.sessionId
+            && !this.claudeHandler.canAccessSession(message.sessionId, client.accessIdentity, message.projectId, message.provider)
+          ) {
+            this.sendError(ws, 'Session not found');
+            break;
+          }
+
+          this.logDebug(`Session focus changed to ${message.sessionId || 'none'}`);
+          this.claudeHandler.setActiveSession(message.sessionId || null);
+        }
         ws.send(JSON.stringify({
           type: 'session_focus_ack',
           sessionId: message.sessionId,
@@ -307,7 +363,7 @@ export class CodeRemoteServer {
           action: message.action,
           provider: message.provider || 'claude'
         });
-        this.handleSettingsRequest(ws, message);
+        this.handleSettingsRequest(ws, message, this.getClientByWebSocket(ws));
         break;
 
       default:
@@ -315,9 +371,25 @@ export class CodeRemoteServer {
     }
   }
 
-  private handleSettingsRequest(ws: WebSocket, message: ClientMessage) {
+  private handleSettingsRequest(ws: WebSocket, message: ClientMessage, client: Client | null) {
     const action = (message as any).action || 'list';
     const provider = message.provider || 'claude';
+
+    if (!client || !client.authenticated) {
+      this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    if (!client.accessIdentity.permissions.canManageSettings) {
+      ws.send(JSON.stringify({
+        type: 'settings_error',
+        action,
+        provider,
+        error: 'Forbidden',
+        timestamp: Date.now()
+      }));
+      return;
+    }
 
     if (action === 'get_ui_preferences') {
       try {
@@ -347,7 +419,7 @@ export class CodeRemoteServer {
           type: 'ui_preferences_saved',
           uiPreferences,
           timestamp: Date.now()
-        });
+        }, currentClient => currentClient.accessIdentity.permissions.canManageSettings);
       } catch (error) {
         console.error(chalk.red('[Settings]'), 'Failed to save UI preferences:', error);
         ws.send(JSON.stringify({
@@ -471,7 +543,8 @@ export class CodeRemoteServer {
   }
 
   private handleAuth(ws: WebSocket, token?: string) {
-    if (token !== this.token) {
+    const accessIdentity = this.tokenAuthorizer.resolve(token);
+    if (!accessIdentity) {
       const response: ServerMessage = { type: 'auth_failed' };
       ws.send(JSON.stringify(response));
       console.log(chalk.red('[auth]'), 'Authentication failed: invalid token');
@@ -484,22 +557,33 @@ export class CodeRemoteServer {
       id: clientId,
       ws,
       authenticated: true,
-      connectedAt: new Date()
+      connectedAt: new Date(),
+      accessIdentity
     };
     this.clients.set(clientId, client);
 
-    const response: ServerMessage = {
+    const response: ServerMessage & {
+      accessMode: AccessIdentity['accessMode'];
+      ownerId?: string;
+      permissions: AccessIdentity['permissions'];
+    } = {
       type: 'auth_success',
       clientId,
+      accessMode: accessIdentity.accessMode,
+      ...(accessIdentity.ownerId ? { ownerId: accessIdentity.ownerId } : {}),
+      permissions: accessIdentity.permissions,
       timestamp: Date.now()
     };
     ws.send(JSON.stringify(response));
 
-    console.log(chalk.green('[auth]'), `Client ${chalk.cyan(clientId)} authenticated`);
+    console.log(
+      chalk.green('[auth]'),
+      `Client ${chalk.cyan(clientId)} authenticated as ${accessIdentity.accessMode}${accessIdentity.ownerId ? `:${accessIdentity.ownerId}` : ''}`
+    );
 
     this.claudeHandler.cleanupStaleSessions();
 
-    const runningSessionSummaries = this.claudeHandler.getRunningSessionSummaries();
+    const runningSessionSummaries = this.claudeHandler.getRunningSessionSummaries(accessIdentity);
     if (runningSessionSummaries.length > 0) {
       console.log(chalk.yellow('[session]'), `Found ${runningSessionSummaries.length} running session(s)`);
       ws.send(JSON.stringify({
@@ -507,7 +591,7 @@ export class CodeRemoteServer {
         sessions: runningSessionSummaries,
         timestamp: Date.now()
       }));
-      this.claudeHandler.updateRunningWebSocket(ws);
+      this.claudeHandler.updateRunningWebSocket(ws, accessIdentity);
     }
 
     if (this.discussionHandler.isRunning()) {
@@ -533,13 +617,7 @@ export class CodeRemoteServer {
   }
 
   private handleClientMessage(ws: WebSocket, content?: string) {
-    let clientId: string | null = null;
-    for (const [id, client] of this.clients) {
-      if (client.ws === ws) {
-        clientId = id;
-        break;
-      }
-    }
+    const clientId = this.getClientIdByWebSocket(ws);
 
     if (!clientId || !this.clients.get(clientId)?.authenticated) {
       this.sendError(ws, 'Not authenticated');
@@ -554,15 +632,10 @@ export class CodeRemoteServer {
   }
 
   private handleClaudeMessage(ws: WebSocket, message: ClientMessage) {
-    let clientId: string | null = null;
-    for (const [id, client] of this.clients) {
-      if (client.ws === ws) {
-        clientId = id;
-        break;
-      }
-    }
+    const clientId = this.getClientIdByWebSocket(ws);
+    const client = this.getClientByWebSocket(ws);
 
-    if (!clientId || !this.clients.get(clientId)?.authenticated) {
+    if (!clientId || !client?.authenticated) {
       this.sendError(ws, 'Not authenticated');
       return;
     }
@@ -597,20 +670,16 @@ export class CodeRemoteServer {
       sessionId,
       projectId,
       attachments,
-      message.provider
+      message.provider,
+      client.accessIdentity
     );
   }
 
   private handleSessionAction(ws: WebSocket, message: ClientMessage) {
-    let clientId: string | null = null;
-    for (const [id, client] of this.clients) {
-      if (client.ws === ws) {
-        clientId = id;
-        break;
-      }
-    }
+    const clientId = this.getClientIdByWebSocket(ws);
+    const client = this.getClientByWebSocket(ws);
 
-    if (!clientId || !this.clients.get(clientId)?.authenticated) {
+    if (!clientId || !client?.authenticated) {
       this.sendError(ws, 'Not authenticated');
       return;
     }
@@ -623,7 +692,8 @@ export class CodeRemoteServer {
       message.title,
       message.limit,
       message.beforeIndex,
-      message.provider
+      message.provider,
+      client.accessIdentity
     );
   }
 

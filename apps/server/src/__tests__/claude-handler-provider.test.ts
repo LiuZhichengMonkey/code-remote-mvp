@@ -1,5 +1,9 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { ClaudeHandler } from '../handlers/claude';
 import { encodeProjectId } from '../session/provider';
+import { resolveSessionWorkspace } from '../sessionWorkspace';
 
 let mockClaudeEngine: any;
 let mockCodexEngine: any;
@@ -55,14 +59,27 @@ function createSessionManagerMock() {
   let currentSession: any = null;
   const sessions = new Map<string, any>();
   let tempCounter = 0;
+  const applyContext = (session: any, context?: { cwd?: string; projectId?: string }) => {
+    if (!context) {
+      return session;
+    }
+
+    if (context.cwd) {
+      session.cwd = context.cwd;
+    }
+    if (context.projectId) {
+      session.projectId = context.projectId;
+    }
+    return session;
+  };
 
   return {
-    createTemporary: jest.fn((title?: string, provider: 'claude' | 'codex' = 'claude') => {
+    createTemporary: jest.fn((title?: string, provider: 'claude' | 'codex' = 'claude', context?: { cwd?: string; projectId?: string }) => {
       tempCounter += 1;
-      currentSession = {
+      currentSession = applyContext({
         ...createSession(`temp-${provider}-${tempCounter}`, provider),
         title: title || 'New Chat'
-      };
+      }, context);
       sessions.set(currentSession.id, currentSession);
       return currentSession;
     }),
@@ -77,7 +94,20 @@ function createSessionManagerMock() {
       currentSession.messages.push(message);
       currentSession.updatedAt = Date.now();
     }),
+    addMessageToSession: jest.fn((sessionId: string, message: any) => {
+      const session = sessions.get(sessionId) || null;
+      if (!session) {
+        return null;
+      }
+      session.messages.push(message);
+      session.updatedAt = Date.now();
+      return session;
+    }),
     getMessagesForAPI: jest.fn(() => currentSession ? [...currentSession.messages] : []),
+    getMessagesForSession: jest.fn((sessionId: string) => {
+      const session = sessions.get(sessionId) || null;
+      return session ? [...session.messages] : [];
+    }),
     getCurrent: jest.fn(() => currentSession),
     updateSessionId: jest.fn((newSessionId: string) => {
       if (!currentSession) return;
@@ -95,6 +125,30 @@ function createSessionManagerMock() {
       if (currentSession.provider === 'claude') {
         currentSession.claudeSessionId = providerSessionId;
       }
+    }),
+    setProviderSessionIdForSession: jest.fn((sessionId: string, providerSessionId: string) => {
+      const session = sessions.get(sessionId) || null;
+      if (!session) return null;
+      session.providerSessionId = providerSessionId;
+      if (session.provider === 'claude') {
+        session.claudeSessionId = providerSessionId;
+      }
+      return session;
+    }),
+    updateSessionIdForSession: jest.fn((sessionId: string, newSessionId: string) => {
+      const session = sessions.get(sessionId) || null;
+      if (!session) return null;
+      sessions.delete(sessionId);
+      session.id = newSessionId;
+      session.providerSessionId = newSessionId;
+      if (session.provider === 'claude') {
+        session.claudeSessionId = newSessionId;
+      }
+      sessions.set(newSessionId, session);
+      if (currentSession?.id === sessionId) {
+        currentSession = session;
+      }
+      return session;
     }),
     getProjectId: jest.fn(() => 'E--code-remote-mvp'),
     get: jest.fn((sessionId: string) => sessions.get(sessionId) || null),
@@ -130,8 +184,11 @@ function parseSentMessages(ws: { send: jest.Mock }) {
 }
 
 describe('ClaudeHandler provider behavior', () => {
+  let tempWorkspaceRoot: string;
+
   beforeEach(() => {
     mockMessageCounter = 0;
+    tempWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coderemote-provider-test-'));
     mockSessionManager = createSessionManagerMock();
     mockClaudeEngine = {
       stop: jest.fn(() => true),
@@ -170,6 +227,10 @@ describe('ClaudeHandler provider behavior', () => {
     CodexSessionStorage.mockClear();
   });
 
+  afterEach(() => {
+    fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true });
+  });
+
   test('session:new keeps requested provider on the created session', () => {
     const handler = new ClaudeHandler('E:/code-remote-mvp');
     const ws = createWebSocketMock();
@@ -181,6 +242,34 @@ describe('ClaudeHandler provider behavior', () => {
     expect(message.provider).toBe('codex');
     expect(message.session.provider).toBe('codex');
     expect(message.projectId).toBe(encodeProjectId('codex', 'E--code-remote-mvp'));
+  });
+
+  test('tester new session is created inside an isolated workspace', () => {
+    const handler = new ClaudeHandler(tempWorkspaceRoot);
+    const ws = createWebSocketMock();
+    const testerIdentity = {
+      accessMode: 'tester' as const,
+      ownerId: 'shenghua.yang',
+      permissions: {
+        canViewAllSessions: false,
+        canManageSettings: false
+      }
+    };
+
+    handler.handleSessionAction(ws, 'new', undefined, undefined, 'Tester Chat', undefined, undefined, 'codex', testerIdentity);
+
+    const [message] = parseSentMessages(ws);
+    const testerWorkspace = resolveSessionWorkspace(tempWorkspaceRoot, testerIdentity);
+    expect(message.type).toBe('session_created');
+    expect(message.projectId).toBe(encodeProjectId('codex', testerWorkspace.projectId));
+    expect(mockSessionManager.createTemporary).toHaveBeenCalledWith(
+      'Tester Chat',
+      'codex',
+      expect.objectContaining({
+        cwd: testerWorkspace.workspacePath,
+        projectId: testerWorkspace.projectId
+      })
+    );
   });
 
   test('chat flow keeps codex provider and emits session_id_updated', async () => {
@@ -221,6 +310,58 @@ describe('ClaudeHandler provider behavior', () => {
       sessionId: 'codex-real-session',
       providerSessionId: 'codex-real-session',
       projectId: encodeProjectId('codex', 'E--code-remote-mvp')
+    });
+  });
+
+  test('tester codex session keeps tester ownership even if currentSession changes mid-run', async () => {
+    const handler = new ClaudeHandler(tempWorkspaceRoot);
+    const ws = createWebSocketMock();
+    const sendError = jest.fn();
+    const testerIdentity = {
+      accessMode: 'tester' as const,
+      ownerId: 'shenghua.yang',
+      permissions: {
+        canViewAllSessions: false,
+        canManageSettings: false
+      }
+    };
+    let resolveRun: ((value: { response: string; providerSessionId: string }) => void) | undefined;
+
+    mockCodexEngine.sendMessage.mockImplementationOnce(async () => {
+      return await new Promise(resolve => {
+        resolveRun = resolve as (value: { response: string; providerSessionId: string }) => void;
+      });
+    });
+
+    const runPromise = handler.handleClaudeMessage(
+      ws,
+      'hello tester codex',
+      sendError,
+      undefined,
+      undefined,
+      undefined,
+      'codex',
+      testerIdentity
+    );
+
+    await Promise.resolve();
+
+    mockSessionManager.createTemporary('admin-race', 'claude');
+    resolveRun?.({ response: 'tester codex response', providerSessionId: 'codex-tester-session' });
+    await runPromise;
+
+    const testerWorkspace = resolveSessionWorkspace(tempWorkspaceRoot, testerIdentity);
+    const accessFile = path.join(tempWorkspaceRoot, '.coderemote', 'session-access.json');
+    const accessStore = JSON.parse(fs.readFileSync(accessFile, 'utf-8'));
+    const record = accessStore[`codex:${testerWorkspace.projectId}:codex-tester-session`];
+
+    expect(sendError).not.toHaveBeenCalled();
+    expect(record).toMatchObject({
+      provider: 'codex',
+      projectId: testerWorkspace.projectId,
+      sessionId: 'codex-tester-session',
+      ownerType: 'tester',
+      ownerId: 'shenghua.yang'
     });
   });
 

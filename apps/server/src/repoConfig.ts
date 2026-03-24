@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { normalizeTestTokenConfigs, TestTokenConfig } from './accessControl';
 
 export interface ProviderBootstrapConfig {
   enabled: boolean;
@@ -14,6 +15,7 @@ export interface RepoRuntimeConfig {
     port: number;
     token: string;
     workspaceRoot: string;
+    testTokens: TestTokenConfig[];
   };
   ui: {
     openBrowserOnStart: boolean;
@@ -105,7 +107,8 @@ export function loadRepoRuntimeConfig(filePath: string): RepoRuntimeConfig {
     server: {
       port: asNumber(server.port, 8085),
       token: asString(server.token, ''),
-      workspaceRoot: asString(server.workspaceRoot, '')
+      workspaceRoot: asString(server.workspaceRoot, ''),
+      testTokens: normalizeTestTokenConfigs(server.testTokens)
     },
     ui: {
       openBrowserOnStart: asBoolean(ui.openBrowserOnStart, true)

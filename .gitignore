@@ -65,6 +65,7 @@ logs/
 
 # Local runtime state
 .coderemote/
+.codex/
 apps/server/.coderemote/
 bg-test.txt
 runtime/

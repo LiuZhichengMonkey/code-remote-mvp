@@ -24,7 +24,8 @@ import {
   MessageProcessEvent,
   ProcessPanelPreferences,
   UiPreferences,
-  Provider
+  Provider,
+  ServerAccessState
 } from './types';
 import { cn } from './utils';
 import { useDiscussion } from './useDiscussion';
@@ -109,6 +110,14 @@ interface WSMessage {
   [key: string]: any;
 }
 
+const DEFAULT_SERVER_ACCESS_STATE: ServerAccessState = {
+  accessMode: 'admin',
+  permissions: {
+    canViewAllSessions: true,
+    canManageSettings: true
+  }
+};
+
 // --- Connection Panel ---
 const ConnectionPanel = ({
   url,
@@ -119,6 +128,7 @@ const ConnectionPanel = ({
   onDisconnect,
   isConnected,
   isConnecting,
+  serverAccess,
   runtimeProfileProvider,
   runtimeProfileState,
   onRuntimeProfileProviderChange,
@@ -140,6 +150,7 @@ const ConnectionPanel = ({
   onDisconnect: () => void;
   isConnected: boolean;
   isConnecting: boolean;
+  serverAccess: ServerAccessState;
   runtimeProfileProvider: Provider;
   runtimeProfileState: RuntimeProfileProviderState;
   onRuntimeProfileProviderChange: (provider: Provider) => void;
@@ -156,6 +167,8 @@ const ConnectionPanel = ({
   const { language, setLanguage, t } = useI18n();
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const processPanelSettingOptions = useMemo(() => getProcessPanelSettingOptions(t), [t]);
+  const canManageSharedSettings = serverAccess.permissions.canManageSettings;
+  const isTesterMode = serverAccess.accessMode === 'tester';
 
   // Used to dismiss the dropdown on outside clicks
   const settingsDropdownRef = useRef<HTMLDivElement>(null);
@@ -248,7 +261,18 @@ const ConnectionPanel = ({
           <div className="inline-flex items-center rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-white/45">
             {token ? t('settings.bridge.tokenReady') : t('settings.bridge.tokenMissing')}
           </div>
+          {isConnected && isTesterMode && (
+            <div className="inline-flex items-center rounded-full border border-amber-400/20 bg-amber-500/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-amber-200">
+              {t('settings.access.testerBadge', { ownerId: serverAccess.ownerId || 'tester' })}
+            </div>
+          )}
         </div>
+
+        {isConnected && isTesterMode && (
+          <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-3 py-3 text-[11px] leading-5 text-amber-100">
+            {t('settings.access.testerNotice', { ownerId: serverAccess.ownerId || 'tester' })}
+          </div>
+        )}
 
         <div className="mt-3 space-y-2">
           <label className="block">
@@ -296,7 +320,7 @@ const ConnectionPanel = ({
 
       </div>
 
-      {isConnected && (
+      {isConnected && canManageSharedSettings && (
         <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -515,6 +539,7 @@ const ConnectionPanel = ({
           ))}
         </div>
       </div>
+      {canManageSharedSettings && (
       <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -600,6 +625,7 @@ const ConnectionPanel = ({
           {t('settings.process.note')}
         </div>
       </div>
+      )}
     </div>
   );
 };
@@ -629,7 +655,81 @@ const getStoredJson = <T,>(key: string, fallbackValue: T): T => {
 
 // Default WebSocket URL - change this to your tunnel URL
 const DEFAULT_WS_URL = 'wss://acropetal-nonfalteringly-ruben.ngrok-free.dev';
-const DEFAULT_TOKEN = 'test123';
+const DEFAULT_TOKEN = '';
+const TOKEN_STORAGE_KEY = 'coderemote_token';
+const SESSION_TOKEN_STORAGE_KEY = 'coderemote_token_session';
+const TOKEN_PERSISTED_KEY = 'coderemote_token_persisted';
+const LEGACY_DEFAULT_TOKEN = 'test123';
+
+const clearPersistedToken = (): void => {
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(TOKEN_PERSISTED_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+};
+
+const clearSessionToken = (): void => {
+  try {
+    sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+};
+
+const getStoredToken = (): string => {
+  try {
+    const sessionToken = sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
+    if (sessionToken) {
+      return sessionToken;
+    }
+
+    const token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    const persisted = localStorage.getItem(TOKEN_PERSISTED_KEY) === '1';
+
+    if (!token) {
+      return '';
+    }
+
+    // Legacy builds persisted the shared admin token locally. Always clear it.
+    if (token === LEGACY_DEFAULT_TOKEN) {
+      clearPersistedToken();
+      return '';
+    }
+
+    if (!persisted) {
+      clearPersistedToken();
+      return '';
+    }
+
+    return token;
+  } catch {
+    return DEFAULT_TOKEN;
+  }
+};
+
+const persistTokenForAccessMode = (token: string, accessMode: ServerAccessState['accessMode']): void => {
+  if (!token) {
+    clearPersistedToken();
+    clearSessionToken();
+    return;
+  }
+
+  try {
+    if (accessMode === 'tester') {
+      clearSessionToken();
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      localStorage.setItem(TOKEN_PERSISTED_KEY, '1');
+      return;
+    }
+
+    sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+    clearPersistedToken();
+  } catch (e) {
+    console.warn('Failed to persist token:', e);
+  }
+};
 
 const RECONNECT_PLACEHOLDER_MESSAGE_PREFIX = RECONNECT_PLACEHOLDER_MESSAGE_PREFIX_STORE;
 const RUNNING_SESSION_REHYDRATION_TIMEOUT_MS = RUNNING_SESSION_REHYDRATION_TIMEOUT_MS_STORE;
@@ -649,8 +749,9 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [serverUrl, setServerUrl] = useState(() => getStoredValue('coderemote_url', DEFAULT_WS_URL));
-  const [token, setToken] = useState(() => getStoredValue('coderemote_token', DEFAULT_TOKEN));
+  const [token, setToken] = useState(() => getStoredToken());
   const [showSettings, setShowSettings] = useState(false);
+  const [serverAccess, setServerAccess] = useState<ServerAccessState>(DEFAULT_SERVER_ACCESS_STATE);
   const showSettingsRef = useRef(showSettings);
   showSettingsRef.current = showSettings;
 
@@ -771,6 +872,10 @@ export default function App() {
   }, [clearUiPreferencesTimeout]);
 
   const requestUiPreferences = useCallback((socket?: WebSocket | null) => {
+    if (!serverAccess.permissions.canManageSettings) {
+      return;
+    }
+
     const target = socket || wsRef.current;
     if (!target || target.readyState !== WebSocket.OPEN) {
       return;
@@ -782,9 +887,13 @@ export default function App() {
       type: 'settings',
       action: 'get_ui_preferences'
     }));
-  }, [startUiPreferencesTimeout]);
+  }, [serverAccess.permissions.canManageSettings, startUiPreferencesTimeout]);
 
   const requestRuntimeProfiles = useCallback((provider: Provider, socket?: WebSocket | null) => {
+    if (!serverAccess.permissions.canManageSettings) {
+      return;
+    }
+
     const target = socket || wsRef.current;
     if (!target || target.readyState !== WebSocket.OPEN) {
       return;
@@ -804,7 +913,7 @@ export default function App() {
       action: 'list',
       provider
     }));
-  }, []);
+  }, [serverAccess.permissions.canManageSettings]);
 
   const handleRuntimeProfileProviderChange = useCallback((provider: Provider) => {
     setRuntimeProfileProvider(provider);
@@ -847,6 +956,10 @@ export default function App() {
   }, [runtimeProfileProvider]);
 
   const handleSwitchRuntimeProfile = useCallback((provider: Provider, settingsName: string) => {
+    if (!serverAccess.permissions.canManageSettings) {
+      return;
+    }
+
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       alert(t('settings.runtime.connectBeforeSwitch'));
       return;
@@ -867,9 +980,13 @@ export default function App() {
       provider,
       settingsName
     }));
-  }, []);
+  }, [serverAccess.permissions.canManageSettings]);
 
   const handleSaveRuntimeProfile = useCallback(() => {
+    if (!serverAccess.permissions.canManageSettings) {
+      return;
+    }
+
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       alert(t('settings.runtime.connectBeforeEdit'));
       return;
@@ -896,12 +1013,16 @@ export default function App() {
         model: currentState.editForm.model
       }
     }));
-  }, [runtimeProfileProvider, runtimeProfiles]);
+  }, [runtimeProfileProvider, runtimeProfiles, serverAccess.permissions.canManageSettings]);
 
   const handleProcessPanelPreferenceChange = useCallback((
     key: keyof ProcessPanelPreferences,
     value: boolean
   ) => {
+    if (!serverAccess.permissions.canManageSettings) {
+      return;
+    }
+
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       alert(t('settings.process.connectBeforeChange'));
       return;
@@ -926,16 +1047,16 @@ export default function App() {
       action: 'save_ui_preferences',
       uiPreferences: nextPreferences
     }));
-  }, [startUiPreferencesTimeout, uiPreferences]);
+  }, [serverAccess.permissions.canManageSettings, startUiPreferencesTimeout, uiPreferences]);
 
   useEffect(() => {
-    if (showSettings && isConnected && !processPreferencesSaving) {
+    if (showSettings && isConnected && serverAccess.permissions.canManageSettings && !processPreferencesSaving) {
       requestUiPreferences();
     }
-  }, [isConnected, processPreferencesSaving, requestUiPreferences, showSettings]);
+  }, [isConnected, processPreferencesSaving, requestUiPreferences, serverAccess.permissions.canManageSettings, showSettings]);
 
   useEffect(() => {
-    if (!showSettings || !isConnected) {
+    if (!showSettings || !isConnected || !serverAccess.permissions.canManageSettings) {
       return;
     }
 
@@ -943,7 +1064,7 @@ export default function App() {
     if (!currentState.loaded && !currentState.loading) {
       requestRuntimeProfiles(runtimeProfileProvider);
     }
-  }, [isConnected, requestRuntimeProfiles, runtimeProfileProvider, runtimeProfiles, showSettings]);
+  }, [isConnected, requestRuntimeProfiles, runtimeProfileProvider, runtimeProfiles, serverAccess.permissions.canManageSettings, showSettings]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -1618,6 +1739,7 @@ export default function App() {
     setProcessPreferencesLoaded(false);
     setProcessPreferencesSaving(false);
     setUiPreferences(DEFAULT_UI_PREFERENCES);
+    setServerAccess(DEFAULT_SERVER_ACCESS_STATE);
     lastSavedUiPreferencesRef.current = DEFAULT_UI_PREFERENCES;
     pendingUiPreferencesRollbackRef.current = null;
     const newWs = new WebSocket(serverUrl);
@@ -1637,16 +1759,26 @@ export default function App() {
         const targetSessionId = msg.sessionId || currentSessionIdRef.current;
 
         if (msg.type === 'auth_success') {
+          const nextServerAccess: ServerAccessState = {
+            accessMode: msg.accessMode === 'tester' ? 'tester' : 'admin',
+            ...(typeof msg.ownerId === 'string' ? { ownerId: msg.ownerId } : {}),
+            permissions: {
+              canViewAllSessions: msg.permissions?.canViewAllSessions !== false,
+              canManageSettings: msg.permissions?.canManageSettings !== false
+            }
+          };
+
           setIsConnected(true);
           setIsConnecting(false);
           setShowSettings(false); // Auto-close settings panel on success
+          setServerAccess(nextServerAccess);
           debugLog('Auth successful');
           serverRehydratedRunningSessionsRef.current = new Set();
           clearRunningSessionRehydrationTimeout();
           // Save connection settings to localStorage
           try {
             localStorage.setItem('coderemote_url', serverUrl);
-            localStorage.setItem('coderemote_token', token);
+            persistTokenForAccessMode(token, nextServerAccess.accessMode);
           } catch (e) {
             console.warn('Failed to save settings:', e);
           }
@@ -1693,16 +1825,22 @@ export default function App() {
 
           // Request project list from server
           newWs.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
-          requestUiPreferences(newWs);
+          if (nextServerAccess.permissions.canManageSettings) {
+            requestUiPreferences(newWs);
+          }
         } else if (msg.type === 'ping') {
           // Respond to server heartbeat ping
           newWs.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         } else if (msg.type === 'auth_failed') {
           setIsConnected(false);
           setIsConnecting(false);
+          setServerAccess(DEFAULT_SERVER_ACCESS_STATE);
           console.error('Auth failed');
           newWs.close();
         } else if (msg.type === 'ui_preferences') {
+          if (!serverAccess.permissions.canManageSettings) {
+            return;
+          }
           clearUiPreferencesTimeout();
           const nextPreferences = normalizeUiPreferences(msg.uiPreferences);
           setUiPreferences(nextPreferences);
@@ -1711,6 +1849,9 @@ export default function App() {
           lastSavedUiPreferencesRef.current = nextPreferences;
           pendingUiPreferencesRollbackRef.current = null;
         } else if (msg.type === 'ui_preferences_saved') {
+          if (!serverAccess.permissions.canManageSettings) {
+            return;
+          }
           clearUiPreferencesTimeout();
           const nextPreferences = normalizeUiPreferences(msg.uiPreferences);
           setUiPreferences(nextPreferences);
@@ -1719,6 +1860,9 @@ export default function App() {
           lastSavedUiPreferencesRef.current = nextPreferences;
           pendingUiPreferencesRollbackRef.current = null;
         } else if (msg.type === 'settings_error' && (msg.action === 'get_ui_preferences' || msg.action === 'save_ui_preferences')) {
+          if (!serverAccess.permissions.canManageSettings) {
+            return;
+          }
           clearUiPreferencesTimeout();
           console.error('UI preferences error:', msg.error);
           if (msg.action === 'save_ui_preferences') {
@@ -2410,6 +2554,14 @@ export default function App() {
             setCurrentSessionId(null);
             currentSessionIdRef.current = null;
           }
+        } else if (msg.type === 'session_renamed') {
+          debugLog('Session renamed:', msg.sessionId, 'success:', msg.success, 'title:', msg.title);
+          if (msg.sessionId && msg.success) {
+            updateSessionAcrossCollections(msg.sessionId, session => ({
+              ...session,
+              title: normalizeLegacyDisplayText(msg.title || session.title)
+            }));
+          }
         } else if (msg.type === 'session_id_updated') {
           // Handle session ID update from server (when Claude CLI returns a new session ID)
           debugLog('Session ID updated:', msg.oldSessionId, '->', msg.newSessionId);
@@ -2535,6 +2687,7 @@ export default function App() {
       setIsConnecting(false);
       setProcessPreferencesLoaded(false);
       setProcessPreferencesSaving(false);
+      setServerAccess(DEFAULT_SERVER_ACCESS_STATE);
       debugLog('WebSocket disconnected');
     };
 
@@ -2546,6 +2699,7 @@ export default function App() {
       setIsConnected(false);
       setProcessPreferencesLoaded(false);
       setProcessPreferencesSaving(false);
+      setServerAccess(DEFAULT_SERVER_ACCESS_STATE);
     };
 
     wsRef.current = newWs;
@@ -2579,6 +2733,7 @@ export default function App() {
     setIsConnected(false);
     setProcessPreferencesLoaded(false);
     setProcessPreferencesSaving(false);
+    setServerAccess(DEFAULT_SERVER_ACCESS_STATE);
   }, [clearRunningSessionRehydrationTimeout, clearUiPreferencesTimeout]);
 
   useEffect(() => {
@@ -3061,8 +3216,8 @@ export default function App() {
 
   const handleTitleChange = (newTitle: string) => {
     if (!currentSessionId) return;
-    setSessions(prev => prev.map(s =>
-      s.id === currentSessionId ? { ...s, title: newTitle } : s
+    updateSessionAcrossCollections(currentSessionId, session => (
+      session.title === newTitle ? session : { ...session, title: newTitle }
     ));
   };
 
@@ -3070,11 +3225,16 @@ export default function App() {
   const handleTitleBlur = (newTitle: string) => {
     if (!currentSessionId || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
+    const nextTitle = newTitle.trim() ? newTitle : 'New Chat';
+    updateSessionAcrossCollections(currentSessionId, session => (
+      session.title === nextTitle ? session : { ...session, title: nextTitle }
+    ));
+
     const message = {
       type: 'session',
       action: 'rename',
       sessionId: currentSessionId,
-      title: newTitle,
+      title: nextTitle,
       projectId: currentProjectId,
       provider: currentSession?.provider,
       timestamp: Date.now()
@@ -3104,11 +3264,12 @@ export default function App() {
       <HeaderView
         onMenuClick={() => setIsSidebarOpen(true)}
         onNewChat={handleNewChat}
-        title={localizeSessionTitle(currentSession?.title || '', t)}
+        title={currentSession?.title || ''}
         onTitleChange={handleTitleChange}
         onTitleBlur={handleTitleBlur}
         onSettingsClick={() => setShowSettings(!showSettings)}
         isConnected={isConnected}
+        serverAccess={serverAccess}
         currentProvider={currentProvider}
         newSessionProvider={newSessionProvider}
         onNewSessionProviderChange={setNewSessionProvider}
@@ -3137,6 +3298,7 @@ export default function App() {
                 onDisconnect={disconnect}
                 isConnected={isConnected}
                 isConnecting={isConnecting}
+                serverAccess={serverAccess}
                 runtimeProfileProvider={runtimeProfileProvider}
                 runtimeProfileState={runtimeProfiles[runtimeProfileProvider]}
                 onRuntimeProfileProviderChange={handleRuntimeProfileProviderChange}

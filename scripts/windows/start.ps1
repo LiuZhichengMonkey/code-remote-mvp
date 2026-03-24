@@ -79,6 +79,7 @@ $staticPath = Split-Path -Parent $paths.WebIndex
 $serverArgs = @(
     $paths.ServerEntry,
     "start",
+    "--config-file", $paths.ConfigFile,
     "--port", "$serverPort",
     "--token", $serverToken,
     "--workspace", $workspaceRoot,

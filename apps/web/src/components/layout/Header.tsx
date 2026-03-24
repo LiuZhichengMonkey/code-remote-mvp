@@ -1,11 +1,13 @@
+import { useEffect, useState } from 'react';
 import { Menu, Plus, Settings, Wifi, WifiOff } from 'lucide-react';
-import { Provider } from '../../types';
+import { Provider, ServerAccessState } from '../../types';
 import { cn } from '../../utils';
-import { getProviderBadgeClass, getProviderLabel } from '../../chatUiShared';
+import { getProviderBadgeClass, getProviderLabel, localizeSessionTitle } from '../../chatUiShared';
 import { useI18n } from '../../i18n';
 
 interface HeaderProps {
   isConnected: boolean;
+  serverAccess: ServerAccessState;
   currentProvider: Provider;
   title: string;
   onTitleChange: (value: string) => void;
@@ -26,10 +28,29 @@ export const Header = ({
   onMenuClick,
   onSettingsClick,
   onNewChat,
+  serverAccess,
   newSessionProvider,
   onNewSessionProviderChange
 }: HeaderProps) => {
   const { t } = useI18n();
+  const isTesterMode = serverAccess.accessMode === 'tester';
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [isComposingTitle, setIsComposingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(title);
+
+  useEffect(() => {
+    if (!isEditingTitle) {
+      setTitleDraft(title);
+    }
+  }, [isEditingTitle, title]);
+
+  const commitTitle = (value: string) => {
+    const nextTitle = value.trim() ? value : 'New Chat';
+    setTitleDraft(nextTitle);
+    setIsEditingTitle(false);
+    onTitleChange(nextTitle);
+    onTitleBlur(nextTitle);
+  };
 
   return (
     <header className="fixed top-0 left-0 right-0 h-[50px] z-50 flex items-center justify-between px-4 bg-black/60 backdrop-blur-xl border-b border-white/5">
@@ -48,12 +69,32 @@ export const Header = ({
         )}>
           {getProviderLabel(currentProvider, t)}
         </span>
+        {isConnected && isTesterMode && (
+          <span className="inline-flex items-center rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+            {t('header.testModeBadge', { ownerId: serverAccess.ownerId || 'tester' })}
+          </span>
+        )}
         <input
-          value={title}
-          onChange={(e) => onTitleChange(e.target.value)}
-          onBlur={(e) => onTitleBlur(e.target.value)}
+          value={isEditingTitle ? titleDraft : localizeSessionTitle(title, t)}
+          onFocus={() => {
+            setIsEditingTitle(true);
+            setTitleDraft(title);
+          }}
+          onChange={(e) => {
+            const nextTitle = e.target.value;
+            setTitleDraft(nextTitle);
+            onTitleChange(nextTitle);
+          }}
+          onBlur={(e) => commitTitle(e.target.value)}
+          onCompositionStart={() => setIsComposingTitle(true)}
+          onCompositionEnd={(e) => {
+            setIsComposingTitle(false);
+            const nextTitle = e.currentTarget.value;
+            setTitleDraft(nextTitle);
+            onTitleChange(nextTitle);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && !isComposingTitle) {
               e.currentTarget.blur();
             }
           }}

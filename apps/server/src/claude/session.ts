@@ -4,6 +4,10 @@ import { ClaudeMessage, ClaudeSession, SessionInfo, createSession } from './type
 import { SessionStorage } from './storage';
 
 type ProviderStorage = SessionStorage | CodexSessionStorage;
+interface SessionContext {
+  cwd?: string;
+  projectId?: string;
+}
 
 export class SessionManager {
   private storages: Record<Provider, ProviderStorage>;
@@ -56,15 +60,31 @@ export class SessionManager {
     return null;
   }
 
-  create(title?: string, provider: Provider = DEFAULT_PROVIDER): ClaudeSession {
-    const session = createSession(title || 'New Chat', provider);
+  private applySessionContext(session: ClaudeSession, context?: SessionContext): ClaudeSession {
+    if (!context) {
+      return session;
+    }
+
+    if (context.cwd) {
+      session.cwd = context.cwd;
+    }
+
+    if (context.projectId) {
+      session.projectId = context.projectId;
+    }
+
+    return session;
+  }
+
+  create(title?: string, provider: Provider = DEFAULT_PROVIDER, context?: SessionContext): ClaudeSession {
+    const session = this.applySessionContext(createSession(title || 'New Chat', provider), context);
     this.sessions.set(session.id, session);
     this.currentSession = session;
     return session;
   }
 
-  createTemporary(title?: string, provider: Provider = DEFAULT_PROVIDER): ClaudeSession {
-    const session = createSession(title || 'New Chat', provider);
+  createTemporary(title?: string, provider: Provider = DEFAULT_PROVIDER, context?: SessionContext): ClaudeSession {
+    const session = this.applySessionContext(createSession(title || 'New Chat', provider), context);
     this.currentSession = session;
     this.sessions.set(session.id, session);
     return session;
@@ -153,12 +173,37 @@ export class SessionManager {
     }
   }
 
+  addMessageToSession(sessionId: string, message: ClaudeMessage, provider?: Provider): ClaudeSession | null {
+    const session = this.getCachedOrLoaded(sessionId, provider);
+    if (!session) {
+      return null;
+    }
+
+    session.messages.push(message);
+    session.updatedAt = Date.now();
+
+    if (session.messages.length === 1 && message.role === 'user') {
+      session.title = message.content.substring(0, 50);
+    }
+
+    if (this.currentSession?.id === session.id) {
+      this.currentSession = session;
+    }
+
+    return session;
+  }
+
   getCurrent(): ClaudeSession | null {
     return this.currentSession;
   }
 
   get(sessionId: string, provider?: Provider): ClaudeSession | null {
     return this.getCachedOrLoaded(sessionId, provider);
+  }
+
+  getMessagesForSession(sessionId: string, provider?: Provider): ClaudeMessage[] {
+    const session = this.getCachedOrLoaded(sessionId, provider);
+    return session ? [...session.messages] : [];
   }
 
   list(provider?: Provider): SessionInfo[] {
@@ -237,6 +282,65 @@ export class SessionManager {
 
   setClaudeSessionId(claudeSessionId: string): void {
     this.setProviderSessionId(claudeSessionId);
+  }
+
+  setProviderSessionIdForSession(sessionId: string, providerSessionId: string, provider?: Provider): ClaudeSession | null {
+    const session = this.getCachedOrLoaded(sessionId, provider);
+    if (!session) {
+      return null;
+    }
+
+    session.providerSessionId = providerSessionId;
+    if (session.provider === 'claude') {
+      session.claudeSessionId = providerSessionId;
+    }
+
+    if (this.currentSession?.id === session.id) {
+      this.currentSession = session;
+    }
+
+    return session;
+  }
+
+  updateSessionIdForSession(sessionId: string, newSessionId: string, provider?: Provider): ClaudeSession | null {
+    const session = this.getCachedOrLoaded(sessionId, provider);
+    if (!session) {
+      return null;
+    }
+
+    const effectiveProvider = provider || session.provider;
+    const loadedSession = this.storages[effectiveProvider].load(newSessionId);
+    if (loadedSession) {
+      if (!loadedSession.cwd && session.cwd) {
+        loadedSession.cwd = session.cwd;
+      }
+      if (!loadedSession.projectId && session.projectId) {
+        loadedSession.projectId = session.projectId;
+      }
+
+      this.sessions.delete(sessionId);
+      this.sessions.set(newSessionId, loadedSession);
+
+      if (this.currentSession?.id === sessionId || this.currentSession?.id === newSessionId) {
+        this.currentSession = loadedSession;
+      }
+
+      return loadedSession;
+    }
+
+    this.sessions.delete(sessionId);
+    session.id = newSessionId;
+    session.providerSessionId = newSessionId;
+    if (session.provider === 'claude') {
+      session.claudeSessionId = newSessionId;
+    }
+    this.sessions.set(newSessionId, session);
+
+    if (this.currentSession?.id === sessionId) {
+      this.currentSession = session;
+    }
+
+    return session;
   }
 
   setSessionFromCrossProject(session: ClaudeSession): void {
