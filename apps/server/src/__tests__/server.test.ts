@@ -191,6 +191,32 @@ describe('CodeRemoteServer', () => {
         }
       });
     });
+
+    test('keepalive 搴旇琚畨闈欏拷鐣?', (done) => {
+      let authComplete = false;
+      let receivedError = false;
+
+      client.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'auth_success') {
+          authComplete = true;
+          client.send(JSON.stringify({
+            type: 'keepalive',
+            reason: 'test'
+          }));
+
+          setTimeout(() => {
+            expect(authComplete).toBe(true);
+            expect(receivedError).toBe(false);
+            expect(client.readyState).toBe(WebSocket.OPEN);
+            done();
+          }, 50);
+        } else if (authComplete && msg.type === 'error') {
+          receivedError = true;
+        }
+      });
+    });
   });
 
   describe('sendToClient', () => {

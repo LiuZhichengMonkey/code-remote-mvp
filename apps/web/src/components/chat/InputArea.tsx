@@ -12,6 +12,7 @@ interface InputAreaProps {
   onStop: () => void;
   isConnected: boolean;
   onFocus?: () => void;
+  onActivity?: (reason: string) => void;
 }
 
 export const InputArea = ({
@@ -19,7 +20,8 @@ export const InputArea = ({
   isGenerating,
   onStop,
   isConnected,
-  onFocus
+  onFocus,
+  onActivity
 }: InputAreaProps) => {
   const { t } = useI18n();
   const [input, setInput] = useState('');
@@ -64,6 +66,7 @@ export const InputArea = ({
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
+    onActivity?.('input_change');
     setInput(value);
 
     if (value === '/') {
@@ -100,6 +103,7 @@ export const InputArea = ({
 
   const handleSelectSkill = (skill: typeof skills[0]) => {
     const skillMessage = `${skill.trigger} `;
+    onActivity?.('select_skill');
     debugLog('[handleSelectSkill] skill:', skill.name, 'message:', skillMessage, 'isConnected:', isConnected, 'isGenerating:', isGenerating);
     setInput(skillMessage);
     setShowSkills(false);
@@ -114,6 +118,7 @@ export const InputArea = ({
   };
 
   const handleSelectAgent = (agent: typeof agents[0]) => {
+    onActivity?.('select_agent');
     const value = input;
     const beforeAt = value.slice(0, agentStartPos);
     const afterFilter = value.slice(agentStartPos + 1 + agentFilter.length);
@@ -129,6 +134,7 @@ export const InputArea = ({
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    onActivity?.('select_file');
     const selectedFiles = Array.from(e.target.files || []);
     const newAttachments: Attachment[] = await Promise.all(
       selectedFiles.map(file => new Promise<Attachment>((resolve) => {

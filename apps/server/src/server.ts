@@ -38,10 +38,11 @@ export interface ServerMessage {
 }
 
 export interface ClientMessage {
-  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'discussion_get_pending' | 'session_focus' | 'settings';
+  type: 'auth' | 'message' | 'image_meta' | 'claude' | 'session' | 'stop' | 'discussion' | 'discussion_get_pending' | 'session_focus' | 'settings' | 'keepalive';
   token?: string;
   content?: string;
   provider?: Provider;
+  reason?: string;
   fileName?: string;
   mimeType?: string;
   size?: number;
@@ -364,6 +365,20 @@ export class CodeRemoteServer {
           provider: message.provider || 'claude'
         });
         this.handleSettingsRequest(ws, message, this.getClientByWebSocket(ws));
+        break;
+
+      case 'keepalive':
+        {
+          const client = this.getClientByWebSocket(ws);
+          if (!client || !client.authenticated) {
+            break;
+          }
+
+          this.logDebug('Received keepalive', {
+            clientId: client.id,
+            reason: message.reason
+          });
+        }
         break;
 
       default:

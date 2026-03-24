@@ -656,6 +656,7 @@ const getStoredJson = <T,>(key: string, fallbackValue: T): T => {
 // Default WebSocket URL - change this to your tunnel URL
 const DEFAULT_WS_URL = 'wss://acropetal-nonfalteringly-ruben.ngrok-free.dev';
 const DEFAULT_TOKEN = '';
+const KEEPALIVE_THROTTLE_MS = 60_000;
 const TOKEN_STORAGE_KEY = 'coderemote_token';
 const SESSION_TOKEN_STORAGE_KEY = 'coderemote_token_session';
 const TOKEN_PERSISTED_KEY = 'coderemote_token_persisted';
@@ -772,6 +773,7 @@ export default function App() {
   // Refs for WebSocket callback to access latest state
   const currentSessionIdRef = useRef<string | null>(loadActiveRunningSessionCache()?.sessionId || null);
   const wsRef = useRef<WebSocket | null>(null);
+  const lastKeepaliveSentAtRef = useRef(0);
   const isRefreshingRef = useRef(false);
   const runningSessionsRef = useRef<Set<string>>(new Set(loadRunningSessionCache().map(entry => entry.sessionId))); // Track running sessions in ref for WebSocket callbacks
   const serverRehydratedRunningSessionsRef = useRef<Set<string>>(new Set());
@@ -802,6 +804,29 @@ export default function App() {
       setNewSessionProvider(provider);
     }
   }, []);
+  const noteWebSocketActivity = useCallback(() => {
+    lastKeepaliveSentAtRef.current = Date.now();
+  }, []);
+  const touchWebSocketActivity = useCallback((reason: string) => {
+    const activeWs = wsRef.current;
+    if (!isConnected || !activeWs || activeWs.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (now - lastKeepaliveSentAtRef.current < KEEPALIVE_THROTTLE_MS) {
+      return false;
+    }
+
+    lastKeepaliveSentAtRef.current = now;
+    activeWs.send(JSON.stringify({
+      type: 'keepalive',
+      reason,
+      timestamp: now
+    }));
+    debugLog('[keepalive] Sent:', reason);
+    return true;
+  }, [isConnected]);
 
   // Keep runningSessionsRef in sync with runningSessions
   useEffect(() => {
@@ -883,11 +908,12 @@ export default function App() {
 
     setProcessPreferencesLoaded(false);
     startUiPreferencesTimeout('load');
+    noteWebSocketActivity();
     target.send(JSON.stringify({
       type: 'settings',
       action: 'get_ui_preferences'
     }));
-  }, [serverAccess.permissions.canManageSettings, startUiPreferencesTimeout]);
+  }, [noteWebSocketActivity, serverAccess.permissions.canManageSettings, startUiPreferencesTimeout]);
 
   const requestRuntimeProfiles = useCallback((provider: Provider, socket?: WebSocket | null) => {
     if (!serverAccess.permissions.canManageSettings) {
@@ -907,13 +933,13 @@ export default function App() {
         errorMessage: null
       }
     }));
-
+    noteWebSocketActivity();
     target.send(JSON.stringify({
       type: 'settings',
       action: 'list',
       provider
     }));
-  }, [serverAccess.permissions.canManageSettings]);
+  }, [noteWebSocketActivity, serverAccess.permissions.canManageSettings]);
 
   const handleRuntimeProfileProviderChange = useCallback((provider: Provider) => {
     setRuntimeProfileProvider(provider);
@@ -973,14 +999,14 @@ export default function App() {
         errorMessage: null
       }
     }));
-
+    noteWebSocketActivity();
     wsRef.current.send(JSON.stringify({
       type: 'settings',
       action: 'switch',
       provider,
       settingsName
     }));
-  }, [serverAccess.permissions.canManageSettings]);
+  }, [noteWebSocketActivity, serverAccess.permissions.canManageSettings]);
 
   const handleSaveRuntimeProfile = useCallback(() => {
     if (!serverAccess.permissions.canManageSettings) {
@@ -1002,7 +1028,7 @@ export default function App() {
         errorMessage: null
       }
     }));
-
+    noteWebSocketActivity();
     wsRef.current.send(JSON.stringify({
       type: 'settings',
       action: 'save',
@@ -1013,7 +1039,7 @@ export default function App() {
         model: currentState.editForm.model
       }
     }));
-  }, [runtimeProfileProvider, runtimeProfiles, serverAccess.permissions.canManageSettings]);
+  }, [noteWebSocketActivity, runtimeProfileProvider, runtimeProfiles, serverAccess.permissions.canManageSettings]);
 
   const handleProcessPanelPreferenceChange = useCallback((
     key: keyof ProcessPanelPreferences,
@@ -1042,12 +1068,13 @@ export default function App() {
     setProcessPreferencesSaving(true);
     startUiPreferencesTimeout('save');
 
+    noteWebSocketActivity();
     wsRef.current.send(JSON.stringify({
       type: 'settings',
       action: 'save_ui_preferences',
       uiPreferences: nextPreferences
     }));
-  }, [serverAccess.permissions.canManageSettings, startUiPreferencesTimeout, uiPreferences]);
+  }, [noteWebSocketActivity, serverAccess.permissions.canManageSettings, startUiPreferencesTimeout, uiPreferences]);
 
   useEffect(() => {
     if (showSettings && isConnected && serverAccess.permissions.canManageSettings && !processPreferencesSaving) {
@@ -1636,6 +1663,7 @@ export default function App() {
 
   // Handle keyboard for mobile - scroll to bottom when input is focused
   const handleInputFocus = useCallback(() => {
+    touchWebSocketActivity('focus_input');
     if (messages.length > 0) {
       setTimeout(() => {
         scrollRef.current?.scrollTo({
@@ -1644,7 +1672,7 @@ export default function App() {
         });
       }, 300);
     }
-  }, [messages.length]);
+  }, [messages.length, touchWebSocketActivity]);
 
   // Track messages length with ref to avoid stale closure
   const messagesLengthRef = useRef(0);
@@ -1659,6 +1687,7 @@ export default function App() {
     // Use ref to get the latest messages length
     const beforeIndex = messagesLengthRef.current;
 
+    noteWebSocketActivity();
     ws.send(JSON.stringify({
       type: 'session',
       action: 'load_more',
@@ -1671,7 +1700,7 @@ export default function App() {
 
     isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
-  }, [ws, currentSessionId, currentProjectId, currentSession?.provider, hasMoreMessages, totalMessages]);
+  }, [ws, currentSessionId, currentProjectId, currentSession?.provider, hasMoreMessages, noteWebSocketActivity, totalMessages]);
 
   // Handle scroll to detect when user scrolls to top
   // Debounce the scroll handler to avoid over-triggering pagination
@@ -1722,12 +1751,13 @@ export default function App() {
       resumeMessage.projectId = projectId;
     }
 
+    noteWebSocketActivity();
     socket.send(JSON.stringify(resumeMessage));
     socket.send(JSON.stringify({
       type: 'session_focus',
       sessionId
     }));
-  }, [resolveSessionProvider]);
+  }, [noteWebSocketActivity, resolveSessionProvider]);
 
   // WebSocket connection
   const connect = useCallback(() => {
@@ -1735,6 +1765,7 @@ export default function App() {
       ws.close();
     }
 
+    lastKeepaliveSentAtRef.current = 0;
     setIsConnecting(true);
     setProcessPreferencesLoaded(false);
     setProcessPreferencesSaving(false);
@@ -1746,6 +1777,7 @@ export default function App() {
 
     newWs.onopen = () => {
       debugLog('WebSocket connected');
+      lastKeepaliveSentAtRef.current = Date.now();
       newWs.send(JSON.stringify({ type: 'auth', token }));
     };
 
@@ -2683,6 +2715,7 @@ export default function App() {
     newWs.onclose = () => {
       clearRunningSessionRehydrationTimeout();
       clearUiPreferencesTimeout();
+      lastKeepaliveSentAtRef.current = 0;
       setIsConnected(false);
       setIsConnecting(false);
       setProcessPreferencesLoaded(false);
@@ -2694,6 +2727,7 @@ export default function App() {
     newWs.onerror = (error) => {
       clearRunningSessionRehydrationTimeout();
       clearUiPreferencesTimeout();
+      lastKeepaliveSentAtRef.current = 0;
       console.error('WebSocket error:', error);
       setIsConnecting(false);
       setIsConnected(false);
@@ -2724,6 +2758,7 @@ export default function App() {
 
   const disconnect = useCallback(() => {
     clearUiPreferencesTimeout();
+    lastKeepaliveSentAtRef.current = 0;
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -2770,6 +2805,7 @@ export default function App() {
   const createNewSession = (provider: Provider = newSessionProvider, title?: string) => {
     if (wsRef.current && isConnected) {
       syncNewSessionProvider(provider);
+      noteWebSocketActivity();
       wsRef.current.send(JSON.stringify({
         type: 'session',
         action: 'new',
@@ -2783,6 +2819,7 @@ export default function App() {
   const resumeSession = (sessionId: string, projectId?: string, provider?: Provider) => {
     debugLog('[resumeSession] Called with sessionId:', sessionId, 'projectId:', projectId, 'isConnected:', isConnected);
     if (wsRef.current && isConnected) {
+      touchWebSocketActivity('resume_session');
       const resolvedProvider = provider || resolveSessionProvider(sessionId, projectId);
       syncNewSessionProvider(resolvedProvider);
       setCurrentSessionId(sessionId);
@@ -2798,6 +2835,7 @@ export default function App() {
   // Delete session (supports cross-project)
   const deleteSessionById = (sessionId: string, projectId?: string, provider?: Provider) => {
     if (wsRef.current && isConnected) {
+      noteWebSocketActivity();
       const msg: any = {
         type: 'session',
         action: 'delete',
@@ -2826,6 +2864,7 @@ export default function App() {
   const refreshSessions = () => {
     if (wsRef.current && isConnected) {
       isRefreshingRef.current = true;
+      noteWebSocketActivity();
       wsRef.current.send(JSON.stringify({ type: 'session', action: 'list' }));
     }
   };
@@ -2836,12 +2875,14 @@ export default function App() {
       if (forceRefresh) {
         setProjectSessions({});
       }
+      noteWebSocketActivity();
       wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_projects' }));
     }
   };
 
   // Toggle project expansion and load sessions if needed
   const toggleProject = (projectId: string) => {
+    touchWebSocketActivity('toggle_project');
     setExpandedProjects(prev => {
       const newSet = new Set(prev);
       if (newSet.has(projectId)) {
@@ -2852,6 +2893,7 @@ export default function App() {
       // Load sessions for this project if not loaded
       if (!projectSessions[projectId] && wsRef.current && isConnected) {
         setLoadingProjects(prev => new Set(prev).add(projectId));
+        noteWebSocketActivity();
         wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_by_project', projectId }));
       }
       return newSet;
@@ -2970,6 +3012,7 @@ export default function App() {
     }
 
     debugLog('[sendMessageToSpecificSession] Sending message:', JSON.stringify(message));
+    noteWebSocketActivity();
     activeWs.send(JSON.stringify(message));
     return true;
   }
@@ -3189,6 +3232,7 @@ export default function App() {
     if (currentProjectId) {
       message.projectId = currentProjectId;
     }
+    noteWebSocketActivity();
     activeWs.send(JSON.stringify(message));
   };
 
@@ -3196,6 +3240,7 @@ export default function App() {
     const sessionIdToStop = currentSessionIdRef.current;
     // Send stop request to server to kill Claude CLI process
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      noteWebSocketActivity();
       wsRef.current.send(JSON.stringify({
         type: 'stop',
         sessionId: sessionIdToStop,
@@ -3239,8 +3284,14 @@ export default function App() {
       provider: currentSession?.provider,
       timestamp: Date.now()
     };
+    noteWebSocketActivity();
     wsRef.current.send(JSON.stringify(message));
     debugLog('[handleTitleBlur] Sent rename request:', message);
+  };
+
+  const handleSettingsToggle = () => {
+    touchWebSocketActivity('toggle_settings');
+    setShowSettings(prev => !prev);
   };
 
   const copyToClipboard = (text: string) => {
@@ -3267,7 +3318,7 @@ export default function App() {
         title={currentSession?.title || ''}
         onTitleChange={handleTitleChange}
         onTitleBlur={handleTitleBlur}
-        onSettingsClick={() => setShowSettings(!showSettings)}
+        onSettingsClick={handleSettingsToggle}
         isConnected={isConnected}
         serverAccess={serverAccess}
         currentProvider={currentProvider}
@@ -3745,6 +3796,7 @@ export default function App() {
         onStop={handleStop}
         isConnected={isConnected}
         onFocus={handleInputFocus}
+        onActivity={touchWebSocketActivity}
       />
     </div>
   );
