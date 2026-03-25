@@ -7,6 +7,7 @@ const execAsync = promisify(exec);
 export interface TunnelConfig {
   enabled: boolean;
   host?: string;
+  domain?: string;
   port: number;
   type: 'cloudflare' | 'frp' | 'ngrok' | 'custom';
 }
@@ -122,17 +123,40 @@ export class TunnelManager {
     }
 
     try {
-      console.log(chalk.blue('[start]'), 'Starting ngrok tunnel...');
-      this.process = exec(`ngrok http ${this.config.port}`);
+      const requestedUrl = this.config.domain
+        ? (this.config.domain.startsWith('http://') || this.config.domain.startsWith('https://')
+          ? this.config.domain
+          : `https://${this.config.domain}`)
+        : '';
+      const command = requestedUrl
+        ? `ngrok http ${this.config.port} --url "${requestedUrl}"`
+        : `ngrok http ${this.config.port}`;
+
+      console.log(
+        chalk.blue('[start]'),
+        requestedUrl
+          ? `Starting ngrok tunnel with fixed URL ${requestedUrl}...`
+          : 'Starting ngrok tunnel...'
+      );
+      this.process = exec(command);
 
       this.process.stdout?.on('data', (data: string) => {
         const output = data.toString();
         console.log(output);
       });
 
+      this.process.stderr?.on('data', (data: string) => {
+        const output = data.toString();
+        console.log(output);
+      });
+
       await new Promise(resolve => setTimeout(resolve, 3000));
 
-      return { active: true, type: 'ngrok' };
+      return {
+        active: true,
+        type: 'ngrok',
+        ...(requestedUrl ? { url: requestedUrl } : {})
+      };
     } catch (error) {
       console.error(chalk.red('Error starting ngrok:'), error);
       return { active: false };

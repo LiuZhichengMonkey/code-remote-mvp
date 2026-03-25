@@ -25,6 +25,7 @@ $serverToken = [string]$config.server.token
 $workspaceRoot = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.server.workspaceRoot)
 $logsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.paths.logsDir)
 $uploadsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.paths.uploadsDir)
+$ngrokDomain = [string]$config.tunnel.ngrokDomain
 $serverOutLog = Join-Path $logsDir "server.out.log"
 $serverErrLog = Join-Path $logsDir "server.err.log"
 $launcherScript = Join-Path $paths.RuntimeTempDir "start-server.cmd"
@@ -94,6 +95,10 @@ switch ($tunnelMode) {
     "ngrok" {
         $serverArgs += "--tunnel"
         $serverArgs += "ngrok"
+        if (-not [string]::IsNullOrWhiteSpace($ngrokDomain)) {
+            $serverArgs += "--ngrok-domain"
+            $serverArgs += $ngrokDomain
+        }
     }
     "cloudflare" {
         $serverArgs += "--tunnel"
@@ -174,8 +179,26 @@ Write-Host ("Workspace:       {0}" -f $workspaceRoot) -ForegroundColor White
 Write-Host ("stdout log:      {0}" -f $serverOutLog) -ForegroundColor White
 Write-Host ("stderr log:      {0}" -f $serverErrLog) -ForegroundColor White
 
+if ($tunnelMode -eq "ngrok" -and -not [string]::IsNullOrWhiteSpace($ngrokDomain)) {
+    $ngrokRemoteHost = Get-CodeRemoteCustomTunnelHost -Value $ngrokDomain
+    $ngrokRemoteHttpUrl = Get-CodeRemoteCustomTunnelHttpUrl -Value $ngrokDomain
+    Write-Host ("Ngrok Remote WS:{0}{1}" -f (' ' * 4), "wss://$ngrokRemoteHost") -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace($ngrokRemoteHttpUrl)) {
+        Write-Host ("Ngrok Remote UI:{0}{1}" -f (' ' * 4), $ngrokRemoteHttpUrl) -ForegroundColor White
+    }
+}
+
 if ($tunnelMode -eq "custom" -and -not [string]::IsNullOrWhiteSpace([string]$config.tunnel.customPublicWsUrl)) {
-    Write-Host ("Custom Remote:   {0}" -f [string]$config.tunnel.customPublicWsUrl) -ForegroundColor Green
+    $customRemoteWsUrl = [string]$config.tunnel.customPublicWsUrl
+    $customRemoteHttpUrl = Get-CodeRemoteCustomTunnelHttpUrl -Value $customRemoteWsUrl
+    Write-Host ("Custom Remote WS:{0}{1}" -f (' ' * 3), $customRemoteWsUrl) -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace($customRemoteHttpUrl)) {
+        Write-Host ("Custom Remote UI:{0}{1}" -f (' ' * 3), $customRemoteHttpUrl) -ForegroundColor White
+    }
+    Write-Host "[WARN] tunnel.mode=custom does not start a tunnel. The public host must already forward to localhost:$serverPort." -ForegroundColor Yellow
+    if ($customRemoteWsUrl -match 'ngrok-free\.dev') {
+        Write-Host "[WARN] If you want this one-click script to launch ngrok, change tunnel.mode to ngrok." -ForegroundColor Yellow
+    }
 }
 
 if ($openBrowser) {

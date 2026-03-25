@@ -22,6 +22,11 @@ import { SessionAccessStore } from '../sessionAccess';
 import { CommandHandler } from './commands';
 import { DEFAULT_PROVIDER, Provider, decodeProjectId, encodeProjectId } from '../session/provider';
 import { resolveSessionWorkspace } from '../sessionWorkspace';
+import {
+  createRemoteAttachmentDescriptor,
+  resolveAccessibleWorkspaceRoot,
+  sanitizeUploadFileName
+} from '../fileBrowser';
 
 interface ProviderProjectInfo {
   id: string;
@@ -109,6 +114,35 @@ export class ClaudeHandler {
     }
 
     return session;
+  }
+
+  private getWorkspaceRootForSession(
+    session: Pick<ClaudeSession, 'cwd'>,
+    accessIdentity?: AccessIdentity
+  ): string {
+    return session.cwd
+      || resolveAccessibleWorkspaceRoot(this.workspaceRoot || process.cwd(), accessIdentity);
+  }
+
+  private serializeMessageForClient(
+    message: ClaudeMessage,
+    workspaceRoot: string
+  ): Record<string, unknown> {
+    const attachments = (message.images || []).flatMap((filePath, index) => {
+      try {
+        return [createRemoteAttachmentDescriptor(workspaceRoot, filePath, {
+          id: `${message.id}-attachment-${index}`
+        })];
+      } catch {
+        return [];
+      }
+    });
+
+    return {
+      ...message,
+      role: message.role === 'assistant' ? 'model' : message.role,
+      ...(attachments.length > 0 ? { attachments } : {})
+    };
   }
 
   private sessionAlreadyContainsAssistantResponse(session: ClaudeSession | null, response: string): boolean {
@@ -734,6 +768,7 @@ export class ClaudeHandler {
     let promptToSend = content;
     let promptToStore = content;
     let imagePaths: string[] = [];
+    const workspaceRoot = this.getWorkspaceRootForSession(workingSession, accessIdentity);
 
     if (attachments && attachments.length > 0) {
       const tempImageDir = path.join(cwd, '.coderemote', 'temp_images');
@@ -742,9 +777,8 @@ export class ClaudeHandler {
       }
 
       imagePaths = attachments.map((attachment, index) => {
-        const buffer = Buffer.from(attachment.data, 'base64');
-        const ext = (attachment.type || 'application/octet-stream').split('/')[1] || 'bin';
-        const fileName = `uploaded_file_${Date.now()}_${index}.${ext}`;
+        const buffer = Buffer.from(attachment.data || '', 'base64');
+        const fileName = sanitizeUploadFileName(attachment.name, index);
         const filePath = path.join(tempImageDir, fileName);
         fs.writeFileSync(filePath, buffer);
         return filePath;
@@ -759,11 +793,40 @@ export class ClaudeHandler {
       }
     }
 
-    const userMessage = createMessage('user', promptToStore);
+    const userMessage = createMessage('user', promptToStore, imagePaths);
     this.sessionManager.addMessageToSession(workingSession.id, userMessage, workingSession.provider);
 
     const messages = this.sessionManager.getMessagesForSession(workingSession.id, workingSession.provider);
     const currentSessionId = targetSessionId || workingSession.id || `temp-${Date.now()}`;
+
+    if (attachments && attachments.length > 0 && ws.readyState === 1) {
+      const registeredAttachments = attachments.flatMap((attachment, index) => {
+        const filePath = imagePaths[index];
+        if (!filePath) {
+          return [];
+        }
+
+        try {
+          return [createRemoteAttachmentDescriptor(workspaceRoot, filePath, {
+            id: attachment.id,
+            originalName: attachment.name,
+            mimeType: attachment.type
+          })];
+        } catch {
+          return [];
+        }
+      });
+
+      if (registeredAttachments.length > 0) {
+        ws.send(JSON.stringify({
+          type: 'attachments_registered',
+          sessionId: currentSessionId,
+          provider: providerForRun,
+          attachments: registeredAttachments,
+          timestamp: Date.now()
+        }));
+      }
+    }
 
     let sessionState = this.runningSessions.get(currentSessionId);
     if (!sessionState) {
@@ -1121,10 +1184,10 @@ export class ClaudeHandler {
           break;
         }
 
-        const messages = result.session.messages.map((message: ClaudeMessage) => ({
-          ...message,
-          role: message.role === 'assistant' ? 'model' : message.role
-        }));
+        const workspaceRoot = this.getWorkspaceRootForSession(result.session, accessIdentity);
+        const messages = result.session.messages.map((message: ClaudeMessage) => (
+          this.serializeMessageForClient(message, workspaceRoot)
+        ));
 
         ws.send(JSON.stringify({
           type: 'session_resumed',
@@ -1189,10 +1252,10 @@ export class ClaudeHandler {
           break;
         }
 
-        const messages = result.session.messages.map((message: ClaudeMessage) => ({
-          ...message,
-          role: message.role === 'assistant' ? 'model' : message.role
-        }));
+        const workspaceRoot = this.getWorkspaceRootForSession(result.session, accessIdentity);
+        const messages = result.session.messages.map((message: ClaudeMessage) => (
+          this.serializeMessageForClient(message, workspaceRoot)
+        ));
 
         ws.send(JSON.stringify({
           type: 'messages_loaded',

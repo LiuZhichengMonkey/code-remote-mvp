@@ -55,6 +55,7 @@ program
   .option('--uploads-dir <path>', 'Uploads directory')
   .option('--tunnel <type>', 'Enable tunnel (cloudflare, ngrok, frp)', 'cloudflare')
   .option('--host <host>', 'Custom tunnel host URL')
+  .option('--ngrok-domain <domain>', 'Reserved ngrok domain or full https URL')
   .option('--no-tunnel', 'Disable tunneling')
   .option('-v, --verbose', 'Verbose output')
   .action(async (options) => {
@@ -128,7 +129,8 @@ program
         enabled: true,
         port,
         type: options.tunnel as 'cloudflare' | 'ngrok' | 'frp' | 'custom',
-        host: options.host
+        host: options.host,
+        domain: options.ngrokDomain || repoConfig?.tunnel.ngrokDomain
       };
 
       tunnelManager = new TunnelManagerClass(tunnelConfig);

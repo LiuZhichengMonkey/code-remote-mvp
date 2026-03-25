@@ -91,10 +91,31 @@ export interface Message {
 
 export interface Attachment {
   id: string;
-  url: string;
+  url?: string;
   type: string;
   name: string;
   data?: string;
+  relativePath?: string;
+  size?: number;
+  source?: RemoteFileSource;
+}
+
+export type RemoteFileSource = 'workspace' | 'attachment' | 'upload' | 'export' | 'recent';
+
+export interface RemoteFileEntry {
+  name: string;
+  relativePath: string;
+  kind: 'file' | 'directory';
+  size: number;
+  mtime: number;
+  source: RemoteFileSource;
+  mimeType?: string;
+}
+
+export interface WorkspaceFileListResult {
+  path: string;
+  parentPath: string | null;
+  entries: RemoteFileEntry[];
 }
 
 export type DiscussionAvatar = string | {

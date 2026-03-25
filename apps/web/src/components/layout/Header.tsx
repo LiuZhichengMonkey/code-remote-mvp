@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Menu, Plus, Settings, Wifi, WifiOff } from 'lucide-react';
+import { FolderOpen, Menu, Plus, Settings, Wifi, WifiOff } from 'lucide-react';
 import { Provider, ServerAccessState } from '../../types';
 import { cn } from '../../utils';
 import { getProviderBadgeClass, getProviderLabel, localizeSessionTitle } from '../../chatUiShared';
@@ -13,6 +13,7 @@ interface HeaderProps {
   onTitleChange: (value: string) => void;
   onTitleBlur: (value: string) => void;
   onMenuClick: () => void;
+  onFilesClick?: () => void;
   onSettingsClick: () => void;
   onNewChat: () => void;
   newSessionProvider: Provider;
@@ -26,17 +27,19 @@ export const Header = ({
   onTitleChange,
   onTitleBlur,
   onMenuClick,
+  onFilesClick,
   onSettingsClick,
   onNewChat,
   serverAccess,
   newSessionProvider,
   onNewSessionProviderChange
 }: HeaderProps) => {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const isTesterMode = serverAccess.accessMode === 'tester';
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isComposingTitle, setIsComposingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(title);
+  const filesLabel = language === 'zh-CN' ? '文件' : 'Files';
 
   useEffect(() => {
     if (!isEditingTitle) {
@@ -120,6 +123,13 @@ export const Header = ({
             </button>
           ))}
         </div>
+        <button
+          onClick={() => onFilesClick?.()}
+          className="p-2 text-white/70 active:text-white"
+          title={filesLabel}
+        >
+          <FolderOpen size={18} />
+        </button>
         <button onClick={onSettingsClick} className="settings-toggle-btn p-2 text-white/70 active:text-white">
           <Settings size={18} />
         </button>

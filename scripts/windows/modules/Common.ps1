@@ -228,6 +228,41 @@ function Get-CodeRemoteCustomTunnelHost {
     return $trimmed -replace '^wss?://', '' -replace '^https?://', ''
 }
 
+function Get-CodeRemoteCustomTunnelHttpUrl {
+    param([string]$Value)
+
+    $customHostName = Get-CodeRemoteCustomTunnelHost -Value $Value
+    if ([string]::IsNullOrWhiteSpace($customHostName)) {
+        return $null
+    }
+
+    return "https://$customHostName"
+}
+
+function Get-CodeRemoteStartScriptCommand {
+    param(
+        [string]$StartScriptPath,
+        [switch]$Autostart
+    )
+
+    if ([string]::IsNullOrWhiteSpace($StartScriptPath)) {
+        throw "Start script path must not be empty."
+    }
+
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", ('"{0}"' -f $StartScriptPath)
+    )
+
+    if ($Autostart) {
+        $arguments += "-Autostart"
+    }
+
+    return "powershell.exe {0}" -f ($arguments -join ' ')
+}
+
 function Get-CodeRemoteProviderCommand {
     param($ProviderConfig, [string]$Fallback)
 

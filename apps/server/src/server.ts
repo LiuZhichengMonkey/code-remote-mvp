@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { existsSync } from 'fs';
-import { extname, join } from 'path';
+import fs, { existsSync } from 'fs';
+import { basename, extname, join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { AccessIdentity, TokenAuthorizer, TestTokenConfig } from './accessControl';
@@ -16,6 +16,13 @@ import {
   saveRuntimeProfile,
   switchRuntimeProfile
 } from './runtimeProfiles';
+import {
+  getMimeTypeForPath,
+  listRecentWorkspaceFiles,
+  listWorkspaceEntries,
+  resolveAccessibleWorkspaceRoot,
+  resolvePathWithinWorkspaceRoot
+} from './fileBrowser';
 
 export interface Client {
   id: string;
@@ -134,14 +141,37 @@ export class CodeRemoteServer {
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
-    if (req.url === '/health') {
+    const requestUrl = new URL(req.url || '/', 'http://localhost');
+
+    if (requestUrl.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', clients: this.clients.size }));
       return;
     }
 
-    if (this.staticPath && req.url) {
-      const filePath = req.url === '/' ? '/index.html' : req.url;
+    if (requestUrl.pathname.startsWith('/api/')) {
+      this.setApiCorsHeaders(res);
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      if (requestUrl.pathname.startsWith('/api/files/')) {
+        const accessIdentity = this.getHttpAccessIdentity(req);
+        if (!accessIdentity) {
+          this.sendJson(res, 401, { error: 'Unauthorized' });
+          return;
+        }
+
+        this.handleFileApiRequest(req, res, requestUrl, accessIdentity);
+        return;
+      }
+    }
+
+    if (this.staticPath && requestUrl.pathname) {
+      const filePath = requestUrl.pathname === '/' ? '/index.html' : requestUrl.pathname;
       const fullPath = join(this.staticPath, filePath);
 
       if (existsSync(fullPath)) {
@@ -158,14 +188,132 @@ export class CodeRemoteServer {
         };
         const contentType = mimeTypes[ext] || 'application/octet-stream';
         res.writeHead(200, { 'Content-Type': contentType });
-        const { createReadStream } = require('fs');
-        createReadStream(fullPath).pipe(res);
+        fs.createReadStream(fullPath).pipe(res);
         return;
       }
     }
 
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found');
+  }
+
+  private setApiCorsHeaders(res: ServerResponse) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
+    res.setHeader('Cache-Control', 'no-store');
+  }
+
+  private sendJson(res: ServerResponse, statusCode: number, payload: unknown) {
+    this.setApiCorsHeaders(res);
+    res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(payload));
+  }
+
+  private getHttpAccessIdentity(req: IncomingMessage): AccessIdentity | null {
+    const authorizationHeader = req.headers.authorization;
+    if (!authorizationHeader) {
+      return null;
+    }
+
+    const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
+    if (!match) {
+      return null;
+    }
+
+    return this.tokenAuthorizer.resolve(match[1].trim());
+  }
+
+  private handleFileApiRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    requestUrl: URL,
+    accessIdentity: AccessIdentity
+  ) {
+    if (req.method !== 'GET') {
+      this.sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+
+    const workspaceRoot = resolveAccessibleWorkspaceRoot(this.workspaceRoot, accessIdentity);
+    const pathname = requestUrl.pathname;
+
+    try {
+      if (pathname === '/api/files/recent') {
+        const entries = listRecentWorkspaceFiles(workspaceRoot);
+        this.sendJson(res, 200, { entries });
+        return;
+      }
+
+      if (pathname === '/api/files/list') {
+        const relativePath = requestUrl.searchParams.get('path') || '';
+        const result = listWorkspaceEntries(workspaceRoot, relativePath);
+        this.sendJson(res, 200, {
+          path: result.path,
+          parentPath: result.parentPath,
+          entries: result.entries
+        });
+        return;
+      }
+
+      if (pathname === '/api/files/download') {
+        const relativePath = requestUrl.searchParams.get('path');
+        if (!relativePath) {
+          this.sendJson(res, 400, { error: 'Missing path' });
+          return;
+        }
+
+        const { absolutePath } = resolvePathWithinWorkspaceRoot(workspaceRoot, relativePath);
+        if (!existsSync(absolutePath)) {
+          this.sendJson(res, 404, { error: 'File not found' });
+          return;
+        }
+
+        const stats = fs.statSync(absolutePath);
+        if (!stats.isFile()) {
+          this.sendJson(res, 400, { error: 'Path is not a file' });
+          return;
+        }
+
+        this.setApiCorsHeaders(res);
+        res.writeHead(200, {
+          'Content-Type': getMimeTypeForPath(absolutePath),
+          'Content-Length': stats.size,
+          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(basename(absolutePath))}`
+        });
+
+        const stream = fs.createReadStream(absolutePath);
+        stream.on('error', () => {
+          if (!res.headersSent) {
+            this.sendJson(res, 500, { error: 'Failed to read file' });
+            return;
+          }
+
+          res.destroy();
+        });
+        stream.pipe(res);
+        return;
+      }
+
+      this.sendJson(res, 404, { error: 'Not found' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      switch (message) {
+        case 'FILE_NOT_FOUND':
+          this.sendJson(res, 404, { error: 'File not found' });
+          return;
+        case 'NOT_A_DIRECTORY':
+          this.sendJson(res, 400, { error: 'Path is not a directory' });
+          return;
+        case 'PATH_OUTSIDE_ROOT':
+          this.sendJson(res, 403, { error: 'Forbidden path' });
+          return;
+        default:
+          console.error(chalk.red('[files]'), 'HTTP file API error:', error);
+          this.sendJson(res, 500, { error: 'Failed to process file request' });
+      }
+    }
   }
 
   private logDebug(...args: unknown[]) {

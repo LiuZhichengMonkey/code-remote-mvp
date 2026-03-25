@@ -12,9 +12,16 @@ if ([string]::IsNullOrWhiteSpace($taskName)) {
 
 Write-CodeRemoteSection "Uninstall Auto-Start"
 
-try {
-    schtasks.exe /delete /tn $taskName /f | Out-Null
-    Write-Host ("[OK] Removed scheduled task: {0}" -f $taskName) -ForegroundColor Green
-} catch {
-    Write-Host ("[INFO] Scheduled task not found: {0}" -f $taskName) -ForegroundColor Yellow
+$taskNamesToRemove = @(
+    $taskName,
+    "CodeRemote-AutoStart"
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+foreach ($candidateTaskName in $taskNamesToRemove) {
+    try {
+        Unregister-ScheduledTask -TaskName $candidateTaskName -Confirm:$false -ErrorAction Stop
+        Write-Host ("[OK] Removed scheduled task: {0}" -f $candidateTaskName) -ForegroundColor Green
+    } catch {
+        Write-Host ("[INFO] Scheduled task not found: {0}" -f $candidateTaskName) -ForegroundColor Yellow
+    }
 }

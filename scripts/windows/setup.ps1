@@ -10,6 +10,7 @@ $serverToken = [string]$config.server.token
 $workspaceRoot = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.server.workspaceRoot)
 $logsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.paths.logsDir)
 $uploadsDir = Resolve-CodeRemotePath -RepoRoot $repoRoot -Value ([string]$config.paths.uploadsDir)
+$ngrokDomain = [string]$config.tunnel.ngrokDomain
 
 Write-CodeRemoteSection "CodeRemote Setup"
 
@@ -98,10 +99,31 @@ Write-Host ("Workspace:       {0}" -f $workspaceRoot) -ForegroundColor White
 Write-Host ("Logs:            {0}" -f $logsDir) -ForegroundColor White
 Write-Host ("Uploads:         {0}" -f $uploadsDir) -ForegroundColor White
 
+if ($tunnelMode -eq "ngrok" -and -not [string]::IsNullOrWhiteSpace($ngrokDomain)) {
+    $ngrokRemoteHost = Get-CodeRemoteCustomTunnelHost -Value $ngrokDomain
+    $ngrokRemoteHttpUrl = Get-CodeRemoteCustomTunnelHttpUrl -Value $ngrokDomain
+    Write-Host ("Ngrok Remote WS:{0}{1}" -f (' ' * 4), "wss://$ngrokRemoteHost") -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace($ngrokRemoteHttpUrl)) {
+        Write-Host ("Ngrok Remote UI:{0}{1}" -f (' ' * 4), $ngrokRemoteHttpUrl) -ForegroundColor White
+    }
+}
+
 if ($tunnelMode -eq "custom" -and -not [string]::IsNullOrWhiteSpace([string]$config.tunnel.customPublicWsUrl)) {
-    Write-Host ("Custom Remote:   {0}" -f [string]$config.tunnel.customPublicWsUrl) -ForegroundColor Green
+    $customRemoteWsUrl = [string]$config.tunnel.customPublicWsUrl
+    $customRemoteHttpUrl = Get-CodeRemoteCustomTunnelHttpUrl -Value $customRemoteWsUrl
+    Write-Host ("Custom Remote WS:{0}{1}" -f (' ' * 3), $customRemoteWsUrl) -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace($customRemoteHttpUrl)) {
+        Write-Host ("Custom Remote UI:{0}{1}" -f (' ' * 3), $customRemoteHttpUrl) -ForegroundColor White
+    }
+    Write-Host "[WARN] tunnel.mode=custom only records the public address. It does not create or manage the tunnel for you." -ForegroundColor Yellow
+    if ($customRemoteWsUrl -match 'ngrok-free\.dev') {
+        Write-Host "[WARN] If you expect the one-click script to start ngrok automatically, switch tunnel.mode to ngrok." -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""
 Write-Host "Next step:" -ForegroundColor Cyan
 Write-Host ".\scripts\windows\start.ps1" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Optional auto-start:" -ForegroundColor Cyan
+Write-Host ".\scripts\windows\install-autostart.ps1" -ForegroundColor Cyan

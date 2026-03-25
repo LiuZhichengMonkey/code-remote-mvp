@@ -3,8 +3,18 @@ import { AnimatePresence, motion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
-import { AlertCircle, Brain, Check, ChevronDown, Copy, RotateCcw, Sparkles } from 'lucide-react';
-import { ChatOption, Message, MessageProcess, MessageProcessEvent, ProcessPanelPreferences } from '../../types';
+import {
+  AlertCircle,
+  Brain,
+  Check,
+  ChevronDown,
+  Copy,
+  Download,
+  FileText,
+  RotateCcw,
+  Sparkles
+} from 'lucide-react';
+import { Attachment, ChatOption, Message, MessageProcess, MessageProcessEvent, ProcessPanelPreferences } from '../../types';
 import { cn } from '../../utils';
 import {
   getProcessEventDotClass,
@@ -70,6 +80,17 @@ let mermaidConfigured = false;
 const renderMarkdownParagraph = ({ children }: { children: React.ReactNode }) => (
   <p className="whitespace-pre-wrap">{children}</p>
 );
+
+const formatAttachmentSize = (size?: number): string | null => {
+  if (!size || !Number.isFinite(size) || size <= 0) {
+    return null;
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const exponent = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1);
+  const value = size / Math.pow(1024, exponent);
+  return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
+};
 
 const CodeBlock = ({ code, language }: { code: string; language: string }) => {
   const { t } = useI18n();
@@ -309,6 +330,7 @@ interface ChatBubbleProps {
   onCopy?: (text: string) => void;
   onRegenerate?: () => void;
   onOptionClick?: (option: string) => void;
+  onAttachmentDownload?: (attachment: Attachment) => void;
   processPanelPreferences: ProcessPanelPreferences;
 }
 
@@ -319,6 +341,7 @@ export const ChatBubble = React.memo(({
   onCopy,
   onRegenerate,
   onOptionClick,
+  onAttachmentDownload,
   processPanelPreferences
 }: ChatBubbleProps) => {
   const { t } = useI18n();
@@ -468,16 +491,61 @@ export const ChatBubble = React.memo(({
         )}
 
         {message.attachments && message.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2 justify-end">
-            {message.attachments.map(att => (
-              <img
-                key={att.id}
-                src={att.url}
-                alt={att.name}
-                className="w-32 h-32 object-cover rounded-xl border border-white/10"
-                referrerPolicy="no-referrer"
-              />
-            ))}
+          <div className={cn('mb-2 flex flex-wrap gap-2', isUser ? 'justify-end' : 'justify-start')}>
+            {message.attachments.map(att => {
+              const canPreviewImage = att.type.startsWith('image/') && !!att.url;
+              const sizeLabel = formatAttachmentSize(att.size);
+              const canDownload = !!att.relativePath;
+
+              if (canPreviewImage) {
+                return (
+                  <div key={att.id} className="group/attachment relative overflow-hidden rounded-xl border border-white/10">
+                    <img
+                      src={att.url}
+                      alt={att.name}
+                      className="h-32 w-32 object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                    {canDownload && (
+                      <button
+                        type="button"
+                        onClick={() => onAttachmentDownload?.(att)}
+                        className="absolute bottom-2 right-2 rounded-full border border-white/10 bg-black/60 p-2 text-white/80 opacity-0 transition-opacity group-hover/attachment:opacity-100"
+                      >
+                        <Download size={14} />
+                      </button>
+                    )}
+                  </div>
+                );
+              }
+
+              return (
+                <button
+                  key={att.id}
+                  type="button"
+                  disabled={!canDownload}
+                  onClick={() => canDownload && onAttachmentDownload?.(att)}
+                  className={cn(
+                    'flex min-w-[220px] max-w-[260px] items-center gap-3 rounded-xl border px-3 py-3 text-left transition-colors',
+                    canDownload
+                      ? 'border-white/10 bg-black/20 hover:bg-white/[0.06]'
+                      : 'border-white/10 bg-black/15 text-white/70'
+                  )}
+                >
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-white/60">
+                    <FileText size={18} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-white">{att.name}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/45">
+                      <span>{att.type || 'file'}</span>
+                      {sizeLabel && <span>{sizeLabel}</span>}
+                    </div>
+                  </div>
+                  {canDownload && <Download size={14} className="shrink-0 text-white/45" />}
+                </button>
+              );
+            })}
           </div>
         )}
 

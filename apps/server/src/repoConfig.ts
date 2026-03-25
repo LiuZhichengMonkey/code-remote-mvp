@@ -23,6 +23,7 @@ export interface RepoRuntimeConfig {
   tunnel: {
     mode: string;
     ngrokPath?: string;
+    ngrokDomain?: string;
     customPublicWsUrl?: string;
   };
   providers: {
@@ -116,6 +117,7 @@ export function loadRepoRuntimeConfig(filePath: string): RepoRuntimeConfig {
     tunnel: {
       mode: asString(tunnel.mode, 'disabled'),
       ngrokPath: asString(tunnel.ngrokPath),
+      ngrokDomain: asString(tunnel.ngrokDomain),
       customPublicWsUrl: asString(tunnel.customPublicWsUrl)
     },
     providers: {
