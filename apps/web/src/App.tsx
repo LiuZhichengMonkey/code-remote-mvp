@@ -25,6 +25,8 @@ import {
   ProcessPanelPreferences,
   UiPreferences,
   Provider,
+  RemoteFileEntry,
+  WorkspaceFileListResult,
   ServerAccessState
 } from './types';
 import { cn } from './utils';
@@ -84,6 +86,7 @@ import { Header as HeaderView } from './components/layout/Header';
 import { InputArea as InputAreaView } from './components/chat/InputArea';
 import { ScrollIndex as ScrollIndexView } from './components/chat/ScrollIndex';
 import { ChatBubble as ChatBubbleView } from './components/chat/ChatBubble';
+import { FilesPanel as FilesPanelView } from './components/files/FilesPanel';
 import { SUPPORTED_LANGUAGES, useI18n } from './i18n';
 
 interface ProjectInfo {
@@ -661,6 +664,24 @@ const TOKEN_STORAGE_KEY = 'coderemote_token';
 const SESSION_TOKEN_STORAGE_KEY = 'coderemote_token_session';
 const TOKEN_PERSISTED_KEY = 'coderemote_token_persisted';
 const LEGACY_DEFAULT_TOKEN = 'test123';
+const REMOTE_FILE_SOURCE_VALUES = new Set(['workspace', 'attachment', 'upload', 'export', 'recent']);
+const IMAGE_PREVIEWABLE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
+
+type FilesTab = 'session' | 'recent' | 'workspace';
+
+interface RemoteFileRequestContext {
+  sessionId?: string | null;
+  projectId?: string | null;
+  provider?: Provider;
+}
+
+interface ImagePreviewState {
+  path: string;
+  fileName: string;
+  objectUrl: string | null;
+  isLoading: boolean;
+  error: string | null;
+}
 
 const clearPersistedToken = (): void => {
   try {
@@ -678,6 +699,162 @@ const clearSessionToken = (): void => {
     // Ignore storage cleanup failures.
   }
 };
+
+const getHttpBaseUrl = (value: string): string => {
+  if (!value) {
+    return '';
+  }
+
+  try {
+    const url = new URL(value);
+    url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+};
+
+const getPathFileName = (relativePath: string, fallback = 'download'): string => {
+  const normalized = relativePath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const segments = normalized.split('/').filter(Boolean);
+  return segments[segments.length - 1] || fallback;
+};
+
+const normalizeLocalFileLinkPath = (value: string): string => {
+  if (!value) {
+    return '';
+  }
+
+  let normalized = value.trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      normalized = decodeURIComponent(new URL(normalized).pathname);
+    } catch {
+      normalized = normalized.replace(/^file:\/+/i, '/');
+    }
+  } else {
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {
+      // Keep the original string when the link is not URI-encoded.
+    }
+  }
+
+  normalized = normalized.replace(/\\/g, '/');
+  return normalized.replace(/^\/(?=[A-Za-z]:\/)/, '');
+};
+
+const isPreviewableImagePath = (value: string): boolean => {
+  const normalized = normalizeLocalFileLinkPath(value);
+  const sanitized = normalized.split(/[?#]/, 1)[0] || normalized;
+  const extensionIndex = sanitized.lastIndexOf('.');
+
+  if (extensionIndex === -1) {
+    return false;
+  }
+
+  return IMAGE_PREVIEWABLE_EXTENSIONS.has(sanitized.slice(extensionIndex + 1).toLowerCase());
+};
+
+const parseContentDispositionFileName = (
+  contentDisposition: string | null,
+  fallbackName: string
+): string => {
+  if (!contentDisposition) {
+    return fallbackName;
+  }
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const quotedMatch = contentDisposition.match(/filename="([^"]+)"/i);
+  if (quotedMatch?.[1]) {
+    return quotedMatch[1];
+  }
+
+  const plainMatch = contentDisposition.match(/filename=([^;]+)/i);
+  if (plainMatch?.[1]) {
+    return plainMatch[1].trim();
+  }
+
+  return fallbackName;
+};
+
+const normalizeAttachment = (attachment: any): Attachment => {
+  const generatedId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const source = typeof attachment?.source === 'string' && REMOTE_FILE_SOURCE_VALUES.has(attachment.source)
+    ? attachment.source
+    : undefined;
+
+  return {
+    id: typeof attachment?.id === 'string' ? attachment.id : generatedId,
+    url: typeof attachment?.url === 'string' ? attachment.url : undefined,
+    type: typeof attachment?.type === 'string' ? attachment.type : 'application/octet-stream',
+    name: typeof attachment?.name === 'string' ? attachment.name : 'file',
+    data: typeof attachment?.data === 'string' ? attachment.data : undefined,
+    relativePath: typeof attachment?.relativePath === 'string' ? attachment.relativePath : undefined,
+    size: typeof attachment?.size === 'number' ? attachment.size : undefined,
+    ...(source ? { source } : {}),
+    ...(attachment?.available === false ? { available: false } : {})
+  };
+};
+
+const normalizeIncomingMessage = (message: any): Message => {
+  const normalizedStatus = message?.status === 'sending' || message?.status === 'sent' || message?.status === 'error'
+    ? message.status
+    : undefined;
+
+  return {
+    id: typeof message?.id === 'string' ? message.id : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role: message?.role === 'user' ? 'user' : 'model',
+    content: typeof message?.content === 'string' ? message.content : '',
+    timestamp: typeof message?.timestamp === 'number' ? message.timestamp : Date.now(),
+    ...(normalizedStatus ? { status: normalizedStatus } : {}),
+    ...(Array.isArray(message?.attachments) && message.attachments.length > 0
+      ? { attachments: message.attachments.map(normalizeAttachment) }
+      : {}),
+    ...(Array.isArray(message?.options) ? { options: message.options } : {}),
+    ...(typeof message?.thinking === 'string' ? { thinking: message.thinking } : {}),
+    ...(Array.isArray(message?.tools) ? { tools: message.tools } : {}),
+    ...(message?.process ? { process: message.process } : {}),
+    ...(typeof message?.canRetry === 'boolean' ? { canRetry: message.canRetry } : {})
+  };
+};
+
+const normalizeIncomingMessages = (messages: any[]): Message[] => (
+  Array.isArray(messages) ? messages.map(normalizeIncomingMessage) : []
+);
+
+const normalizeRemoteFileEntry = (entry: any): RemoteFileEntry => {
+  const source = typeof entry?.source === 'string' && REMOTE_FILE_SOURCE_VALUES.has(entry.source)
+    ? entry.source as RemoteFileEntry['source']
+    : 'recent';
+
+  return {
+    name: typeof entry?.name === 'string' ? entry.name : 'file',
+    relativePath: typeof entry?.relativePath === 'string' ? entry.relativePath : '',
+    kind: entry?.kind === 'directory' ? 'directory' : 'file',
+    size: typeof entry?.size === 'number' ? entry.size : 0,
+    mtime: typeof entry?.mtime === 'number' ? entry.mtime : Date.now(),
+    source,
+    ...(typeof entry?.mimeType === 'string' ? { mimeType: entry.mimeType } : {}),
+    ...(entry?.available === false ? { available: false } : {})
+  };
+};
+
+const normalizeRemoteFileEntries = (entries: any[]): RemoteFileEntry[] => (
+  Array.isArray(entries) ? entries.map(normalizeRemoteFileEntry) : []
+);
 
 const getStoredToken = (): string => {
   try {
@@ -1106,6 +1283,19 @@ export default function App() {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [loadingProjects, setLoadingProjects] = useState<Set<string>>(new Set());
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(() => loadActiveRunningSessionCache()?.projectId || null);
+  const [showFilesPanel, setShowFilesPanel] = useState(false);
+  const [activeFilesTab, setActiveFilesTab] = useState<FilesTab>('session');
+  const [sessionFiles, setSessionFiles] = useState<RemoteFileEntry[]>([]);
+  const [currentFilesPath, setCurrentFilesPath] = useState('');
+  const [filesParentPath, setFilesParentPath] = useState<string | null>(null);
+  const [workspaceEntries, setWorkspaceEntries] = useState<RemoteFileEntry[]>([]);
+  const [recentFiles, setRecentFiles] = useState<RemoteFileEntry[]>([]);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [isFilesLoading, setIsFilesLoading] = useState(false);
+  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
+  const imagePreviewRequestIdRef = useRef(0);
+  const imagePreviewUrlRef = useRef<string | null>(null);
 
   const updateSessionAcrossCollections = useCallback((
     sessionId: string | undefined | null,
@@ -1604,6 +1794,451 @@ export default function App() {
   const currentProvider = currentSession?.provider || newSessionProvider;
 
   const messages = currentSession?.messages || [];
+  const httpBaseUrl = useMemo(() => getHttpBaseUrl(serverUrl), [serverUrl]);
+
+  const fetchFileApi = useCallback(async (
+    endpoint: string,
+    params?: Record<string, string>
+  ): Promise<Response> => {
+    if (!httpBaseUrl) {
+      throw new Error('Invalid server URL');
+    }
+
+    if (!token) {
+      throw new Error('Missing access token');
+    }
+
+    const requestUrl = new URL(endpoint, `${httpBaseUrl}/`);
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        requestUrl.searchParams.set(key, value);
+      });
+    }
+
+    const response = await fetch(requestUrl.toString(), {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      let errorMessage = `Request failed (${response.status})`;
+      try {
+        const payload = await response.json();
+        if (typeof payload?.error === 'string' && payload.error.trim()) {
+          errorMessage = payload.error;
+        }
+      } catch {
+        // Ignore non-JSON error bodies.
+      }
+
+      throw new Error(errorMessage);
+    }
+
+    return response;
+  }, [httpBaseUrl, token]);
+
+  const loadSessionFiles = useCallback(async (
+    sessionId: string | null | undefined = currentSessionIdRef.current,
+    projectId: string | null | undefined = currentProjectId,
+    provider: Provider | undefined = currentSession?.provider || newSessionProvider
+  ) => {
+    if (!isConnected) {
+      return;
+    }
+
+    if (!sessionId) {
+      setSessionFiles([]);
+      return;
+    }
+
+    setFilesError(null);
+    setIsFilesLoading(true);
+
+    try {
+      const response = await fetchFileApi('/api/files/session', {
+        sessionId,
+        ...(projectId ? { projectId } : {}),
+        ...(provider ? { provider } : {})
+      });
+      const payload = await response.json();
+      setSessionFiles(normalizeRemoteFileEntries(payload?.entries));
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Failed to load files');
+    } finally {
+      setIsFilesLoading(false);
+    }
+  }, [currentProjectId, currentSession?.provider, fetchFileApi, isConnected, newSessionProvider]);
+
+  const loadRecentFiles = useCallback(async () => {
+    if (!isConnected) {
+      return;
+    }
+
+    setFilesError(null);
+    setIsFilesLoading(true);
+
+    try {
+      const response = await fetchFileApi('/api/files/recent');
+      const payload = await response.json();
+      setRecentFiles(normalizeRemoteFileEntries(payload?.entries));
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Failed to load files');
+    } finally {
+      setIsFilesLoading(false);
+    }
+  }, [fetchFileApi, isConnected]);
+
+  const loadWorkspaceFiles = useCallback(async (nextPath = '') => {
+    if (!isConnected) {
+      return;
+    }
+
+    setFilesError(null);
+    setIsFilesLoading(true);
+
+    try {
+      const response = await fetchFileApi('/api/files/list', {
+        path: nextPath
+      });
+      const payload = await response.json() as WorkspaceFileListResult;
+      setCurrentFilesPath(typeof payload?.path === 'string' ? payload.path : nextPath);
+      setFilesParentPath(typeof payload?.parentPath === 'string' ? payload.parentPath : null);
+      setWorkspaceEntries(normalizeRemoteFileEntries(payload?.entries as any[]));
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Failed to load files');
+    } finally {
+      setIsFilesLoading(false);
+    }
+  }, [fetchFileApi, isConnected]);
+
+  const fetchRemoteFileBlob = useCallback(async (
+    relativePath: string,
+    fileName?: string,
+    context?: RemoteFileRequestContext
+  ): Promise<{ blob: Blob; fileName: string; mimeType: string }> => {
+    const response = await fetchFileApi('/api/files/download', {
+      path: relativePath,
+      ...(context?.sessionId ? { sessionId: context.sessionId } : {}),
+      ...(context?.projectId ? { projectId: context.projectId } : {}),
+      ...(context?.provider ? { provider: context.provider } : {})
+    });
+    const fallbackName = fileName || getPathFileName(relativePath);
+
+    return {
+      blob: await response.blob(),
+      fileName: parseContentDispositionFileName(
+        response.headers.get('Content-Disposition'),
+        fallbackName
+      ),
+      mimeType: response.headers.get('Content-Type') || 'application/octet-stream'
+    };
+  }, [fetchFileApi]);
+
+  const downloadRemoteFile = useCallback(async (
+    relativePath: string,
+    fileName?: string,
+    context?: RemoteFileRequestContext
+  ) => {
+    if (!relativePath) {
+      return;
+    }
+
+    setFilesError(null);
+    setDownloadingPath(relativePath);
+
+    try {
+      const resource = await fetchRemoteFileBlob(relativePath, fileName, context);
+      const blobUrl = window.URL.createObjectURL(resource.blob);
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = resource.fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'Failed to download file');
+    } finally {
+      setDownloadingPath(null);
+    }
+  }, [fetchRemoteFileBlob]);
+
+  const closeImagePreview = useCallback(() => {
+    imagePreviewRequestIdRef.current += 1;
+    setImagePreview(previous => {
+      if (previous?.objectUrl) {
+        window.URL.revokeObjectURL(previous.objectUrl);
+      }
+      return null;
+    });
+  }, []);
+
+  const openImagePreview = useCallback(async (
+    relativePath: string,
+    fileName: string,
+    context?: RemoteFileRequestContext
+  ) => {
+    if (!relativePath) {
+      return;
+    }
+
+    const requestId = imagePreviewRequestIdRef.current + 1;
+    imagePreviewRequestIdRef.current = requestId;
+    setFilesError(null);
+    setImagePreview(previous => {
+      if (previous?.objectUrl) {
+        window.URL.revokeObjectURL(previous.objectUrl);
+      }
+      return {
+        path: relativePath,
+        fileName,
+        objectUrl: null,
+        isLoading: true,
+        error: null
+      };
+    });
+
+    try {
+      const resource = await fetchRemoteFileBlob(relativePath, fileName, context);
+      if (!resource.mimeType.startsWith('image/')) {
+        throw new Error(t('bubble.filePreviewFailed', { error: resource.mimeType }));
+      }
+
+      const objectUrl = window.URL.createObjectURL(resource.blob);
+      if (imagePreviewRequestIdRef.current !== requestId) {
+        window.URL.revokeObjectURL(objectUrl);
+        return;
+      }
+
+      setImagePreview(previous => {
+        if (!previous || previous.path !== relativePath) {
+          window.URL.revokeObjectURL(objectUrl);
+          return previous;
+        }
+        if (previous.objectUrl) {
+          window.URL.revokeObjectURL(previous.objectUrl);
+        }
+        return {
+          ...previous,
+          fileName: resource.fileName,
+          objectUrl,
+          isLoading: false,
+          error: null
+        };
+      });
+    } catch (error) {
+      if (imagePreviewRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      setImagePreview(previous => (
+        previous
+          ? {
+              ...previous,
+              isLoading: false,
+              error: error instanceof Error
+                ? error.message
+                : t('bubble.filePreviewFailed', { error: t('common.unknownError') })
+            }
+          : previous
+      ));
+    }
+  }, [fetchRemoteFileBlob, t]);
+
+  const handleAttachmentDownload = useCallback((attachment: Attachment) => {
+    if (!attachment.relativePath) {
+      return;
+    }
+
+    void downloadRemoteFile(attachment.relativePath, attachment.name, {
+      sessionId: currentSessionIdRef.current,
+      projectId: currentProjectId,
+      provider: currentSession?.provider || newSessionProvider
+    });
+  }, [currentProjectId, currentSession?.provider, downloadRemoteFile, newSessionProvider]);
+
+  const handleMessageFileLink = useCallback((href: string, label?: string) => {
+    const normalizedPath = normalizeLocalFileLinkPath(href);
+    if (!normalizedPath) {
+      return;
+    }
+
+    touchWebSocketActivity('message_file_link');
+
+    const context: RemoteFileRequestContext = {
+      sessionId: currentSessionIdRef.current,
+      projectId: currentProjectId,
+      provider: currentSession?.provider || newSessionProvider
+    };
+    const fileName = label?.trim() || getPathFileName(normalizedPath);
+
+    if (isPreviewableImagePath(normalizedPath)) {
+      void openImagePreview(normalizedPath, fileName, context);
+      return;
+    }
+
+    void downloadRemoteFile(normalizedPath, fileName, context);
+  }, [currentProjectId, currentSession?.provider, downloadRemoteFile, newSessionProvider, openImagePreview, touchWebSocketActivity]);
+
+  useEffect(() => {
+    imagePreviewUrlRef.current = imagePreview?.objectUrl || null;
+  }, [imagePreview?.objectUrl]);
+
+  useEffect(() => () => {
+    if (imagePreviewUrlRef.current) {
+      window.URL.revokeObjectURL(imagePreviewUrlRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!imagePreview) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeImagePreview();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [closeImagePreview, imagePreview]);
+
+  const handleFilesClick = useCallback(() => {
+    const nextOpen = !showFilesPanel;
+    const nextTab: FilesTab = activeFilesTab === 'session' && !currentSessionIdRef.current
+      ? 'recent'
+      : activeFilesTab;
+    touchWebSocketActivity('toggle_files');
+    setShowSettings(false);
+    setIsSidebarOpen(false);
+    if (nextOpen && nextTab !== activeFilesTab) {
+      setActiveFilesTab(nextTab);
+    }
+    setShowFilesPanel(nextOpen);
+
+    if (!nextOpen || !isConnected) {
+      return;
+    }
+
+    if (nextTab === 'session') {
+      void loadSessionFiles(
+        currentSessionIdRef.current,
+        currentProjectId,
+        currentSession?.provider || newSessionProvider
+      );
+      return;
+    }
+
+    if (nextTab === 'recent') {
+      setSessionFiles([]);
+      void loadRecentFiles();
+      return;
+    }
+
+    void loadWorkspaceFiles(currentFilesPath);
+  }, [
+    activeFilesTab,
+    currentFilesPath,
+    currentProjectId,
+    currentSession?.provider,
+    isConnected,
+    loadSessionFiles,
+    loadRecentFiles,
+    loadWorkspaceFiles,
+    newSessionProvider,
+    showFilesPanel,
+    touchWebSocketActivity
+  ]);
+
+  const handleFilesTabChange = useCallback((tab: FilesTab) => {
+    setActiveFilesTab(tab);
+
+    if (!isConnected) {
+      return;
+    }
+
+    if (tab === 'session') {
+      void loadSessionFiles(
+        currentSessionIdRef.current,
+        currentProjectId,
+        currentSession?.provider || newSessionProvider
+      );
+      return;
+    }
+
+    if (tab === 'recent') {
+      void loadRecentFiles();
+      return;
+    }
+
+    void loadWorkspaceFiles(currentFilesPath);
+  }, [
+    currentFilesPath,
+    currentProjectId,
+    currentSession?.provider,
+    isConnected,
+    loadRecentFiles,
+    loadSessionFiles,
+    loadWorkspaceFiles,
+    newSessionProvider
+  ]);
+
+  const handleFilesRefresh = useCallback(() => {
+    if (activeFilesTab === 'session') {
+      void loadSessionFiles(
+        currentSessionIdRef.current,
+        currentProjectId,
+        currentSession?.provider || newSessionProvider
+      );
+      return;
+    }
+
+    if (activeFilesTab === 'recent') {
+      void loadRecentFiles();
+      return;
+    }
+
+    void loadWorkspaceFiles(currentFilesPath);
+  }, [
+    activeFilesTab,
+    currentFilesPath,
+    currentProjectId,
+    currentSession?.provider,
+    loadRecentFiles,
+    loadSessionFiles,
+    loadWorkspaceFiles,
+    newSessionProvider
+  ]);
+
+  const handleFilesOpenPath = useCallback((nextPath: string) => {
+    setActiveFilesTab('workspace');
+    void loadWorkspaceFiles(nextPath);
+  }, [loadWorkspaceFiles]);
+
+  useEffect(() => {
+    if (!showFilesPanel || activeFilesTab !== 'session' || !isConnected) {
+      return;
+    }
+
+    if (!currentSessionId) {
+      setSessionFiles([]);
+      return;
+    }
+
+    void loadSessionFiles(currentSessionId, currentProjectId, currentSession?.provider || newSessionProvider);
+  }, [
+    activeFilesTab,
+    currentProjectId,
+    currentSession?.provider,
+    currentSessionId,
+    isConnected,
+    loadSessionFiles,
+    newSessionProvider,
+    showFilesPanel
+  ]);
 
   useEffect(() => {
     const cachedEntries = Array.from(runningSessions).map(sessionId => {
@@ -2028,6 +2663,64 @@ export default function App() {
               provider: msg.provider,
               timestamp: msg.timestamp || Date.now()
             });
+          }
+        } else if (msg.type === 'attachments_registered') {
+          const registeredAttachments = Array.isArray(msg.attachments)
+            ? msg.attachments.map(normalizeAttachment)
+            : [];
+
+          if (msg.sessionId && registeredAttachments.length > 0) {
+            const attachmentsById = new Map(registeredAttachments.map(attachment => [attachment.id, attachment]));
+
+            updateSessionAcrossCollections(msg.sessionId, session => {
+              let hasChanges = false;
+              const nextMessages = session.messages.map(message => {
+                if (!message.attachments || message.attachments.length === 0) {
+                  return message;
+                }
+
+                let messageChanged = false;
+                const nextAttachments = message.attachments.map(attachment => {
+                  const registered = attachmentsById.get(attachment.id);
+                  if (!registered) {
+                    return attachment;
+                  }
+
+                  messageChanged = true;
+                  return {
+                    ...attachment,
+                    ...registered,
+                    url: attachment.url,
+                    data: attachment.data
+                  };
+                });
+
+                if (!messageChanged) {
+                  return message;
+                }
+
+                hasChanges = true;
+                return {
+                  ...message,
+                  attachments: nextAttachments
+                };
+              });
+
+              return hasChanges
+                ? { ...session, messages: nextMessages }
+                : session;
+            });
+
+            if (showFilesPanel) {
+              if (currentSessionIdRef.current && msg.sessionId === currentSessionIdRef.current) {
+                void loadSessionFiles(
+                  currentSessionIdRef.current,
+                  currentProjectId,
+                  currentSession?.provider || newSessionProvider
+                );
+              }
+              void loadRecentFiles();
+            }
           }
         } else if (msg.type === 'discussion_running') {
           // Rehydrated running discussion after reconnecting
@@ -2488,7 +3181,7 @@ export default function App() {
           debugLog('Session resumed:', msg.session, 'projectId:', msg.projectId, 'hasMore:', msg.hasMore, 'totalMessages:', msg.totalMessages);
           if (msg.session) {
             const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
-            const resumedMessages = msg.session.messages || [];
+            const resumedMessages = normalizeIncomingMessages(msg.session.messages || []);
             const shouldAppendRunningPlaceholder = runningSessionsRef.current.has(msg.session.id)
               && !(
                 resumedMessages.length > 0
@@ -2649,12 +3342,14 @@ export default function App() {
         } else if (msg.type === 'messages_loaded') {
           // Handle more messages loaded (pagination)
           if (msg.messages && msg.sessionId) {
+            const loadedMessages = normalizeIncomingMessages(msg.messages);
+
             // Prepend messages to current session
             setSessions(prev => prev.map(s => {
               if (s.id === msg.sessionId) {
                 return {
                   ...s,
-                  messages: [...msg.messages, ...s.messages]
+                  messages: [...loadedMessages, ...s.messages]
                 };
               }
               return s;
@@ -2671,7 +3366,7 @@ export default function App() {
                       if (s.id === msg.sessionId) {
                         return {
                           ...s,
-                          messages: [...msg.messages, ...s.messages]
+                          messages: [...loadedMessages, ...s.messages]
                         };
                       }
                       return s;
@@ -2743,13 +3438,19 @@ export default function App() {
     clearRunningSessionState,
     clearRunningSessionRehydrationTimeout,
     clearUiPreferencesTimeout,
+    currentProjectId,
     currentProvider,
+    currentSession?.provider,
     ensureRunningSessionShell,
+    loadRecentFiles,
+    loadSessionFiles,
     markSessionAsRunning,
+    newSessionProvider,
     renameRunningSessionState,
     requestUiPreferences,
     sendResumeRequest,
     serverUrl,
+    showFilesPanel,
     syncNewSessionProvider,
     token,
     updateSessionAcrossCollections,
@@ -3291,6 +3992,7 @@ export default function App() {
 
   const handleSettingsToggle = () => {
     touchWebSocketActivity('toggle_settings');
+    setShowFilesPanel(false);
     setShowSettings(prev => !prev);
   };
 
@@ -3313,11 +4015,15 @@ export default function App() {
   return (
     <div className="flex flex-col h-full bg-bg overflow-hidden relative">
       <HeaderView
-        onMenuClick={() => setIsSidebarOpen(true)}
+        onMenuClick={() => {
+          setShowFilesPanel(false);
+          setIsSidebarOpen(true);
+        }}
         onNewChat={handleNewChat}
         title={currentSession?.title || ''}
         onTitleChange={handleTitleChange}
         onTitleBlur={handleTitleBlur}
+        onFilesClick={handleFilesClick}
         onSettingsClick={handleSettingsToggle}
         isConnected={isConnected}
         serverAccess={serverAccess}
@@ -3363,6 +4069,113 @@ export default function App() {
                 processPreferencesSaving={processPreferencesSaving}
                 onProcessPanelPreferenceChange={handleProcessPanelPreferenceChange}
               />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <FilesPanelView
+        isOpen={showFilesPanel}
+        isConnected={isConnected}
+        activeTab={activeFilesTab}
+        currentPath={currentFilesPath}
+        parentPath={filesParentPath}
+        sessionFiles={sessionFiles}
+        recentFiles={recentFiles}
+        workspaceEntries={workspaceEntries}
+        isLoading={isFilesLoading}
+        error={filesError}
+        downloadingPath={downloadingPath}
+        onClose={() => setShowFilesPanel(false)}
+        onTabChange={handleFilesTabChange}
+        onRefresh={handleFilesRefresh}
+        onOpenPath={handleFilesOpenPath}
+        onDownload={(path, fileName) => {
+          void downloadRemoteFile(
+            path,
+            fileName,
+            activeFilesTab === 'session'
+              ? {
+                  sessionId: currentSessionIdRef.current,
+                  projectId: currentProjectId,
+                  provider: currentSession?.provider || newSessionProvider
+                }
+              : undefined
+          );
+        }}
+      />
+
+      <AnimatePresence>
+        {imagePreview && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[80] bg-black/80 backdrop-blur-sm"
+            onClick={closeImagePreview}
+          >
+            <div className="flex h-full w-full items-center justify-center p-4 sm:p-6">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.98, y: 8 }}
+                transition={{ duration: 0.18 }}
+                className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[#0b1220] shadow-[0_24px_80px_rgba(0,0,0,0.45)]"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-3 sm:px-6">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-white">{imagePreview.fileName}</div>
+                    <div className="truncate text-xs text-white/45">{imagePreview.path}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void downloadRemoteFile(imagePreview.path, imagePreview.fileName, {
+                        sessionId: currentSessionIdRef.current,
+                        projectId: currentProjectId,
+                        provider: currentSession?.provider || newSessionProvider
+                      })}
+                      disabled={imagePreview.isLoading || !!imagePreview.error}
+                      className={cn(
+                        'rounded-full border px-4 py-2 text-sm font-medium transition-colors',
+                        imagePreview.isLoading || imagePreview.error
+                          ? 'cursor-not-allowed border-white/10 bg-white/5 text-white/35'
+                          : 'border-cyan-400/30 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/20'
+                      )}
+                    >
+                      {t('common.download')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={closeImagePreview}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                      aria-label={t('common.close')}
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex min-h-[320px] flex-1 items-center justify-center bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.12),transparent_42%),linear-gradient(180deg,rgba(8,12,20,0.98),rgba(4,7,12,1))] p-4 sm:p-6">
+                  {imagePreview.isLoading ? (
+                    <div className="flex flex-col items-center gap-3 text-white/70">
+                      <Loader2 className="h-8 w-8 animate-spin" />
+                      <div className="text-sm">{t('bubble.filePreviewLoading')}</div>
+                    </div>
+                  ) : imagePreview.error ? (
+                    <div className="max-w-xl rounded-3xl border border-red-400/20 bg-red-500/10 px-5 py-4 text-sm text-red-100">
+                      {t('bubble.filePreviewFailed', { error: imagePreview.error })}
+                    </div>
+                  ) : imagePreview.objectUrl ? (
+                    <img
+                      src={imagePreview.objectUrl}
+                      alt={imagePreview.fileName}
+                      className="max-h-[72vh] w-auto max-w-full rounded-2xl border border-white/10 object-contain shadow-[0_18px_64px_rgba(0,0,0,0.45)]"
+                    />
+                  ) : null}
+                </div>
+              </motion.div>
             </div>
           </motion.div>
         )}
@@ -3738,6 +4551,8 @@ export default function App() {
                 }
               }}
               onOptionClick={(option) => handleSend(option, [])}
+              onAttachmentDownload={handleAttachmentDownload}
+              onFileLinkClick={handleMessageFileLink}
               processPanelPreferences={uiPreferences.processPanel}
             />
           ))

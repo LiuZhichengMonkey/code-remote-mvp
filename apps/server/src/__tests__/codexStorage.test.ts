@@ -25,6 +25,8 @@ describe('CodexSessionStorage', () => {
     const sessionId = 'codex-session-1';
     const baseTime = Date.parse('2026-03-21T10:00:00.000Z');
     const timestamp = (offsetMs: number) => new Date(baseTime + offsetMs).toISOString();
+    const uploadedImagePath = path.join(projectPath, 'uploads', 'input.png');
+    const localImagePath = path.join(projectPath, 'local', 'reference.jpg');
 
     const lines = [
       {
@@ -41,7 +43,9 @@ describe('CodexSessionStorage', () => {
         timestamp: timestamp(1000),
         payload: {
           type: 'user_message',
-          message: 'show history'
+          message: 'show history',
+          images: [uploadedImagePath],
+          local_images: [{ path: localImagePath }]
         }
       },
       {
@@ -148,6 +152,7 @@ describe('CodexSessionStorage', () => {
       { role: 'assistant', content: 'First answer' },
       { role: 'assistant', content: 'Second answer' }
     ]);
+    expect(parsed.session.messages[0].images).toEqual([uploadedImagePath, localImagePath]);
 
     const firstAssistantProcess = parsed.session.messages[1].process;
     expect(firstAssistantProcess).toBeDefined();

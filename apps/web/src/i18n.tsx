@@ -19,6 +19,8 @@ const messages = {
     'common.loading': 'Loading...',
     'common.copy': 'Copy',
     'common.copied': 'Copied',
+    'common.download': 'Download',
+    'common.close': 'Close',
     'common.done': 'Done',
     'common.saveAndApply': 'Save and apply',
     'common.on': 'On',
@@ -155,6 +157,8 @@ const messages = {
     'bubble.agentFallbackName': 'Agent',
     'bubble.mermaid.rendering': 'Rendering diagram...',
     'bubble.mermaid.failed': 'Failed to render diagram.',
+    'bubble.filePreviewLoading': 'Loading preview...',
+    'bubble.filePreviewFailed': 'Failed to load preview: {error}',
     'bubble.suggestions': 'Suggestions',
 
     'system.reconnectingAfterRefresh': 'Reconnecting after refresh',
@@ -344,6 +348,10 @@ const messages = {
     'process.event.fallback': '过程',
     'process.summary.toolError': '工具返回了错误',
     'process.summary.toolResult': '工具返回了输出'
+    , 'common.download': '\u4e0b\u8f7d',
+    'common.close': '\u5173\u95ed',
+    'bubble.filePreviewLoading': '\u6b63\u5728\u52a0\u8f7d\u9884\u89c8...',
+    'bubble.filePreviewFailed': '\u9884\u89c8\u52a0\u8f7d\u5931\u8d25\uff1a{error}'
   }
 } as const;
 

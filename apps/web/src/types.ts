@@ -98,6 +98,7 @@ export interface Attachment {
   relativePath?: string;
   size?: number;
   source?: RemoteFileSource;
+  available?: boolean;
 }
 
 export type RemoteFileSource = 'workspace' | 'attachment' | 'upload' | 'export' | 'recent';
@@ -110,6 +111,7 @@ export interface RemoteFileEntry {
   mtime: number;
   source: RemoteFileSource;
   mimeType?: string;
+  available?: boolean;
 }
 
 export interface WorkspaceFileListResult {

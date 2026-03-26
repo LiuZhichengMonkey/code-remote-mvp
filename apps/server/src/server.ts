@@ -19,9 +19,11 @@ import {
 import {
   getMimeTypeForPath,
   listRecentWorkspaceFiles,
+  listSessionRecentFiles,
   listWorkspaceEntries,
   resolveAccessibleWorkspaceRoot,
-  resolvePathWithinWorkspaceRoot
+  resolvePathWithinWorkspaceRoot,
+  resolveSessionReferencedFile
 } from './fileBrowser';
 
 export interface Client {
@@ -246,6 +248,33 @@ export class CodeRemoteServer {
         return;
       }
 
+      if (pathname === '/api/files/session') {
+        const sessionId = requestUrl.searchParams.get('sessionId');
+        const projectId = requestUrl.searchParams.get('projectId') || undefined;
+        const provider = requestUrl.searchParams.get('provider') as Provider | null;
+
+        if (!sessionId) {
+          this.sendJson(res, 200, { entries: [] });
+          return;
+        }
+
+        const session = this.claudeHandler.getSessionForAccess(
+          sessionId,
+          accessIdentity,
+          projectId,
+          provider || undefined
+        );
+        if (!session) {
+          this.sendJson(res, 404, { error: 'Session not found' });
+          return;
+        }
+
+        const sessionWorkspaceRoot = session.cwd || workspaceRoot;
+        const entries = listSessionRecentFiles(sessionWorkspaceRoot, session);
+        this.sendJson(res, 200, { entries });
+        return;
+      }
+
       if (pathname === '/api/files/list') {
         const relativePath = requestUrl.searchParams.get('path') || '';
         const result = listWorkspaceEntries(workspaceRoot, relativePath);
@@ -264,10 +293,37 @@ export class CodeRemoteServer {
           return;
         }
 
-        const { absolutePath } = resolvePathWithinWorkspaceRoot(workspaceRoot, relativePath);
-        if (!existsSync(absolutePath)) {
-          this.sendJson(res, 404, { error: 'File not found' });
-          return;
+        const sessionId = requestUrl.searchParams.get('sessionId');
+        const projectId = requestUrl.searchParams.get('projectId') || undefined;
+        const provider = requestUrl.searchParams.get('provider') as Provider | null;
+
+        let absolutePath: string;
+        if (sessionId) {
+          const session = this.claudeHandler.getSessionForAccess(
+            sessionId,
+            accessIdentity,
+            projectId,
+            provider || undefined
+          );
+          if (!session) {
+            this.sendJson(res, 404, { error: 'Session not found' });
+            return;
+          }
+
+          const sessionWorkspaceRoot = session.cwd || workspaceRoot;
+          const resolvedReference = resolveSessionReferencedFile(sessionWorkspaceRoot, session, relativePath);
+          if (!resolvedReference || resolvedReference.entry.available === false || !existsSync(resolvedReference.absolutePath)) {
+            this.sendJson(res, 404, { error: 'File not found' });
+            return;
+          }
+
+          absolutePath = resolvedReference.absolutePath;
+        } else {
+          absolutePath = resolvePathWithinWorkspaceRoot(workspaceRoot, relativePath).absolutePath;
+          if (!existsSync(absolutePath)) {
+            this.sendJson(res, 404, { error: 'File not found' });
+            return;
+          }
         }
 
         const stats = fs.statSync(absolutePath);

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -61,6 +61,10 @@ const highlightCode = (code: string, language: string): string => {
 };
 
 const MERMAID_DIAGRAM_START = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|sankey-beta|block-beta|packet-beta|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/i;
+const WINDOWS_DRIVE_LINK_PATTERN = /^\/?[A-Za-z]:[\\/]/;
+const FILE_URI_LINK_PATTERN = /^file:\/\/\/?/i;
+const LOCAL_FILE_PREFIX_PATTERN = /^(?:\.{1,2}[\\/]|~[\\/]|\/(?!\/))/;
+const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 const getWholeMessageMermaidSource = (content: string): string | null => {
   const trimmed = content.trim();
@@ -80,6 +84,47 @@ let mermaidConfigured = false;
 const renderMarkdownParagraph = ({ children }: { children: React.ReactNode }) => (
   <p className="whitespace-pre-wrap">{children}</p>
 );
+
+const isLocalFileLink = (href: string): boolean => {
+  const trimmed = href.trim();
+  if (!trimmed || trimmed.startsWith('#')) {
+    return false;
+  }
+
+  if (FILE_URI_LINK_PATTERN.test(trimmed) || WINDOWS_DRIVE_LINK_PATTERN.test(trimmed)) {
+    return true;
+  }
+
+  if (trimmed.startsWith('//')) {
+    return false;
+  }
+
+  if (URI_SCHEME_PATTERN.test(trimmed)) {
+    return false;
+  }
+
+  if (LOCAL_FILE_PREFIX_PATTERN.test(trimmed)) {
+    return true;
+  }
+
+  return true;
+};
+
+const getNodeTextContent = (node: React.ReactNode): string => {
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map(getNodeTextContent).join('');
+  }
+
+  if (React.isValidElement(node)) {
+    return getNodeTextContent((node.props as { children?: React.ReactNode }).children);
+  }
+
+  return '';
+};
 
 const formatAttachmentSize = (size?: number): string | null => {
   if (!size || !Number.isFinite(size) || size <= 0) {
@@ -331,6 +376,7 @@ interface ChatBubbleProps {
   onRegenerate?: () => void;
   onOptionClick?: (option: string) => void;
   onAttachmentDownload?: (attachment: Attachment) => void;
+  onFileLinkClick?: (href: string, label?: string) => void;
   processPanelPreferences: ProcessPanelPreferences;
 }
 
@@ -342,6 +388,7 @@ export const ChatBubble = React.memo(({
   onRegenerate,
   onOptionClick,
   onAttachmentDownload,
+  onFileLinkClick,
   processPanelPreferences
 }: ChatBubbleProps) => {
   const { t } = useI18n();
@@ -467,6 +514,60 @@ export const ChatBubble = React.memo(({
     return acc;
   }, {} as Record<string, typeof message.options>) || {};
 
+  const markdownComponents = useMemo(() => ({
+    code({ className, children, inline, ...props }: any) {
+      const match = /language-([\w-]+)/.exec(className || '');
+      const codeString = String(children).replace(/\n$/, '');
+      const language = match ? match[1] : undefined;
+      const isCodeBlock = match || codeString.includes('\n');
+
+      if (isCodeBlock && !inline) {
+        return !isStreaming && isMermaidBlock(language, codeString)
+          ? <MermaidBlock code={codeString} />
+          : <CodeBlock code={codeString} language={language || 'text'} />;
+      }
+
+      return (
+        <code className={className} {...props}>
+          {children}
+        </code>
+      );
+    },
+    p: renderMarkdownParagraph,
+    a({ href, children, ...props }: any) {
+      const resolvedHref = typeof href === 'string' ? href.trim() : '';
+      const label = getNodeTextContent(children).trim();
+      const localFileLink = !!resolvedHref && isLocalFileLink(resolvedHref);
+
+      if (localFileLink && onFileLinkClick) {
+        return (
+          <a
+            href={resolvedHref}
+            onClick={(event) => {
+              event.preventDefault();
+              onFileLinkClick(resolvedHref, label);
+            }}
+            {...props}
+          >
+            {children}
+          </a>
+        );
+      }
+
+      const openInNewTab = /^(?:https?:)?\/\//i.test(resolvedHref);
+      return (
+        <a
+          href={resolvedHref}
+          target={openInNewTab ? '_blank' : undefined}
+          rel={openInNewTab ? 'noreferrer noopener' : undefined}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    }
+  }), [isStreaming, onFileLinkClick]);
+
   return (
     <motion.div
       id={`message-${message.id}`}
@@ -495,7 +596,7 @@ export const ChatBubble = React.memo(({
             {message.attachments.map(att => {
               const canPreviewImage = att.type.startsWith('image/') && !!att.url;
               const sizeLabel = formatAttachmentSize(att.size);
-              const canDownload = !!att.relativePath;
+              const canDownload = !!att.relativePath && att.available !== false;
 
               if (canPreviewImage) {
                 return (
@@ -641,25 +742,7 @@ export const ChatBubble = React.memo(({
                       ) : (
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm, remarkBreaks]}
-                          components={{
-                            code({ className, children, inline, ...props }: any) {
-                              const match = /language-([\w-]+)/.exec(className || '');
-                              const codeString = String(children).replace(/\n$/, '');
-                              const language = match ? match[1] : undefined;
-                              const isCodeBlock = match || codeString.includes('\n');
-                              if (isCodeBlock && !inline) {
-                                return !isStreaming && isMermaidBlock(language, codeString)
-                                  ? <MermaidBlock code={codeString} />
-                                  : <CodeBlock code={codeString} language={language || 'text'} />;
-                              }
-                              return (
-                                <code className={className} {...props}>
-                                  {children}
-                                </code>
-                              );
-                            },
-                            p: renderMarkdownParagraph
-                          }}
+                          components={markdownComponents}
                         >
                           {agentContent}
                         </ReactMarkdown>
@@ -678,27 +761,7 @@ export const ChatBubble = React.memo(({
               ) : (
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm, remarkBreaks]}
-                  components={{
-                    code({ className, children, inline, ...props }: any) {
-                      const match = /language-([\w-]+)/.exec(className || '');
-                      const codeString = String(children).replace(/\n$/, '');
-                      const language = match ? match[1] : undefined;
-                      const isCodeBlock = match || codeString.includes('\n');
-
-                      if (isCodeBlock && !inline) {
-                        return !isStreaming && isMermaidBlock(language, codeString)
-                          ? <MermaidBlock code={codeString} />
-                          : <CodeBlock code={codeString} language={language || 'text'} />;
-                      }
-
-                      return (
-                        <code className={className} {...props}>
-                          {children}
-                        </code>
-                      );
-                    },
-                    p: renderMarkdownParagraph
-                  }}
+                  components={markdownComponents}
                 >
                   {displayContent}
                 </ReactMarkdown>

@@ -163,9 +163,46 @@ export class CodexSessionStorage {
     this.metadataCache = store;
   }
 
-  private appendUserMessage(messages: ClaudeMessage[], content: string, timestamp: number, id: string): void {
+  private collectImagePaths(value: unknown, sink: string[]): void {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+        sink.push(trimmed);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach(item => this.collectImagePaths(item, sink));
+      return;
+    }
+
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      for (const key of ['path', 'file_path', 'filePath', 'local_path', 'localPath', 'image_path', 'imagePath']) {
+        if (typeof record[key] === 'string') {
+          this.collectImagePaths(record[key], sink);
+        }
+      }
+    }
+  }
+
+  private extractUserMessageImagePaths(payload: any): string[] {
+    const imagePaths: string[] = [];
+    this.collectImagePaths(payload?.images, imagePaths);
+    this.collectImagePaths(payload?.local_images, imagePaths);
+    return Array.from(new Set(imagePaths));
+  }
+
+  private appendUserMessage(
+    messages: ClaudeMessage[],
+    content: string,
+    timestamp: number,
+    id: string,
+    images?: string[]
+  ): void {
     const trimmed = content.trim();
-    if (!trimmed) {
+    if (!trimmed && (!images || images.length === 0)) {
       return;
     }
 
@@ -173,7 +210,8 @@ export class CodexSessionStorage {
       id,
       role: 'user',
       content: trimmed,
-      timestamp
+      timestamp,
+      ...(images && images.length > 0 ? { images } : {})
     });
   }
 
@@ -302,7 +340,14 @@ export class CodexSessionStorage {
 
           if (entry.type === 'event_msg' && entry.payload?.type === 'user_message') {
             const messageText = typeof entry.payload.message === 'string' ? entry.payload.message : '';
-            this.appendUserMessage(messages, messageText, entryTimestamp || Date.now(), `codex-user-${index}`);
+            const imagePaths = this.extractUserMessageImagePaths(entry.payload);
+            this.appendUserMessage(
+              messages,
+              messageText,
+              entryTimestamp || Date.now(),
+              `codex-user-${index}`,
+              imagePaths
+            );
             pendingProcess = null;
             currentAssistantIndex = null;
             if (title === 'New Chat' && messageText.trim()) {

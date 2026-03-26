@@ -131,7 +131,9 @@ export class ClaudeHandler {
     const attachments = (message.images || []).flatMap((filePath, index) => {
       try {
         return [createRemoteAttachmentDescriptor(workspaceRoot, filePath, {
-          id: `${message.id}-attachment-${index}`
+          id: `${message.id}-attachment-${index}`,
+          allowExternal: true,
+          includeMissing: true
         })];
       } catch {
         return [];
@@ -372,6 +374,30 @@ export class ClaudeHandler {
       this.getRawProjectIdForSession(session),
       session.id
     );
+  }
+
+  getSessionForAccess(
+    sessionId: string,
+    accessIdentity?: AccessIdentity,
+    projectId?: string,
+    provider?: Provider
+  ): ClaudeSession | null {
+    if (!this.canAccessSession(sessionId, accessIdentity, projectId, provider)) {
+      return null;
+    }
+
+    if (projectId) {
+      const projectRef = decodeProjectId(projectId);
+      if (projectRef) {
+        const session = this.loadCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId);
+        if (session) {
+          this.sessionManager.setSessionFromCrossProject(session);
+        }
+        return session;
+      }
+    }
+
+    return this.sessionManager.get(sessionId, provider) || this.findSessionForAccess(sessionId, provider);
   }
 
   private resolveProvider(sessionId?: string, projectId?: string, provider?: Provider): Provider {
