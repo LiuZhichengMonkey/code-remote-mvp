@@ -39,7 +39,7 @@ export const Header = ({
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [isComposingTitle, setIsComposingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(title);
-  const filesLabel = language === 'zh-CN' ? '文件' : 'Files';
+  const filesLabel = language === 'zh-CN' ? '\u6587\u4ef6' : 'Files';
 
   useEffect(() => {
     if (!isEditingTitle) {
@@ -66,10 +66,12 @@ export const Header = ({
         ) : (
           <WifiOff size={14} className="text-red-400" />
         )}
-        <span className={cn(
-          'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium',
-          getProviderBadgeClass(currentProvider)
-        )}>
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium',
+            getProviderBadgeClass(currentProvider)
+          )}
+        >
           {getProviderLabel(currentProvider, t)}
         </span>
         {isConnected && isTesterMode && (
