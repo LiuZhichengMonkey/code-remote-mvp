@@ -1,10 +1,12 @@
 import React, { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { FileText, Mic, Paperclip, Send, Square, X } from 'lucide-react';
-import { Attachment } from '../../types';
+import { Attachment, SkillOption } from '../../types';
 import { cn } from '../../utils';
 import { debugLog } from '../../debugLog';
 import { useI18n } from '../../i18n';
+
+type SkillTriggerPrefix = '/' | '$';
 
 interface InputAreaProps {
   onSend: (text: string, files: Attachment[]) => void;
@@ -13,6 +15,9 @@ interface InputAreaProps {
   isConnected: boolean;
   onFocus?: () => void;
   onActivity?: (reason: string) => void;
+  availableSkills: SkillOption[];
+  skillsLoading: boolean;
+  skillsLoadFailed: boolean;
 }
 
 export const InputArea = ({
@@ -21,7 +26,10 @@ export const InputArea = ({
   onStop,
   isConnected,
   onFocus,
-  onActivity
+  onActivity,
+  availableSkills,
+  skillsLoading,
+  skillsLoadFailed
 }: InputAreaProps) => {
   const { t } = useI18n();
   const [input, setInput] = useState('');
@@ -29,18 +37,22 @@ export const InputArea = ({
   const [isRecording, setIsRecording] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [skillFilter, setSkillFilter] = useState('');
+  const [skillTriggerPrefix, setSkillTriggerPrefix] = useState<SkillTriggerPrefix>('/');
   const [showAgents, setShowAgents] = useState(false);
   const [agentFilter, setAgentFilter] = useState('');
   const [agentStartPos, setAgentStartPos] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const skills = [
-    { id: 'git-commit', name: t('input.skill.gitCommit.name'), description: t('input.skill.gitCommit.description'), trigger: '/git-workflow' },
-    { id: 'create-readme', name: t('input.skill.createReadme.name'), description: t('input.skill.createReadme.description'), trigger: '/create-readme' },
-    { id: 'simplify', name: t('input.skill.simplify.name'), description: t('input.skill.simplify.description'), trigger: '/simplify' },
-    { id: 'brainstorm', name: t('input.skill.brainstorm.name'), description: t('input.skill.brainstorm.description'), trigger: '/brainstorming' },
+  const fallbackSkills: SkillOption[] = [
+    { id: 'git-commit', name: t('input.skill.gitCommit.name'), description: t('input.skill.gitCommit.description'), command: 'git-workflow' },
+    { id: 'create-readme', name: t('input.skill.createReadme.name'), description: t('input.skill.createReadme.description'), command: 'create-readme' },
+    { id: 'simplify', name: t('input.skill.simplify.name'), description: t('input.skill.simplify.description'), command: 'simplify' },
+    { id: 'brainstorm', name: t('input.skill.brainstorm.name'), description: t('input.skill.brainstorm.description'), command: 'brainstorming' },
   ];
+  const skills = availableSkills.length > 0 || !skillsLoadFailed
+    ? availableSkills
+    : fallbackSkills;
 
   const agents = [
     { id: 'code-reviewer', name: t('input.agent.codeReviewer.name'), alias: 'code-reviewer', icon: 'CR', color: '#4CAF50', description: t('input.agent.codeReviewer.description') },
@@ -53,7 +65,11 @@ export const InputArea = ({
   ];
 
   const filteredSkills = skillFilter
-    ? skills.filter(s => s.name.toLowerCase().includes(skillFilter.toLowerCase()) || s.description.toLowerCase().includes(skillFilter.toLowerCase()))
+    ? skills.filter(s => (
+        s.name.toLowerCase().includes(skillFilter.toLowerCase())
+        || s.description.toLowerCase().includes(skillFilter.toLowerCase())
+        || s.command.toLowerCase().includes(skillFilter.toLowerCase())
+      ))
     : skills;
 
   const filteredAgents = agentFilter
@@ -64,18 +80,34 @@ export const InputArea = ({
       )
     : agents;
 
+  const getSkillPrefix = (value: string): SkillTriggerPrefix | null => {
+    if (!value) {
+      return null;
+    }
+
+    if (value.startsWith('/')) {
+      return '/';
+    }
+
+    if (value.startsWith('$')) {
+      return '$';
+    }
+
+    return null;
+  };
+
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     onActivity?.('input_change');
     setInput(value);
 
-    if (value === '/') {
+    const nextSkillPrefix = getSkillPrefix(value);
+    if (nextSkillPrefix) {
       setShowSkills(true);
-      setSkillFilter('');
-      setShowAgents(false);
-    } else if (showSkills && value.startsWith('/')) {
       setSkillFilter(value.slice(1));
-    } else if (showSkills && !value.startsWith('/')) {
+      setSkillTriggerPrefix(nextSkillPrefix);
+      setShowAgents(false);
+    } else if (showSkills && !nextSkillPrefix) {
       setShowSkills(false);
       setSkillFilter('');
     }
@@ -101,8 +133,8 @@ export const InputArea = ({
     }
   };
 
-  const handleSelectSkill = (skill: typeof skills[0]) => {
-    const skillMessage = `${skill.trigger} `;
+  const handleSelectSkill = (skill: SkillOption) => {
+    const skillMessage = `${skillTriggerPrefix}${skill.command} `;
     onActivity?.('select_skill');
     debugLog('[handleSelectSkill] skill:', skill.name, 'message:', skillMessage, 'isConnected:', isConnected, 'isGenerating:', isGenerating);
     setInput(skillMessage);
@@ -145,6 +177,7 @@ export const InputArea = ({
             url: URL.createObjectURL(file),
             type: file.type,
             name: file.name,
+            size: file.size,
             data: (reader.result as string).split(',')[1]
           });
         };
@@ -273,7 +306,11 @@ export const InputArea = ({
               </div>
               <div className="max-h-[200px] overflow-y-auto">
                 {filteredSkills.length === 0 ? (
+                  skillsLoading && !skillsLoadFailed ? (
+                    <div className="p-3 text-xs text-white/40">{t('common.loading')}</div>
+                  ) : (
                   <div className="p-3 text-xs text-white/40">{t('input.skills.empty')}</div>
+                  )
                 ) : (
                   filteredSkills.map(skill => (
                     <button
@@ -281,11 +318,8 @@ export const InputArea = ({
                       onClick={() => handleSelectSkill(skill)}
                       className="w-full p-3 text-left hover:bg-white/5 transition-colors flex items-center gap-3"
                     >
-                      <div className="flex-1">
-                        <div className="text-sm font-medium text-white">{skill.name}</div>
-                        <div className="text-xs text-white/40">{skill.description}</div>
-                      </div>
-                      <span className="text-xs text-accent font-mono">{skill.trigger}</span>
+                      <div className="flex-1 min-w-0 text-sm font-medium text-white truncate">{skill.name}</div>
+                      <span className="text-xs text-accent font-mono">{`${skillTriggerPrefix}${skill.command}`}</span>
                     </button>
                   ))
                 )}

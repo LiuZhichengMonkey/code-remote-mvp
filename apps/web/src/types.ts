@@ -5,6 +5,14 @@ export interface ChatOption {
   category?: string;
 }
 
+export interface SkillOption {
+  id: string;
+  command: string;
+  name: string;
+  description?: string;
+  source?: 'project' | 'user' | 'system';
+}
+
 export interface ToolUse {
   toolName: string;
   toolInput?: Record<string, unknown>;

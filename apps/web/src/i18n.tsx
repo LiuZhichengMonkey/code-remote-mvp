@@ -121,7 +121,7 @@ const messages = {
 
     'stream.processingProvider': '{provider} is processing...',
 
-    'input.placeholder.connected': 'Message... (/ for commands, @ for multi-agent discussion)',
+    'input.placeholder.connected': 'Message... (`/` or `$` for skills, `@` for multi-agent discussion)',
     'input.placeholder.disconnected': 'Connect to start...',
     'input.listening': 'Listening...',
     'input.filePreviewAlt': 'preview',
@@ -386,6 +386,10 @@ export const translate = (
   key: TranslationKey,
   params?: TranslationParams
 ): string => {
+  if (language === 'zh-CN' && key === 'input.placeholder.connected') {
+    return interpolate('\u8f93\u5165\u6d88\u606f...\uff08`/` \u6216 `$` \u89e6\u53d1 skills\uff0c`@` \u53d1\u8d77\u591a\u667a\u80fd\u4f53\u8ba8\u8bba\uff09', params);
+  }
+
   const template = messages[language][key] || messages['en-US'][key] || key;
   return interpolate(template, params);
 };

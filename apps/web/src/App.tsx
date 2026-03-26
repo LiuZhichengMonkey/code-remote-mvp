@@ -26,6 +26,7 @@ import {
   UiPreferences,
   Provider,
   RemoteFileEntry,
+  SkillOption,
   WorkspaceFileListResult,
   ServerAccessState
 } from './types';
@@ -856,6 +857,33 @@ const normalizeRemoteFileEntries = (entries: any[]): RemoteFileEntry[] => (
   Array.isArray(entries) ? entries.map(normalizeRemoteFileEntry) : []
 );
 
+const normalizeSkillOption = (skill: any): SkillOption => {
+  const command = typeof skill?.command === 'string' && skill.command.trim()
+    ? skill.command.trim()
+    : 'skill';
+  const normalizedSource = skill?.source === 'project' || skill?.source === 'user' || skill?.source === 'system'
+    ? skill.source
+    : undefined;
+
+  return {
+    id: typeof skill?.id === 'string' && skill.id.trim()
+      ? skill.id.trim()
+      : command,
+    command,
+    name: typeof skill?.name === 'string' && skill.name.trim()
+      ? skill.name.trim()
+      : command,
+    ...(typeof skill?.description === 'string' && skill.description.trim()
+      ? { description: skill.description.trim() }
+      : {}),
+    ...(normalizedSource ? { source: normalizedSource } : {})
+  };
+};
+
+const normalizeSkillOptions = (skills: any[]): SkillOption[] => (
+  Array.isArray(skills) ? skills.map(normalizeSkillOption) : []
+);
+
 const getStoredToken = (): string => {
   try {
     const sessionToken = sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY) || '';
@@ -1037,6 +1065,22 @@ export default function App() {
   const [runtimeProfiles, setRuntimeProfiles] = useState(createRuntimeProfilesState);
   const [processPreferencesLoaded, setProcessPreferencesLoaded] = useState(false);
   const [processPreferencesSaving, setProcessPreferencesSaving] = useState(false);
+  const [skillsByProvider, setSkillsByProvider] = useState<Record<Provider, SkillOption[]>>({
+    claude: [],
+    codex: []
+  });
+  const [skillsLoadingByProvider, setSkillsLoadingByProvider] = useState<Record<Provider, boolean>>({
+    claude: false,
+    codex: false
+  });
+  const [skillsLoadedByProvider, setSkillsLoadedByProvider] = useState<Record<Provider, boolean>>({
+    claude: false,
+    codex: false
+  });
+  const [skillsLoadFailedByProvider, setSkillsLoadFailedByProvider] = useState<Record<Provider, boolean>>({
+    claude: false,
+    codex: false
+  });
   const lastSavedUiPreferencesRef = useRef<UiPreferences>(DEFAULT_UI_PREFERENCES);
   const pendingUiPreferencesRollbackRef = useRef<UiPreferences | null>(null);
   const uiPreferencesRequestRef = useRef<'load' | 'save' | null>(null);
@@ -1792,6 +1836,9 @@ export default function App() {
   ), [findLocalSession, currentProjectId, currentSessionId]);
 
   const currentProvider = currentSession?.provider || newSessionProvider;
+  const currentSkills = skillsByProvider[currentProvider];
+  const currentSkillsLoading = skillsLoadingByProvider[currentProvider];
+  const currentSkillsLoadFailed = skillsLoadFailedByProvider[currentProvider];
 
   const messages = currentSession?.messages || [];
   const httpBaseUrl = useMemo(() => getHttpBaseUrl(serverUrl), [serverUrl]);
@@ -1837,6 +1884,75 @@ export default function App() {
 
     return response;
   }, [httpBaseUrl, token]);
+
+  const loadSkills = useCallback(async (
+    provider: Provider,
+    options?: {
+      force?: boolean;
+    }
+  ) => {
+    if (!isConnected) {
+      return;
+    }
+
+    if (skillsLoadingByProvider[provider]) {
+      return;
+    }
+
+    if (!options?.force && skillsLoadFailedByProvider[provider]) {
+      return;
+    }
+
+    if (!options?.force && skillsLoadedByProvider[provider]) {
+      return;
+    }
+
+    setSkillsLoadingByProvider(previous => ({
+      ...previous,
+      [provider]: true
+    }));
+
+    try {
+      const response = await fetchFileApi('/api/skills', { provider });
+      const payload = await response.json();
+      setSkillsByProvider(previous => ({
+        ...previous,
+        [provider]: normalizeSkillOptions(payload?.skills)
+      }));
+      setSkillsLoadFailedByProvider(previous => ({
+        ...previous,
+        [provider]: false
+      }));
+      setSkillsLoadedByProvider(previous => ({
+        ...previous,
+        [provider]: true
+      }));
+    } catch (error) {
+      console.error('[skills] Failed to load skills for provider:', provider, error);
+      setSkillsLoadFailedByProvider(previous => ({
+        ...previous,
+        [provider]: true
+      }));
+    } finally {
+      setSkillsLoadingByProvider(previous => ({
+        ...previous,
+        [provider]: false
+      }));
+    }
+  }, [fetchFileApi, isConnected, skillsLoadFailedByProvider, skillsLoadedByProvider, skillsLoadingByProvider]);
+
+  useEffect(() => {
+    if (!isConnected) {
+      setSkillsByProvider({ claude: [], codex: [] });
+      setSkillsLoadingByProvider({ claude: false, codex: false });
+      setSkillsLoadedByProvider({ claude: false, codex: false });
+      setSkillsLoadFailedByProvider({ claude: false, codex: false });
+      return;
+    }
+
+    void loadSkills('claude');
+    void loadSkills('codex');
+  }, [isConnected, loadSkills]);
 
   const loadSessionFiles = useCallback(async (
     sessionId: string | null | undefined = currentSessionIdRef.current,
@@ -4612,6 +4728,9 @@ export default function App() {
         isConnected={isConnected}
         onFocus={handleInputFocus}
         onActivity={touchWebSocketActivity}
+        availableSkills={currentSkills}
+        skillsLoading={currentSkillsLoading}
+        skillsLoadFailed={currentSkillsLoadFailed}
       />
     </div>
   );

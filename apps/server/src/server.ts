@@ -9,7 +9,7 @@ import { ImageSuccessResponse, ImageErrorResponse, ImageConfig } from './types/i
 import { ClaudeHandler } from './handlers/claude';
 import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
 import { getImageErrorCode, ImageErrorCode } from './imageErrorCode';
-import { Provider } from './session/provider';
+import { normalizeProvider, Provider } from './session/provider';
 import { UiPreferences, UiPreferencesStorage } from './uiPreferences';
 import {
   listRuntimeProfiles,
@@ -25,6 +25,7 @@ import {
   resolvePathWithinWorkspaceRoot,
   resolveSessionReferencedFile
 } from './fileBrowser';
+import { listAvailableSkills } from './skillDiscovery';
 
 export interface Client {
   id: string;
@@ -160,10 +161,15 @@ export class CodeRemoteServer {
         return;
       }
 
-      if (requestUrl.pathname.startsWith('/api/files/')) {
+      if (requestUrl.pathname.startsWith('/api/files/') || requestUrl.pathname === '/api/skills') {
         const accessIdentity = this.getHttpAccessIdentity(req);
         if (!accessIdentity) {
           this.sendJson(res, 401, { error: 'Unauthorized' });
+          return;
+        }
+
+        if (requestUrl.pathname === '/api/skills') {
+          this.handleSkillsApiRequest(req, res, requestUrl, accessIdentity);
           return;
         }
 
@@ -370,6 +376,24 @@ export class CodeRemoteServer {
           this.sendJson(res, 500, { error: 'Failed to process file request' });
       }
     }
+  }
+
+  private handleSkillsApiRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    requestUrl: URL,
+    accessIdentity: AccessIdentity
+  ) {
+    if (req.method !== 'GET') {
+      this.sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+
+    const workspaceRoot = resolveAccessibleWorkspaceRoot(this.workspaceRoot, accessIdentity);
+    const provider = normalizeProvider(requestUrl.searchParams.get('provider'));
+    const skills = listAvailableSkills(workspaceRoot, provider);
+
+    this.sendJson(res, 200, { skills });
   }
 
   private logDebug(...args: unknown[]) {
