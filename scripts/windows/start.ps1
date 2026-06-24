@@ -68,6 +68,11 @@ if ($tunnelMode -eq "ngrok") {
     Add-CodeRemoteCommandDirectoryToPath -Value $ngrokCommand
 }
 
+# 确保 provider CLI 的目录在 PATH 里，避免子进程 spawn 时找不到
+# （非交互 shell / 计划任务 / 服务启动时 PATH 经常被精简，npm 全局路径会丢失）
+Add-CodeRemoteCommandDirectoryToPath -Value $claudeCommand
+Add-CodeRemoteCommandDirectoryToPath -Value $codexCommand
+
 Write-Host "[1/3] Clearing port $serverPort..." -ForegroundColor Yellow
 Stop-CodeRemoteProcessesOnPort -Port $serverPort
 
@@ -139,6 +144,8 @@ $launcherLines = @(
     '@echo off',
     'setlocal',
     ('cd /d {0}' -f (Format-CodeRemoteCmdArgument -Value $paths.ServerDir)),
+    # 透传当前 PATH，确保 node 子进程能找到 claude/codex CLI
+    ('set "PATH=%PATH%;{0}"' -f $env:PATH),
     ('set "CLAUDE_CLI_COMMAND={0}"' -f $claudeCommand),
     ('set "CODEX_CLI_COMMAND={0}"' -f $codexCommand),
     ('set "CODEREMOTE_DEFAULT_WORKSPACE={0}"' -f $workspaceRoot),

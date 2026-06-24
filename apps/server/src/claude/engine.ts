@@ -2,9 +2,25 @@ import { spawn, exec } from 'child_process';
 import path from 'path';
 import { ClaudeConfig, ClaudeMessage, DEFAULT_CONFIG, ToolUseEvent, ToolResultEvent, LogMessage } from './types';
 
+const DEFAULT_CLAUDE_TIMEOUT_MS = 30 * 60 * 1000;
+
+function getConfiguredTimeoutMs(envKey: string, fallback: number): number {
+  const rawValue = process.env[envKey];
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export class ClaudeCodeEngine {
   private config: ClaudeConfig;
   private cliAvailable: boolean | null = null;
+  // 缓存成功探测的时间戳。失败探测不缓存，方便 PATH 修复后下次消息能立即重试
+  // （避免被"探测失败 → 永久走 SDK 死代码"的 bug 卡死整个进程）
+  private cliAvailableSince: number | null = null;
+  private readonly cliSuccessCacheMs: number = 60 * 1000;
   private maxRetries: number = 3; // 最大重试次数
   private baseRetryDelay: number = 2000; // 基础重试延迟（毫秒）
   private currentProcess: ReturnType<typeof spawn> | null = null; // 当前运行的进程
@@ -57,7 +73,14 @@ export class ClaudeCodeEngine {
   }
 
   async detectClaudeCLI(): Promise<boolean> {
-    if (this.cliAvailable !== null) return this.cliAvailable;
+    // 成功探测缓存 cliSuccessCacheMs 毫秒（避免每个消息都 spawn 一次 --version）
+    if (this.cliAvailable === true && this.cliAvailableSince !== null
+        && (Date.now() - this.cliAvailableSince) < this.cliSuccessCacheMs) {
+      return true;
+    }
+    // 失败探测不缓存：让用户在修复 PATH 后能立即重试
+    this.cliAvailable = null;
+    this.cliAvailableSince = null;
 
     return new Promise((resolve) => {
       const proc = spawn(this.getClaudeCommand(), ['--version'], { shell: true });
@@ -71,12 +94,21 @@ export class ClaudeCodeEngine {
 
       proc.on('close', (code) => {
         clearTimeout(timeout);
-        this.cliAvailable = code === 0;
-        resolve(code === 0);
+        const ok = code === 0;
+        if (ok) {
+          this.cliAvailable = true;
+          this.cliAvailableSince = Date.now();
+        } else {
+          // 失败不缓存：下次 sendMessage 会重试
+          this.cliAvailable = null;
+          this.cliAvailableSince = null;
+        }
+        resolve(ok);
       });
       proc.on('error', () => {
         clearTimeout(timeout);
-        this.cliAvailable = false;
+        this.cliAvailable = null;
+        this.cliAvailableSince = null;
         resolve(false);
       });
     });
@@ -94,16 +126,19 @@ export class ClaudeCodeEngine {
   ): Promise<{ response: string; claudeSessionId?: string }> {
     const useCLI = this.config.preferCLI && await this.detectClaudeCLI();
 
+    if (!useCLI) {
+      throw new Error(
+        `Claude CLI not available. Tried '${this.getClaudeCommand()} --version' but the command was not found on PATH. ` +
+        `Install Claude Code (https://claude.com/claude-code) or set providers.claude.cliCommand in config.json ` +
+        `to an absolute path, then restart the server.`
+      );
+    }
+
     // 自动重试逻辑
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
-        if (useCLI) {
-          return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd, agentConfig);
-        } else {
-          const response = await this.callAnthropicAPI(messages, onChunk, onLog);
-          return { response, claudeSessionId };
-        }
+        return await this.callClaudeCLI(message, onChunk, onLog, claudeSessionId, cwd, agentConfig);
       } catch (error: any) {
         const errorMsg = error.message || '';
         const is429Error = errorMsg.includes('429') ||
@@ -380,12 +415,12 @@ export class ClaudeCodeEngine {
         console.log('[Claude CLI] stderr:', chunk.substring(0, 100));
       });
 
-      // 设置 5 分钟超时
+      const timeoutMs = getConfiguredTimeoutMs('CLAUDE_CLI_TIMEOUT_MS', DEFAULT_CLAUDE_TIMEOUT_MS);
       const timeout = setTimeout(() => {
         console.error('[Claude CLI] TIMEOUT');
         proc.kill();
-        reject(new Error('Claude CLI timeout (300s)'));
-      }, 300000);
+        reject(new Error(`Claude CLI timeout (${Math.round(timeoutMs / 1000)}s)`));
+      }, timeoutMs);
 
       proc.on('error', (err) => {
         clearTimeout(timeout);
@@ -441,92 +476,12 @@ export class ClaudeCodeEngine {
     });
   }
 
-  private async callAnthropicAPI(
-    messages: ClaudeMessage[],
-    onChunk: (content: string, done: boolean, thinking?: string) => void,
-    onLog: (log: LogMessage) => void
-  ): Promise<string> {
-    if (!this.config.apiKey) {
-      throw new Error('API Key not configured. Set ANTHROPIC_API_KEY environment variable or configure in config.');
-    }
-
-    // 发送日志到前端
-    const sendLog = (level: 'info' | 'debug' | 'warn' | 'error', message: string) => {
-      console.log(`[Claude API] ${message}`);
-      onLog({ level, message, timestamp: Date.now() });
-    };
-
-    try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: this.config.apiKey });
-
-      const formattedMessages = messages.map(m => ({
-        role: m.role,
-        content: m.content
-      }));
-
-      sendLog('info', 'Starting API stream...');
-      let fullResponse = '';
-      let fullThinking = '';
-
-      const stream = await client.messages.stream({
-        model: 'claude-sonnet-4-6-20250514',
-        max_tokens: 4096,
-        // 启用 extended thinking
-        thinking: {
-          type: 'enabled',
-          budget_tokens: 10000
-        },
-        messages: formattedMessages
-      });
-
-      // 监听 thinking 事件
-      stream.on('contentBlockStart', (event: any) => {
-        if (event.content_block?.type === 'thinking') {
-          sendLog('debug', 'Thinking block started');
-        }
-      });
-
-      stream.on('contentBlockDelta', (event: any) => {
-        if (event.delta?.type === 'thinking_delta') {
-          const thinking = event.delta.thinking || '';
-          fullThinking += thinking;
-          if (this.config.streamMode === 'realtime') {
-            onChunk('', false, thinking);
-          }
-        }
-      });
-
-      stream.on('text', (text: string) => {
-        fullResponse += text;
-        if (this.config.streamMode === 'realtime') {
-          onChunk(text, false);
-        }
-      });
-
-      await stream.finalMessage();
-
-      if (this.config.streamMode === 'segmented') {
-        onChunk(fullResponse, true, fullThinking);
-      } else {
-        onChunk('', true);
-      }
-
-      sendLog('info', '✅ Response completed');
-      return fullResponse;
-    } catch (error: unknown) {
-      if (error instanceof Error) {
-        throw new Error(`Anthropic API error: ${error.message}`);
-      }
-      throw error;
-    }
-  }
-
   updateConfig(config: Partial<ClaudeConfig>): void {
     this.config = { ...this.config, ...config };
     // 重置 CLI 检测状态
     if (config.preferCLI !== undefined) {
       this.cliAvailable = null;
+      this.cliAvailableSince = null;
     }
   }
 
