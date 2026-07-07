@@ -105,16 +105,33 @@ describe('SessionManager', () => {
   });
 
   describe('resumePaginated', () => {
+    test('does not eagerly load full session history on construction', () => {
+      expect(mockStorage.list).not.toHaveBeenCalled();
+      expect(mockCodexStorage.list).not.toHaveBeenCalled();
+    });
+
     test('应该分页加载会话', () => {
+      const now = Date.now();
       const mockSession = {
         id: 'paginated-session',
         title: 'Paginated',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        messages: [{ id: 'm1', role: 'user', content: 'test', timestamp: Date.now() }]
+        createdAt: now,
+        updatedAt: now,
+        provider: 'claude' as const,
+        messages: Array.from({ length: 50 }, (_, index) => ({
+          id: `m${index + 1}`,
+          role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+          content: `message ${index + 1}`,
+          timestamp: now + index
+        }))
       };
       mockStorage.loadPaginated.mockReturnValue({
-        session: mockSession,
+        session: {
+          ...mockSession,
+          messages: mockSession.messages.slice(-20),
+          _partial: true,
+          _totalMessages: 50
+        },
         hasMore: true,
         totalMessages: 50
       });
@@ -122,8 +139,42 @@ describe('SessionManager', () => {
       const result = manager.resumePaginated('paginated-session', 20);
 
       expect(result.session).toBeDefined();
+      expect(result.session?.messages).toHaveLength(20);
       expect(result.hasMore).toBe(true);
       expect(result.totalMessages).toBe(50);
+      expect(mockStorage.loadPaginated).toHaveBeenCalledWith('paginated-session', 20, undefined);
+      expect(mockStorage.load).not.toHaveBeenCalled();
+    });
+
+    test('should use cached full session before falling back to storage scans', () => {
+      const cachedSession = {
+        id: 'cached-session',
+        title: 'Cached',
+        createdAt: Date.now() - 2000,
+        updatedAt: Date.now(),
+        provider: 'claude',
+        messages: [
+          { id: 'm1', role: 'user', content: 'one', timestamp: Date.now() - 2000 },
+          { id: 'm2', role: 'model', content: 'two', timestamp: Date.now() - 1000 },
+          { id: 'm3', role: 'user', content: 'three', timestamp: Date.now() }
+        ]
+      };
+
+      mockStorage.loadPaginated.mockReturnValue({
+        session: null,
+        hasMore: false,
+        totalMessages: 0
+      });
+
+      const cachedManager = new SessionManager();
+      cachedManager.setSessionFromCrossProject(cachedSession as any);
+      const result = cachedManager.resumePaginated('cached-session', 2);
+
+      expect(result.session?.messages).toHaveLength(2);
+      expect(result.totalMessages).toBe(3);
+      expect(cachedManager.getCurrent()?.messages).toHaveLength(3);
+      expect(cachedManager.get('cached-session')?.messages).toHaveLength(3);
+      expect(mockStorage.loadPaginated).not.toHaveBeenCalled();
     });
   });
 
@@ -205,15 +256,15 @@ describe('SessionManager', () => {
   describe('list', () => {
     test('应该返回会话列表', () => {
       const mockSessions = [
-        { id: 's1', title: 'Session 1', createdAt: Date.now(), messageCount: 5 },
-        { id: 's2', title: 'Session 2', createdAt: Date.now(), messageCount: 3 }
+        { id: 's1', title: 'Session 1', createdAt: 1000, lastActivity: 1000, messageCount: 5 },
+        { id: 's2', title: 'Session 2', createdAt: 2000, lastActivity: 2000, messageCount: 3 }
       ];
       mockStorage.listInfo.mockReturnValue(mockSessions);
 
       const sessions = manager.list();
 
       expect(sessions.length).toBe(2);
-      expect(sessions[0].id).toBe('s1');
+      expect(sessions.map(session => session.id)).toEqual(['s2', 's1']);
     });
   });
 

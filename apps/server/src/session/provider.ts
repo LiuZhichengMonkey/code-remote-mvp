@@ -8,6 +8,26 @@ export interface ProviderProjectRef {
   projectKey: string;
 }
 
+const PROJECT_KEY_PREFIX = 'v2~';
+
+function encodeProjectPath(projectPath: string): string {
+  return Buffer.from(projectPath, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function decodeProjectPath(encodedPath: string): string | null {
+  try {
+    const base64 = encodedPath.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+    return Buffer.from(base64 + padding, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
 export function isProvider(value: string | undefined | null): value is Provider {
   return value === 'claude' || value === 'codex';
 }
@@ -18,22 +38,17 @@ export function normalizeProvider(value: string | undefined | null): Provider {
 
 export function pathToProjectKey(projectPath: string): string {
   const normalized = projectPath.replace(/\\/g, '/');
-  const driveMatch = normalized.match(/^([A-Za-z]):\/(.*)$/);
-
-  if (driveMatch) {
-    const drive = driveMatch[1].toUpperCase();
-    const pathPart = driveMatch[2].replace(/\//g, '-');
-    return `${drive}--${pathPart}`;
-  }
-
-  if (normalized.startsWith('/')) {
-    return normalized.substring(1).replace(/\//g, '-');
-  }
-
-  return normalized.replace(/[:/]/g, '-');
+  return `${PROJECT_KEY_PREFIX}${encodeProjectPath(normalized)}`;
 }
 
 export function projectKeyToPath(projectKey: string): string {
+  if (projectKey.startsWith(PROJECT_KEY_PREFIX)) {
+    const decodedPath = decodeProjectPath(projectKey.substring(PROJECT_KEY_PREFIX.length));
+    if (decodedPath !== null) {
+      return decodedPath;
+    }
+  }
+
   const driveMatch = projectKey.match(/^([A-Z])--(.*)$/);
 
   if (driveMatch) {
@@ -65,7 +80,7 @@ export function decodeProjectId(projectId: string | undefined | null): ProviderP
   const provider = normalizeProvider(projectId.substring(0, separatorIndex));
   const projectKey = projectId.substring(separatorIndex + 1);
 
-  if (!projectKey) {
+  if (!isProvider(projectId.substring(0, separatorIndex)) || !projectKey) {
     return null;
   }
 

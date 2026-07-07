@@ -6,6 +6,8 @@ import {
   ClaudeMessage,
   ClaudeSession,
   LogMessage,
+  MessageProcess,
+  MessageProcessEvent,
   SessionInfo,
   SessionManager,
   ToolResultEvent,
@@ -16,11 +18,17 @@ import {
 import { SessionStorage } from '../claude/storage';
 import { CodexCodeEngine } from '../codex';
 import { CodexProjectInfo, CodexSessionStorage } from '../codexStorage';
+import {
+  buildCompactPrompt,
+  estimateContextUsage,
+  estimateSessionContextUsage,
+  SessionContextUsage
+} from '../claude/context';
 import { parseAgentMentions, hasAgentMention, listAvailableAgents, loadAgentContext, AgentContext } from '../agent';
 import { AccessIdentity, createAdminAccessIdentity, isAdminAccess } from '../accessControl';
 import { SessionAccessStore } from '../sessionAccess';
 import { CommandHandler } from './commands';
-import { DEFAULT_PROVIDER, Provider, decodeProjectId, encodeProjectId } from '../session/provider';
+import { DEFAULT_PROVIDER, Provider, SUPPORTED_PROVIDERS, decodeProjectId, encodeProjectId, pathToProjectKey } from '../session/provider';
 import { resolveSessionWorkspace } from '../sessionWorkspace';
 import {
   createRemoteAttachmentDescriptor,
@@ -60,10 +68,16 @@ interface SessionRunState {
   isRunning: boolean;
   accumulatedContent: string;
   accumulatedThinking: string;
+  capturedContent: string;
+  capturedThinking: string;
   bufferedLogs: LogMessage[];
+  bufferedToolEvents: Array<ToolUseEvent | ToolResultEvent>;
+  processEvents: MessageProcessEvent[];
 }
 
-type RunningStateSnapshotReason = 'reconnect' | 'focus' | 'resume';
+type RunningStateSnapshotReason = 'reconnect' | 'focus' | 'resume' | 'start' | 'compact';
+
+const DEFAULT_PROJECT_SESSION_LIST_LIMIT = 100;
 
 export class ClaudeHandler {
   private sessionManager: SessionManager;
@@ -91,11 +105,45 @@ export class ClaudeHandler {
   }
 
   private createEngine(provider: Provider): ProviderEngine {
-    return provider === 'codex' ? new CodexCodeEngine() : new ClaudeCodeEngine();
+    if (provider === 'codex') {
+      return new CodexCodeEngine();
+    }
+
+    return new ClaudeCodeEngine();
   }
 
-  private resolveSessionWorkspaceContext(accessIdentity?: AccessIdentity): { cwd: string; projectId: string } {
+  private isPathInsideRoot(rootPath: string, targetPath: string): boolean {
+    const relativePath = path.relative(rootPath, targetPath);
+    return relativePath === ''
+      || (
+        Boolean(relativePath)
+        && !relativePath.startsWith('..')
+        && !path.isAbsolute(relativePath)
+      );
+  }
+
+  private resolveSessionWorkspaceContext(
+    accessIdentity?: AccessIdentity,
+    requestedCwd?: string
+  ): { cwd: string; projectId: string } {
     const context = resolveSessionWorkspace(this.workspaceRoot || process.cwd(), accessIdentity);
+    const requestedPath = requestedCwd?.trim();
+    if (requestedPath) {
+      const resolvedRequestedPath = path.resolve(requestedPath);
+      if (accessIdentity && !isAdminAccess(accessIdentity) && !this.isPathInsideRoot(context.workspacePath, resolvedRequestedPath)) {
+        throw new Error('Requested workspace path is outside your allowed workspace');
+      }
+
+      if (!fs.existsSync(resolvedRequestedPath) || !fs.statSync(resolvedRequestedPath).isDirectory()) {
+        throw new Error('Requested workspace path is not a directory');
+      }
+
+      return {
+        cwd: resolvedRequestedPath,
+        projectId: pathToProjectKey(resolvedRequestedPath)
+      };
+    }
+
     return {
       cwd: context.workspacePath,
       projectId: context.projectId
@@ -114,6 +162,39 @@ export class ClaudeHandler {
     }
 
     return session;
+  }
+
+  private updateActiveSessionId(oldSessionId: string, newSessionId: string): void {
+    if (this.activeSessionId === oldSessionId) {
+      this.activeSessionId = newSessionId;
+    }
+  }
+
+  private createCompactionContinuationSession(
+    sourceSession: ClaudeSession,
+    provider: Provider,
+    accessIdentity?: AccessIdentity
+  ): { session: ClaudeSession; prompt: string } {
+    const prompt = buildCompactPrompt(sourceSession).prompt;
+    const baseContext = this.resolveSessionWorkspaceContext(accessIdentity);
+    const context = {
+      cwd: sourceSession.cwd || baseContext.cwd,
+      projectId: sourceSession.projectId || baseContext.projectId
+    };
+
+    const session = this.applySessionWorkspaceContext(
+      this.sessionManager.createTemporary(sourceSession.title, provider, context),
+      accessIdentity
+    );
+
+    this.assignSessionAccess(
+      session.id,
+      provider,
+      this.getRawProjectIdForSession(session),
+      accessIdentity
+    );
+
+    return { session, prompt };
   }
 
   private getWorkspaceRootForSession(
@@ -165,7 +246,24 @@ export class ClaudeHandler {
   ): { code: string; message: string } {
     const normalized = errorMessage.trim();
     const lower = normalized.toLowerCase();
-    const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+    const providerLabel = provider === 'codex'
+      ? 'Codex'
+      : 'Claude';
+
+    if (
+      lower.includes('spawn ')
+      && (
+        lower.includes('eperm')
+        || lower.includes('eacces')
+        || lower.includes('operation not permitted')
+        || lower.includes('permission denied')
+      )
+    ) {
+      return {
+        code: 'CLI_PERMISSION_DENIED',
+        message: `${providerLabel} could not be launched because Windows denied the process spawn. Check that the CLI is installed, executable, and allowed to run from this server account. Original error: ${normalized}`
+      };
+    }
 
     if (
       lower.includes('stream disconnected before completion')
@@ -196,6 +294,85 @@ export class ClaudeHandler {
     };
   }
 
+  private createToolPayload(
+    sessionId: string,
+    provider: Provider,
+    toolEvent: ToolUseEvent | ToolResultEvent,
+    timestamp: number = Date.now()
+  ): Record<string, unknown> {
+    const toolData: Record<string, unknown> = {
+      type: 'claude_tool',
+      sessionId,
+      provider,
+      timestamp
+    };
+
+    if ('toolName' in toolEvent) {
+      toolData.toolName = toolEvent.toolName;
+      toolData.toolInput = toolEvent.toolInput;
+      toolData.toolUseId = toolEvent.toolUseId;
+    } else {
+      toolData.toolUseId = toolEvent.toolUseId;
+      toolData.result = toolEvent.result;
+      toolData.isError = toolEvent.isError;
+    }
+
+    return toolData;
+  }
+
+  private createProcessEvent(
+    event: LogMessage | ToolUseEvent | ToolResultEvent,
+    timestamp: number = Date.now()
+  ): MessageProcessEvent {
+    if ('level' in event) {
+      return {
+        type: 'log',
+        level: event.level,
+        message: event.message,
+        timestamp: event.timestamp
+      };
+    }
+
+    if ('toolName' in event) {
+      return {
+        type: 'tool_use',
+        toolName: event.toolName,
+        toolInput: event.toolInput,
+        toolUseId: event.toolUseId,
+        timestamp
+      };
+    }
+
+    return {
+      type: 'tool_result',
+      toolUseId: event.toolUseId,
+      result: event.result,
+      isError: event.isError,
+      timestamp
+    };
+  }
+
+  private appendProcessEvent(state: SessionRunState, event: MessageProcessEvent): void {
+    const lastEvent = state.processEvents[state.processEvents.length - 1];
+    if (lastEvent && JSON.stringify(lastEvent) === JSON.stringify(event)) {
+      return;
+    }
+
+    state.processEvents.push(event);
+  }
+
+  private buildCompletedProcess(state?: SessionRunState): MessageProcess | undefined {
+    if (!state || state.processEvents.length === 0) {
+      return undefined;
+    }
+
+    return {
+      provider: state.provider,
+      state: 'completed',
+      events: [...state.processEvents]
+    };
+  }
+
   private flushBufferedState(sessionId: string, state: SessionRunState): void {
     if (!state.ws || state.ws.readyState !== 1) {
       return;
@@ -213,14 +390,21 @@ export class ClaudeHandler {
     }
     state.bufferedLogs = [];
 
-    if (!state.accumulatedContent && !state.accumulatedThinking) {
+    for (const toolEvent of state.bufferedToolEvents) {
+      state.ws.send(JSON.stringify(
+        this.createToolPayload(sessionId, state.provider, toolEvent)
+      ));
+    }
+    state.bufferedToolEvents = [];
+
+    if (!state.capturedContent && !state.capturedThinking) {
       return;
     }
 
     state.ws.send(JSON.stringify({
       type: 'claude_stream',
-      content: state.accumulatedContent,
-      thinking: state.accumulatedThinking,
+      content: state.capturedContent,
+      thinking: state.capturedThinking,
       done: false,
       replace: true,
       sessionId,
@@ -232,24 +416,87 @@ export class ClaudeHandler {
     state.accumulatedThinking = '';
   }
 
+  private getCompactSourceSession(
+    sessionId?: string,
+    projectId?: string,
+    provider?: Provider,
+    accessIdentity?: AccessIdentity
+  ): ClaudeSession | null {
+    if (sessionId) {
+      const session = this.getSessionForAccess(sessionId, accessIdentity, projectId, provider);
+      if (session) {
+        return session;
+      }
+    }
+
+    if (this.activeSessionId) {
+      const activeSession = this.getSessionForAccess(this.activeSessionId, accessIdentity, undefined, provider);
+      if (activeSession) {
+        return activeSession;
+      }
+    }
+
+    const currentSession = this.sessionManager.getCurrent();
+    if (
+      currentSession
+      && this.canAccessSession(
+        currentSession.id,
+        accessIdentity,
+        this.getRawProjectIdForSession(currentSession),
+        currentSession.provider
+      )
+    ) {
+      return currentSession;
+    }
+
+    return null;
+  }
+
+  private buildMessagesForEngine(
+    messages: ClaudeMessage[],
+    promptToSend: string,
+    promptToStore: string
+  ): ClaudeMessage[] {
+    if (messages.length === 0 || promptToSend === promptToStore) {
+      return messages;
+    }
+
+    return messages.map((message, index) => {
+      if (index !== messages.length - 1 || message.role !== 'user') {
+        return message;
+      }
+
+      return {
+        ...message,
+        content: promptToSend
+      };
+    });
+  }
+
   private sendRunningStateSnapshot(
     sessionId: string,
     state: SessionRunState,
-    reason: RunningStateSnapshotReason
+    reason: RunningStateSnapshotReason,
+    contextMessages?: ClaudeMessage[]
   ): void {
     if (!state.ws || state.ws.readyState !== 1) {
       return;
     }
 
     const session = this.sessionManager.get(sessionId, state.provider);
+    const contextUsage: SessionContextUsage = estimateContextUsage(
+      session?.provider || state.provider,
+      contextMessages || session?.messages || []
+    );
     state.ws.send(JSON.stringify({
       type: 'session_running_state',
       sessionId,
       title: session?.title || sessionId.substring(0, 12),
       projectId: session ? this.getProjectIdForSession(session) : undefined,
       provider: session?.provider || state.provider,
-      hasBufferedContent: Boolean(state.accumulatedContent || state.accumulatedThinking),
-      hasBufferedLogs: state.bufferedLogs.length > 0,
+      hasBufferedContent: Boolean(state.capturedContent || state.capturedThinking),
+      hasBufferedLogs: state.bufferedLogs.length > 0 || state.bufferedToolEvents.length > 0,
+      contextUsage,
       reason,
       timestamp: Date.now()
     }));
@@ -303,20 +550,24 @@ export class ClaudeHandler {
       return false;
     }
 
-    const projectRef = decodeProjectId(session.projectId);
+    const projectRef = session.projectId.includes(':') ? decodeProjectId(session.projectId) : null;
     const rawProjectId = projectRef?.projectKey || session.projectId;
     const provider = projectRef?.provider || session.provider;
 
     return this.accessStore.canAccessSession(identity, provider, rawProjectId, session.id);
   }
 
-  private filterSessionsByAccess(sessions: SessionInfo[], accessIdentity?: AccessIdentity): SessionInfo[] {
+  private filterSessionsByAccess<T extends SessionInfo>(sessions: T[], accessIdentity?: AccessIdentity): T[] {
     const identity = this.getEffectiveAccessIdentity(accessIdentity);
     if (isAdminAccess(identity)) {
       return sessions;
     }
 
     return sessions.filter(session => this.canAccessSessionInfo(session, identity));
+  }
+
+  private listSessionsForProvider(provider?: Provider): SessionInfo[] {
+    return provider ? this.sessionManager.list(provider) : this.sessionManager.list();
   }
 
   private findSessionForAccess(sessionId: string, provider?: Provider): ClaudeSession | null {
@@ -355,7 +606,7 @@ export class ClaudeHandler {
     }
 
     if (projectId) {
-      const projectRef = decodeProjectId(projectId);
+      const projectRef = projectId.includes(':') ? decodeProjectId(projectId) : null;
       const rawProjectId = projectRef?.projectKey || projectId;
       const effectiveProvider = projectRef?.provider || provider;
       return effectiveProvider
@@ -400,6 +651,31 @@ export class ClaudeHandler {
     return this.sessionManager.get(sessionId, provider) || this.findSessionForAccess(sessionId, provider);
   }
 
+  private getNewSessionSourceSession(
+    sessionId: string | undefined,
+    projectId?: string,
+    accessIdentity?: AccessIdentity
+  ): ClaudeSession | null {
+    if (!sessionId) {
+      return null;
+    }
+
+    const cachedSession = this.sessionManager.get(sessionId);
+    if (
+      cachedSession
+      && this.canAccessSession(
+        sessionId,
+        accessIdentity,
+        this.getProjectIdForSession(cachedSession),
+        cachedSession.provider
+      )
+    ) {
+      return cachedSession;
+    }
+
+    return this.getSessionForAccess(sessionId, accessIdentity, projectId, undefined);
+  }
+
   private resolveProvider(sessionId?: string, projectId?: string, provider?: Provider): Provider {
     if (sessionId) {
       const existingSession = this.findSessionForAccess(sessionId, provider);
@@ -417,9 +693,11 @@ export class ClaudeHandler {
   }
 
   private loadCrossProjectSession(provider: Provider, rawProjectId: string, sessionId: string): ClaudeSession | null {
-    return provider === 'codex'
-      ? CodexSessionStorage.loadSessionFromProject(rawProjectId, sessionId)
-      : SessionStorage.loadSessionFromProject(rawProjectId, sessionId);
+    if (provider === 'codex') {
+      return CodexSessionStorage.loadSessionFromProject(rawProjectId, sessionId);
+    }
+
+    return SessionStorage.loadSessionFromProject(rawProjectId, sessionId);
   }
 
   private loadCrossProjectSessionPaginated(
@@ -429,21 +707,27 @@ export class ClaudeHandler {
     limit: number,
     beforeIndex?: number
   ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
-    return provider === 'codex'
-      ? CodexSessionStorage.loadSessionFromProjectPaginated(rawProjectId, sessionId, limit, beforeIndex)
-      : SessionStorage.loadSessionFromProjectPaginated(rawProjectId, sessionId, limit, beforeIndex);
+    if (provider === 'codex') {
+      return CodexSessionStorage.loadSessionFromProjectPaginated(rawProjectId, sessionId, limit, beforeIndex);
+    }
+
+    return SessionStorage.loadSessionFromProjectPaginated(rawProjectId, sessionId, limit, beforeIndex);
   }
 
   private deleteCrossProjectSession(provider: Provider, rawProjectId: string, sessionId: string): boolean {
-    return provider === 'codex'
-      ? CodexSessionStorage.deleteSessionFromProject(rawProjectId, sessionId)
-      : SessionStorage.deleteSessionFromProject(rawProjectId, sessionId);
+    if (provider === 'codex') {
+      return CodexSessionStorage.deleteSessionFromProject(rawProjectId, sessionId);
+    }
+
+    return SessionStorage.deleteSessionFromProject(rawProjectId, sessionId);
   }
 
   private renameCrossProjectSession(provider: Provider, rawProjectId: string, sessionId: string, newTitle: string): boolean {
-    return provider === 'codex'
-      ? CodexSessionStorage.renameSessionFromProject(rawProjectId, sessionId, newTitle)
-      : SessionStorage.renameSessionFromProject(rawProjectId, sessionId, newTitle);
+    if (provider === 'codex') {
+      return CodexSessionStorage.renameSessionFromProject(rawProjectId, sessionId, newTitle);
+    }
+
+    return SessionStorage.renameSessionFromProject(rawProjectId, sessionId, newTitle);
   }
 
   private listAllProjects(accessIdentity?: AccessIdentity): ProviderProjectInfo[] {
@@ -696,15 +980,35 @@ export class ClaudeHandler {
       return;
     }
 
-    const targetSessionId = sessionId;
-    const requestedProvider = this.resolveProvider(sessionId, projectId, provider);
+    const trimmedContent = originalContent.trim();
+    const compactRequested = /^\/compact(?:\s+.*)?$/i.test(trimmedContent);
+    const compactSourceSession = compactRequested
+      ? this.getCompactSourceSession(sessionId, projectId, provider, accessIdentity)
+      : null;
+    const targetSessionId = compactRequested ? undefined : sessionId;
+    const requestedProvider = compactSourceSession?.provider || this.resolveProvider(sessionId, projectId, provider);
+    const compactPrompt = compactRequested && compactSourceSession
+      ? buildCompactPrompt(compactSourceSession).prompt
+      : null;
 
     if (targetSessionId && this.isSessionRunning(targetSessionId)) {
       sendError('SESSION_BUSY', 'Current session is already processing a request');
       return;
     }
 
-    if (originalContent.startsWith('/')) {
+    if (compactRequested) {
+      if (!compactSourceSession) {
+        sendError('SESSION_NOT_FOUND', 'No active session to compact');
+        return;
+      }
+
+      if (this.isSessionRunning(compactSourceSession.id)) {
+        sendError('SESSION_BUSY', 'Current session is already processing a request');
+        return;
+      }
+    }
+
+    if (!compactRequested && originalContent.startsWith('/')) {
       const parsed = this.commandHandler.parseCommand(originalContent);
       if (parsed) {
         const result = await this.commandHandler.execute(parsed.type, parsed.args);
@@ -722,7 +1026,7 @@ export class ClaudeHandler {
       }
     }
 
-    let content = originalContent;
+    let content = compactPrompt || originalContent;
     let agentConfig: AgentContext | null = null;
 
     if (hasAgentMention(content)) {
@@ -754,10 +1058,22 @@ export class ClaudeHandler {
       }
     }
 
-    const defaultSessionWorkspace = this.resolveSessionWorkspaceContext(accessIdentity);
+    const baseSessionWorkspace = this.resolveSessionWorkspaceContext(accessIdentity);
+    const defaultSessionWorkspace = compactSourceSession
+      ? {
+        cwd: compactSourceSession.cwd || baseSessionWorkspace.cwd,
+        projectId: compactSourceSession.projectId || baseSessionWorkspace.projectId
+      }
+      : baseSessionWorkspace;
     let workingSession: ClaudeSession | null = null;
 
-    if (sessionId && projectId) {
+    if (compactRequested && compactSourceSession && compactPrompt) {
+      workingSession = this.createCompactionContinuationSession(
+        compactSourceSession,
+        requestedProvider,
+        accessIdentity
+      ).session;
+    } else if (sessionId && projectId) {
       const projectRef = decodeProjectId(projectId);
       if (projectRef) {
         const crossProjectSession = this.loadCrossProjectSession(projectRef.provider, projectRef.projectKey, sessionId);
@@ -810,7 +1126,7 @@ export class ClaudeHandler {
         return filePath;
       });
 
-      if (providerForRun === 'claude') {
+      if (!compactRequested && providerForRun === 'claude') {
         const fileDescription = imagePaths
           .map(filePath => `User uploaded file path: ${filePath}. Please read the file directly if needed.`)
           .join(' ');
@@ -821,8 +1137,12 @@ export class ClaudeHandler {
 
     const userMessage = createMessage('user', promptToStore, imagePaths);
     this.sessionManager.addMessageToSession(workingSession.id, userMessage, workingSession.provider);
+    if (compactRequested && compactSourceSession) {
+      this.sessionManager.rename(workingSession.id, compactSourceSession.title, workingSession.provider);
+    }
 
     const messages = this.sessionManager.getMessagesForSession(workingSession.id, workingSession.provider);
+    const engineMessages = this.buildMessagesForEngine(messages, promptToSend, promptToStore);
     const currentSessionId = targetSessionId || workingSession.id || `temp-${Date.now()}`;
 
     if (attachments && attachments.length > 0 && ws.readyState === 1) {
@@ -864,7 +1184,11 @@ export class ClaudeHandler {
           isRunning: false,
           accumulatedContent: '',
           accumulatedThinking: '',
-          bufferedLogs: []
+          capturedContent: '',
+          capturedThinking: '',
+          bufferedLogs: [],
+          bufferedToolEvents: [],
+          processEvents: []
         };
         this.runningSessions.set(currentSessionId, sessionState);
       }
@@ -874,9 +1198,13 @@ export class ClaudeHandler {
     sessionState.isRunning = true;
     sessionState.accumulatedContent = '';
     sessionState.accumulatedThinking = '';
+    sessionState.capturedContent = '';
+    sessionState.capturedThinking = '';
     sessionState.bufferedLogs = [];
+    sessionState.bufferedToolEvents = [];
+    sessionState.processEvents = [];
 
-    if (!this.activeSessionId) {
+    if (compactRequested || !this.activeSessionId) {
       this.activeSessionId = currentSessionId;
     }
 
@@ -894,6 +1222,12 @@ export class ClaudeHandler {
       provider: providerForRun,
       timestamp: Date.now()
     }));
+    this.sendRunningStateSnapshot(
+      currentSessionId,
+      sessionState,
+      compactRequested ? 'compact' : 'start',
+      engineMessages
+    );
 
     try {
       const providerSessionId = getProviderSessionId(workingSession);
@@ -901,38 +1235,46 @@ export class ClaudeHandler {
 
       const result = await sessionState.engine.sendMessage(
         promptToSend,
-        messages,
+        engineMessages,
         (chunk, done, thinking, toolEvent) => {
           const state = this.runningSessions.get(sessionIdForCallbacks);
-          const currentWs = state?.ws;
-          if (!state || !currentWs || currentWs.readyState !== 1) {
+          if (!state) {
+            return;
+          }
+
+          if (toolEvent) {
+            const timestamp = Date.now();
+            this.appendProcessEvent(state, this.createProcessEvent(toolEvent, timestamp));
+
+            const currentWs = state.ws;
+            if (!currentWs || currentWs.readyState !== 1 || !this.isActiveSession(sessionIdForCallbacks)) {
+              state.bufferedToolEvents.push(toolEvent);
+              return;
+            }
+
+            currentWs.send(JSON.stringify(
+              this.createToolPayload(sessionIdForCallbacks, state.provider, toolEvent, timestamp)
+            ));
+            return;
+          }
+
+          if (chunk) {
+            state.capturedContent += chunk;
+          }
+          if (thinking) {
+            state.capturedThinking += thinking;
+          }
+
+          const currentWs = state.ws;
+          if (!currentWs || currentWs.readyState !== 1) {
+            if (chunk || thinking) {
+              state.accumulatedContent = state.capturedContent;
+              state.accumulatedThinking = state.capturedThinking;
+            }
             return;
           }
 
           const isActive = this.isActiveSession(sessionIdForCallbacks);
-
-          if (toolEvent) {
-            const toolData: any = {
-              type: 'claude_tool',
-              sessionId: sessionIdForCallbacks,
-              provider: state.provider,
-              timestamp: Date.now()
-            };
-
-            if ('toolName' in toolEvent) {
-              toolData.toolName = toolEvent.toolName;
-              toolData.toolInput = toolEvent.toolInput;
-              toolData.toolUseId = toolEvent.toolUseId;
-            } else {
-              toolData.toolUseId = toolEvent.toolUseId;
-              toolData.result = toolEvent.result;
-              toolData.isError = toolEvent.isError;
-            }
-
-            currentWs.send(JSON.stringify(toolData));
-            return;
-          }
-
           if (isActive) {
             currentWs.send(JSON.stringify({
               type: 'claude_stream',
@@ -948,18 +1290,16 @@ export class ClaudeHandler {
             return;
           }
 
-          if (chunk) {
-            state.accumulatedContent += chunk;
-          }
-          if (thinking) {
-            state.accumulatedThinking += thinking;
+          if (chunk || thinking) {
+            state.accumulatedContent = state.capturedContent;
+            state.accumulatedThinking = state.capturedThinking;
           }
 
           if (done) {
             currentWs.send(JSON.stringify({
               type: 'claude_stream',
-              content: state.accumulatedContent,
-              thinking: state.accumulatedThinking,
+              content: state.capturedContent,
+              thinking: state.capturedThinking,
               done: true,
               replace: true,
               sessionId: sessionIdForCallbacks,
@@ -972,12 +1312,14 @@ export class ClaudeHandler {
         },
         (log: LogMessage) => {
           const state = this.runningSessions.get(sessionIdForCallbacks);
-          const currentWs = state?.ws;
-          if (!state || !currentWs || currentWs.readyState !== 1) {
+          if (!state) {
             return;
           }
 
-          if (!this.isActiveSession(sessionIdForCallbacks)) {
+          this.appendProcessEvent(state, this.createProcessEvent(log));
+
+          const currentWs = state.ws;
+          if (!currentWs || currentWs.readyState !== 1 || !this.isActiveSession(sessionIdForCallbacks)) {
             state.bufferedLogs.push(log);
             return;
           }
@@ -1006,16 +1348,54 @@ export class ClaudeHandler {
         ? result.claudeSessionId || result.providerSessionId
         : result.providerSessionId;
       const existingProviderSessionId = getProviderSessionId(workingSession);
-      const responseSessionId = returnedProviderSessionId || sessionIdForCallbacks;
       let finalSession = workingSession;
 
-      if ((!sessionId || sessionId === currentSessionId) && returnedProviderSessionId && returnedProviderSessionId !== currentSessionId) {
+      if (compactRequested) {
+        if (returnedProviderSessionId && returnedProviderSessionId !== currentSessionId) {
+          const currentProjectId = this.getRawProjectIdForSession(workingSession);
+          const updatedSession = this.sessionManager.updateSessionIdForSession(
+            currentSessionId,
+            returnedProviderSessionId,
+            providerForRun
+          );
+          if (updatedSession) {
+            finalSession = this.applySessionWorkspaceContext(updatedSession, accessIdentity);
+          }
+
+          this.moveSessionAccess(currentSessionId, returnedProviderSessionId, providerForRun, currentProjectId);
+          this.updateActiveSessionId(currentSessionId, returnedProviderSessionId);
+
+          if (compactSourceSession) {
+            this.sessionManager.rename(returnedProviderSessionId, compactSourceSession.title, providerForRun);
+            if (finalSession) {
+              finalSession.title = compactSourceSession.title;
+            }
+          }
+
+          const state = this.runningSessions.get(sessionIdForCallbacks);
+          const currentWs = state?.ws;
+          if (currentWs && currentWs.readyState === 1) {
+            currentWs.send(JSON.stringify({
+              type: 'session_id_updated',
+              oldSessionId: currentSessionId,
+              newSessionId: returnedProviderSessionId,
+              title: finalSession?.title || content.substring(0, 50),
+              provider: providerForRun,
+              projectId: finalSession ? this.getProjectIdForSession(finalSession) : undefined,
+              contextUsage: estimateContextUsage(providerForRun, engineMessages),
+              operation: 'compact',
+              timestamp: Date.now()
+            }));
+          }
+        }
+      } else if ((!sessionId || sessionId === currentSessionId) && returnedProviderSessionId && returnedProviderSessionId !== currentSessionId) {
         const currentProjectId = this.getRawProjectIdForSession(workingSession);
         const updatedSession = this.sessionManager.updateSessionIdForSession(currentSessionId, returnedProviderSessionId, providerForRun);
         if (updatedSession) {
           finalSession = this.applySessionWorkspaceContext(updatedSession, accessIdentity);
         }
         this.moveSessionAccess(currentSessionId, returnedProviderSessionId, providerForRun, currentProjectId);
+        this.updateActiveSessionId(currentSessionId, returnedProviderSessionId);
         const state = this.runningSessions.get(sessionIdForCallbacks);
         const currentWs = state?.ws;
 
@@ -1027,6 +1407,8 @@ export class ClaudeHandler {
             title: finalSession?.title || content.substring(0, 50),
             provider: providerForRun,
             projectId: finalSession ? this.getProjectIdForSession(finalSession) : undefined,
+            contextUsage: estimateContextUsage(providerForRun, engineMessages),
+            operation: 'message',
             timestamp: Date.now()
           }));
         }
@@ -1037,9 +1419,26 @@ export class ClaudeHandler {
         }
       }
 
+      const responseSessionId = compactRequested
+        ? (returnedProviderSessionId || currentSessionId)
+        : (returnedProviderSessionId || sessionIdForCallbacks);
       let assistantMessageId = `done-${responseSessionId}`;
-      if (!this.sessionAlreadyContainsAssistantResponse(finalSession, result.response)) {
-        const assistantMessage = createMessage('assistant', result.response);
+      const state = this.runningSessions.get(sessionIdForCallbacks);
+      const finalResponse = result.response.trim()
+        ? result.response
+        : (state?.capturedContent || '');
+      const completedProcess = this.buildCompletedProcess(state);
+      const capturedThinking = state?.capturedThinking.trim() ? state.capturedThinking : undefined;
+      const shouldPersistAssistant = Boolean(finalResponse.trim() || capturedThinking || completedProcess);
+
+      if (shouldPersistAssistant && !this.sessionAlreadyContainsAssistantResponse(finalSession, finalResponse)) {
+        const assistantMessage = createMessage('assistant', finalResponse);
+        if (capturedThinking) {
+          assistantMessage.thinking = capturedThinking;
+        }
+        if (completedProcess) {
+          assistantMessage.process = completedProcess;
+        }
         assistantMessageId = assistantMessage.id;
         this.sessionManager.addMessageToSession(finalSession.id, assistantMessage, finalSession.provider);
       } else {
@@ -1048,6 +1447,12 @@ export class ClaudeHandler {
           .find(message => message.role === 'assistant');
         if (lastAssistantMessage?.id) {
           assistantMessageId = lastAssistantMessage.id;
+          if (capturedThinking && !lastAssistantMessage.thinking) {
+            lastAssistantMessage.thinking = capturedThinking;
+          }
+          if (completedProcess && !lastAssistantMessage.process) {
+            lastAssistantMessage.process = completedProcess;
+          }
         }
       }
 
@@ -1060,9 +1465,11 @@ export class ClaudeHandler {
         );
       }
 
-      const state = this.runningSessions.get(sessionIdForCallbacks);
       const currentWs = state?.ws;
       if (currentWs && currentWs.readyState === 1) {
+        const finalContextMessages = finalSession
+          ? this.buildMessagesForEngine(finalSession.messages, promptToSend, promptToStore)
+          : engineMessages;
         currentWs.send(JSON.stringify({
           type: 'claude_done',
           messageId: assistantMessageId,
@@ -1071,6 +1478,7 @@ export class ClaudeHandler {
           providerSessionId: returnedProviderSessionId,
           claudeSessionId: providerForRun === 'claude' ? returnedProviderSessionId : undefined,
           projectId: finalSession ? this.getProjectIdForSession(finalSession) : undefined,
+          contextUsage: estimateContextUsage(providerForRun, finalContextMessages),
           timestamp: Date.now()
         }));
       }
@@ -1091,7 +1499,7 @@ export class ClaudeHandler {
     }
   }
 
-  handleSessionAction(
+  async handleSessionAction(
     ws: WebSocket,
     action: 'new' | 'resume' | 'list' | 'delete' | 'list_projects' | 'list_by_project' | 'rename' | 'load_more',
     sessionId?: string,
@@ -1100,16 +1508,24 @@ export class ClaudeHandler {
     limit?: number,
     beforeIndex?: number,
     provider?: Provider,
-    accessIdentity?: AccessIdentity
-  ): void {
+    accessIdentity?: AccessIdentity,
+    requestedCwd?: string
+  ): Promise<void> {
     switch (action) {
       case 'new': {
         const providerForNewSession = provider || DEFAULT_PROVIDER;
+        const sourceSession = this.getNewSessionSourceSession(sessionId, projectId, accessIdentity);
+        const newSessionWorkspace = sourceSession?.cwd
+          ? {
+            cwd: sourceSession.cwd,
+            projectId: this.getRawProjectIdForSession(sourceSession)
+          }
+          : this.resolveSessionWorkspaceContext(accessIdentity, requestedCwd);
         const newSession = this.applySessionWorkspaceContext(
           this.sessionManager.createTemporary(
             title,
             providerForNewSession,
-            this.resolveSessionWorkspaceContext(accessIdentity)
+            newSessionWorkspace
           ),
           accessIdentity
         );
@@ -1119,6 +1535,7 @@ export class ClaudeHandler {
           this.getRawProjectIdForSession(newSession),
           accessIdentity
         );
+        this.setActiveSession(newSession.id);
         ws.send(JSON.stringify({
           type: 'session_created',
           session: {
@@ -1127,17 +1544,29 @@ export class ClaudeHandler {
             createdAt: newSession.createdAt,
             messageCount: 0,
             isTemporary: true,
-            provider: providerForNewSession
+            provider: providerForNewSession,
+            cwd: newSession.cwd
           },
           projectId: this.getProjectIdForSession(newSession),
           provider: providerForNewSession,
+          contextUsage: estimateSessionContextUsage(newSession),
           timestamp: Date.now()
         }));
         break;
       }
 
       case 'list': {
-        const sessions = this.filterSessionsByAccess(this.sessionManager.list(provider), accessIdentity);
+        const sourceSessions = this.listSessionsForProvider(provider);
+        const sessions = this.filterSessionsByAccess(sourceSessions.map(session => ({
+          id: session.id,
+          title: session.title,
+          createdAt: session.createdAt,
+          messageCount: session.messageCount,
+          provider: session.provider,
+          projectId: session.projectId,
+          lastActivity: session.lastActivity || session.createdAt,
+          hasRenderableResult: session.hasRenderableResult
+        })), accessIdentity);
         ws.send(JSON.stringify({
           type: 'session_list',
           sessions,
@@ -1162,7 +1591,11 @@ export class ClaudeHandler {
           break;
         }
 
-        const sessions = this.listSessionsByProject(projectId, limit || 1000, accessIdentity);
+        const sessions = this.listSessionsByProject(
+          projectId,
+          limit || DEFAULT_PROJECT_SESSION_LIST_LIMIT,
+          accessIdentity
+        );
         ws.send(JSON.stringify({
           type: 'session_list',
           projectId,
@@ -1194,9 +1627,6 @@ export class ClaudeHandler {
           result = projectRef
             ? this.loadCrossProjectSessionPaginated(projectRef.provider, projectRef.projectKey, sessionId, loadLimit)
             : { session: null, hasMore: false, totalMessages: 0 };
-          if (result.session) {
-            this.sessionManager.setSessionFromCrossProject(result.session);
-          }
         } else {
           result = this.sessionManager.resumePaginated(sessionId, loadLimit, undefined, provider);
         }
@@ -1225,10 +1655,13 @@ export class ClaudeHandler {
             summary: result.session.title,
             messages,
             createdAt: result.session.createdAt,
-            provider: result.session.provider
+            provider: result.session.provider,
+            cwd: result.session.cwd,
+            contextUsage: estimateSessionContextUsage(result.session)
           },
           hasMore: result.hasMore,
           totalMessages: result.totalMessages,
+          contextUsage: estimateSessionContextUsage(result.session),
           timestamp: Date.now()
         }));
 
@@ -1383,6 +1816,17 @@ export class ClaudeHandler {
     if (lower.includes('rate limit') || lower.includes('429')) {
       return 'RATE_LIMITED';
     }
+    if (
+      lower.includes('spawn ')
+      && (
+        lower.includes('eperm')
+        || lower.includes('eacces')
+        || lower.includes('operation not permitted')
+        || lower.includes('permission denied')
+      )
+    ) {
+      return 'CLI_PERMISSION_DENIED';
+    }
     if (lower.includes('session not found')) {
       return 'SESSION_NOT_FOUND';
     }
@@ -1396,7 +1840,7 @@ export class ClaudeHandler {
     return this.sessionManager;
   }
 
-  getSessionStorage(provider?: Provider): SessionStorage | CodexSessionStorage {
+  getSessionStorage(provider?: Provider): ReturnType<SessionManager['getStorage']> {
     return this.sessionManager.getStorage(provider);
   }
 }

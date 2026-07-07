@@ -48,6 +48,20 @@ export interface UiPreferences {
   updatedAt: number;
 }
 
+export interface SessionContextUsage {
+  provider: Provider;
+  budgetTokens: number;
+  estimatedTokens: number;
+  remainingTokens: number;
+  overflowTokens: number;
+  usedPercent: number;
+  remainingPercent: number;
+  isOverBudget: boolean;
+  messageCount: number;
+  estimatedCharacters: number;
+  isEstimated: true;
+}
+
 export type MessageProcessState = 'running' | 'completed' | 'error';
 
 export type MessageProcessEvent =
@@ -123,6 +137,7 @@ export interface RemoteFileEntry {
 }
 
 export interface WorkspaceFileListResult {
+  rootPath?: string;
   path: string;
   parentPath: string | null;
   entries: RemoteFileEntry[];
@@ -139,6 +154,10 @@ export interface ChatSession {
   messages: Message[];
   createdAt: number;
   provider: Provider;
+  cwd?: string;
+  contextUsage?: SessionContextUsage;
+  messageCount?: number;
+  hasRenderableResult?: boolean;
 }
 
 export type DiscussionMode = 'debate' | 'collaborate' | 'auto';

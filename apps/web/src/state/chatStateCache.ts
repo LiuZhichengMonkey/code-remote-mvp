@@ -48,7 +48,9 @@ export const loadRunningSessionCache = (): RunningSessionCacheEntry[] => {
         sessionId: item.sessionId,
         title: item.title,
         projectId: typeof item.projectId === 'string' ? item.projectId : undefined,
-        provider: item.provider === 'codex' ? 'codex' : 'claude'
+        provider: item.provider === 'codex'
+          ? 'codex'
+          : 'claude'
       });
     }
 
@@ -80,7 +82,9 @@ export const loadActiveRunningSessionCache = (): ActiveRunningSessionCacheEntry 
     return {
       sessionId: parsed.sessionId,
       projectId: typeof parsed.projectId === 'string' ? parsed.projectId : undefined,
-      provider: parsed.provider === 'codex' ? 'codex' : 'claude'
+      provider: parsed.provider === 'codex'
+        ? 'codex'
+        : 'claude'
     };
   } catch {
     return null;

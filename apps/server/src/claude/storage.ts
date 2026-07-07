@@ -15,6 +15,27 @@ export interface ProjectInfo {
   lastActivity: number;
 }
 
+interface FileCacheEntry<T> {
+  mtimeMs: number;
+  size: number;
+  value: T | null;
+}
+
+interface ClaudeSummaryRecord {
+  info: SessionInfo;
+  cwd?: string;
+  providerSessionId?: string;
+  claudeSessionId?: string;
+}
+
+interface RenderableClaudeLine {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+  filtered?: boolean;
+}
+
 // 项目路径转 Claude CLI 目录名格式 (E:\code-remote-mvp -> E--code-remote-mvp)
 function pathToClaudeDir(projectPath: string): string {
   // 处理 Windows 路径: E:\code-remote-mvp -> E--code-remote-mvp
@@ -68,6 +89,9 @@ interface ClaudeCLIMessage {
 }
 
 export class SessionStorage {
+  private static readonly TAIL_READ_CHUNK_SIZE = 64 * 1024;
+  private static summaryCache = new Map<string, FileCacheEntry<ClaudeSummaryRecord>>();
+
   private projectDir: string;
   private projectPath: string;
 
@@ -99,6 +123,388 @@ export class SessionStorage {
   }
 
   // 解析 Claude CLI 的 JSONL 文件
+  private static parseTimestamp(value: unknown, fallback = Date.now()): number {
+    if (typeof value !== 'string' || !value) {
+      return fallback;
+    }
+
+    const timestamp = Date.parse(value);
+    return Number.isNaN(timestamp) ? fallback : timestamp;
+  }
+
+  private static extractUserContent(content: unknown): string {
+    if (typeof content === 'string') {
+      return content;
+    }
+
+    if (Array.isArray(content)) {
+      return content.map((block: { text?: string }) => block.text || '').join('');
+    }
+
+    return '';
+  }
+
+  private static extractAssistantContent(content: unknown): string {
+    if (typeof content === 'string') {
+      return content;
+    }
+
+    if (!Array.isArray(content)) {
+      return '';
+    }
+
+    let text = '';
+    for (const block of content as Array<{ type?: string; text?: string }>) {
+      if (block.type === 'text' && block.text) {
+        text += block.text;
+      }
+    }
+
+    return text;
+  }
+
+  private static parseRenderableLine(entry: any): RenderableClaudeLine | null {
+    const timestamp = SessionStorage.parseTimestamp(entry.timestamp);
+
+    if (entry.type === 'user' && entry.message) {
+      if (Array.isArray(entry.message.content)) {
+        const isToolResult = entry.message.content.some(
+          (block: { type?: string }) => block.type === 'tool_result'
+        );
+        if (isToolResult) {
+          return null;
+        }
+      }
+
+      const content = SessionStorage.extractUserContent(entry.message.content);
+      if (
+        entry.isVisibleInTranscriptOnly
+        || entry.isCompactSummary
+        || content.startsWith('This session is being continued from a previous conversation')
+      ) {
+        return null;
+      }
+
+      return {
+        id: entry.uuid || `user-${timestamp}`,
+        role: 'user',
+        content,
+        timestamp,
+        filtered: content.includes('<task-notification>')
+      };
+    }
+
+    if (entry.type === 'assistant' && entry.message) {
+      const content = SessionStorage.extractAssistantContent(entry.message.content);
+      if (!content || content === 'No response requested.') {
+        return null;
+      }
+
+      return {
+        id: entry.uuid || `assistant-${timestamp}`,
+        role: 'assistant',
+        content,
+        timestamp,
+        filtered: content.includes('<task-notification>')
+      };
+    }
+
+    return null;
+  }
+
+  private static combineAssistantLines(partsNewestFirst: RenderableClaudeLine[]): ClaudeMessage | null {
+    const parts = [...partsNewestFirst].reverse();
+    const first = parts[0];
+    if (!first) {
+      return null;
+    }
+
+    let content = '';
+    for (const part of parts) {
+      if (!content) {
+        content = part.content;
+        continue;
+      }
+
+      if (!content.includes(part.content)) {
+        content += '\n\n---\n\n' + part.content;
+      }
+    }
+
+    return {
+      id: first.id,
+      role: 'assistant',
+      content,
+      timestamp: first.timestamp
+    };
+  }
+
+  private static getCachedSummary(filePath: string, projectId: string, fallbackSessionId: string): ClaudeSummaryRecord | null {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      SessionStorage.summaryCache.delete(filePath);
+      return null;
+    }
+
+    const cached = SessionStorage.summaryCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.value;
+    }
+
+    const value = SessionStorage.parseSessionSummary(filePath, projectId, fallbackSessionId);
+    SessionStorage.summaryCache.set(filePath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value
+    });
+    return value;
+  }
+
+  private static parseSessionSummary(
+    filePath: string,
+    projectId: string,
+    fallbackSessionId: string
+  ): ClaudeSummaryRecord | null {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split(/\r?\n/);
+
+      let sessionId = fallbackSessionId;
+      let title = 'New Chat';
+      let createdAt = Date.now();
+      let lastActivity = 0;
+      let messageCount = 0;
+      let hasRenderableResult = false;
+      let cwd = '';
+      let claudeSessionId = '';
+      let previousRole: 'user' | 'assistant' | null = null;
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        try {
+          const entry: any = JSON.parse(line);
+          if (entry.sessionId && !sessionId) {
+            sessionId = entry.sessionId;
+          }
+          if (entry.sessionId && !claudeSessionId) {
+            claudeSessionId = entry.sessionId;
+          }
+          if (entry.cwd && !cwd) {
+            cwd = entry.cwd;
+          }
+
+          if (entry.timestamp) {
+            const entryTime = SessionStorage.parseTimestamp(entry.timestamp, 0);
+            if (entryTime > 0) {
+              createdAt = Math.min(createdAt, entryTime);
+              lastActivity = Math.max(lastActivity, entryTime);
+            }
+          }
+
+          if (entry.type === 'summary' && entry.summary) {
+            title = entry.summary;
+            continue;
+          }
+
+          const renderable = SessionStorage.parseRenderableLine(entry);
+          if (!renderable) {
+            continue;
+          }
+
+          if (renderable.filtered) {
+            previousRole = renderable.role;
+            continue;
+          }
+
+          if (renderable.role === 'assistant') {
+            hasRenderableResult = true;
+          }
+
+          if (renderable.role === 'assistant' && previousRole === 'assistant') {
+            continue;
+          }
+
+          messageCount += 1;
+          previousRole = renderable.role;
+
+          if (renderable.role === 'user' && messageCount === 1 && title === 'New Chat' && renderable.content) {
+            title = renderable.content.substring(0, 50);
+          }
+        } catch {
+          // Ignore malformed JSONL entries.
+        }
+      }
+
+      if (!sessionId || messageCount === 0) {
+        return null;
+      }
+
+      if (lastActivity === 0) {
+        lastActivity = createdAt;
+      }
+
+      return {
+        cwd: cwd || undefined,
+        providerSessionId: claudeSessionId || sessionId,
+        claudeSessionId: claudeSessionId || undefined,
+        info: {
+          id: sessionId,
+          title,
+          createdAt,
+          messageCount,
+          provider: 'claude',
+          projectId,
+          lastActivity,
+          hasRenderableResult
+        }
+      };
+    } catch (err) {
+      console.error(`Error reading session ${path.basename(filePath)}:`, err);
+      return null;
+    }
+  }
+
+  private static readJsonlLinesFromEnd(filePath: string, onLine: (line: string) => boolean): void {
+    const fd = fs.openSync(filePath, 'r');
+
+    try {
+      const stat = fs.fstatSync(fd);
+      let position = stat.size;
+      let remainder = Buffer.alloc(0);
+
+      while (position > 0) {
+        const readSize = Math.min(SessionStorage.TAIL_READ_CHUNK_SIZE, position);
+        position -= readSize;
+
+        const buffer = Buffer.allocUnsafe(readSize);
+        fs.readSync(fd, buffer, 0, readSize, position);
+        const combined = Buffer.concat([buffer, remainder]);
+        let lineEnd = combined.length;
+
+        for (let index = combined.length - 1; index >= 0; index--) {
+          if (combined[index] !== 10) {
+            continue;
+          }
+
+          const line = combined.subarray(index + 1, lineEnd).toString('utf-8').replace(/\r$/, '');
+          if (line.trim() && onLine(line)) {
+            return;
+          }
+          lineEnd = index;
+        }
+
+        remainder = combined.subarray(0, lineEnd);
+      }
+
+      const finalLine = remainder.toString('utf-8').replace(/\r$/, '');
+      if (finalLine.trim()) {
+        onLine(finalLine);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  private parseSessionWindow(
+    filePath: string,
+    summary: ClaudeSummaryRecord,
+    limit: number,
+    beforeIndex?: number
+  ): { session: ClaudeSession; hasMore: boolean; totalMessages: number } {
+    const totalMessages = summary.info.messageCount;
+    const safeLimit = Math.max(0, Math.floor(limit));
+    const endIndex = beforeIndex !== undefined
+      ? Math.max(0, totalMessages - Math.max(0, Math.floor(beforeIndex)))
+      : totalMessages;
+    const startIndex = Math.max(0, endIndex - safeLimit);
+    const messagesNewestFirst: ClaudeMessage[] = [];
+    let nextMessageIndex = totalMessages - 1;
+    let pendingAssistantParts: RenderableClaudeLine[] = [];
+
+    const takeMessage = (message: ClaudeMessage): boolean => {
+      const currentIndex = nextMessageIndex;
+      nextMessageIndex -= 1;
+
+      if (currentIndex >= startIndex && currentIndex < endIndex) {
+        messagesNewestFirst.push(message);
+      }
+
+      return currentIndex < startIndex;
+    };
+
+    const flushAssistant = (): boolean => {
+      const message = SessionStorage.combineAssistantLines(pendingAssistantParts);
+      pendingAssistantParts = [];
+      return message ? takeMessage(message) : false;
+    };
+
+    if (safeLimit > 0 && startIndex < endIndex) {
+      SessionStorage.readJsonlLinesFromEnd(filePath, line => {
+        try {
+          const renderable = SessionStorage.parseRenderableLine(JSON.parse(line));
+          if (!renderable) {
+            return false;
+          }
+
+          if (renderable.filtered) {
+            if (renderable.role === 'assistant') {
+              pendingAssistantParts = [];
+              return false;
+            }
+
+            return flushAssistant();
+          }
+
+          if (renderable.role === 'assistant') {
+            pendingAssistantParts.push(renderable);
+            return false;
+          }
+
+          if (flushAssistant()) {
+            return true;
+          }
+
+          return takeMessage({
+            id: renderable.id,
+            role: 'user',
+            content: renderable.content,
+            timestamp: renderable.timestamp
+          });
+        } catch {
+          return false;
+        }
+      });
+
+      if (nextMessageIndex >= startIndex) {
+        flushAssistant();
+      }
+    }
+
+    return {
+      session: {
+        id: summary.info.id,
+        title: summary.info.title,
+        createdAt: summary.info.createdAt,
+        updatedAt: summary.info.lastActivity || summary.info.createdAt,
+        messages: messagesNewestFirst.reverse(),
+        provider: 'claude',
+        providerSessionId: summary.providerSessionId || summary.info.id,
+        claudeSessionId: summary.claudeSessionId,
+        cwd: summary.cwd,
+        projectId: this.getProjectId(),
+        _partial: true,
+        _totalMessages: totalMessages
+      } as ClaudeSession & { _partial: boolean; _totalMessages: number },
+      hasMore: startIndex > 0,
+      totalMessages
+    };
+  }
+
   private parseSessionFile(filePath: string): ClaudeSession | null {
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
@@ -378,53 +784,12 @@ export class SessionStorage {
       return { session: null, hasMore: false, totalMessages: 0 };
     }
 
-    const fullSession = this.parseSessionFile(filePath);
-    if (!fullSession) {
+    const summary = SessionStorage.getCachedSummary(filePath, this.getProjectId(), sessionId);
+    if (!summary) {
       return { session: null, hasMore: false, totalMessages: 0 };
     }
 
-    // 先过滤掉包含 task-notification 的消息
-    const filteredMessages = fullSession.messages.filter((msg: ClaudeMessage) => {
-      if (msg.content && msg.content.includes('<task-notification>')) {
-        return false;
-      }
-      return true;
-    });
-
-    const totalMessages = filteredMessages.length;
-
-    // 计算要加载的消息范围（从后往前加载）
-    // beforeIndex 表示当前已经加载了多少条消息（从最新往回算）
-    // 例如：总共有 100 条，已加载 20 条，要加载再之前的 20 条
-    // 则 endIndex = 100 - 20 = 80, startIndex = 80 - 20 = 60
-    let endIndex: number;
-    let startIndex: number;
-
-    if (beforeIndex !== undefined) {
-      // 从已加载的消息之前继续加载
-      endIndex = totalMessages - beforeIndex;
-      startIndex = Math.max(0, endIndex - limit);
-    } else {
-      // 首次加载，加载最后 limit 条消息
-      endIndex = totalMessages;
-      startIndex = Math.max(0, endIndex - limit);
-    }
-
-    // 切片获取消息
-    const messages = filteredMessages.slice(startIndex, endIndex);
-    const hasMore = startIndex > 0;
-
-    return {
-      session: {
-        ...fullSession,
-        messages,
-        // 标记这是部分加载的会话
-        _partial: true,
-        _totalMessages: totalMessages
-      } as any,
-      hasMore,
-      totalMessages
-    };
+    return this.parseSessionWindow(filePath, summary, limit, beforeIndex);
   }
 
   list(): ClaudeSession[] {
@@ -445,15 +810,7 @@ export class SessionStorage {
   }
 
   listInfo(): SessionInfo[] {
-    return this.list().map(s => ({
-      id: s.id,
-      title: s.title,
-      createdAt: s.createdAt,
-      messageCount: s.messages.length,
-      provider: 'claude',
-      projectId: this.getProjectId(),
-      lastActivity: s.updatedAt
-    }));
+    return SessionStorage.listSessionsByProject(this.getProjectId(), Number.MAX_SAFE_INTEGER);
   }
 
   delete(sessionId: string): boolean {
@@ -541,6 +898,33 @@ export class SessionStorage {
     return deleted;
   }
 
+  private static readDisplayNameFromFile(filePath: string, fallback: string): string {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split(/\r?\n/);
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        try {
+          const entry = JSON.parse(line);
+          const cwd = entry.cwd || entry.payload?.cwd;
+          if (typeof cwd === 'string' && cwd.trim()) {
+            return cwd;
+          }
+        } catch {
+          // Ignore malformed lines.
+        }
+      }
+    } catch {
+      // Fall back to the decoded project id.
+    }
+
+    return fallback;
+  }
+
   // ===== Static methods for multi-project support =====
 
   /**
@@ -574,11 +958,10 @@ export class SessionStorage {
         }
 
         if (files.length > 0) {
-          const storage = new SessionStorage(projectId);
-          const sampleSession = storage.load(files[0].replace('.jsonl', ''));
-          if (sampleSession?.cwd) {
-            displayName = sampleSession.cwd;
-          }
+          displayName = SessionStorage.readDisplayNameFromFile(
+            path.join(projectDir, files[0]),
+            displayName
+          );
         }
 
         projects.push({
@@ -608,84 +991,37 @@ export class SessionStorage {
       return [];
     }
 
-    const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
-    const sessions: SessionInfo[] = [];
-
-    for (const file of files) {
-      const filePath = path.join(projectDir, file);
-      const sessionId = file.replace('.jsonl', '');
-
-      try {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const lines = content.trim().split('\n');
-        let title = 'New Chat';
-        let createdAt = Date.now();
-        let lastActivity = 0;  // 最后活动时间
-        let messageCount = 0;
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const entry = JSON.parse(line);
-
-            if (entry.timestamp) {
-              const entryTime = new Date(entry.timestamp).getTime();
-              // createdAt 是最早的 timestamp
-              if (entryTime < createdAt) {
-                createdAt = entryTime;
-              }
-              // lastActivity 是最新的 timestamp
-              if (entryTime > lastActivity) {
-                lastActivity = entryTime;
-              }
-            }
-
-            // summary 优先级最高，先处理
-            if (entry.type === 'summary' && entry.summary) {
-              title = entry.summary;
-            }
-
-            if (entry.type === 'user' && entry.message) {
-              messageCount++;
-              // 只有在没有 summary 的情况下，才用第一条消息内容作为标题
-              if (messageCount === 1 && title === 'New Chat' && entry.message.content) {
-                title = typeof entry.message.content === 'string'
-                  ? entry.message.content.substring(0, 50)
-                  : 'New Chat';
-              }
-            }
-
-            if (entry.type === 'assistant') {
-              messageCount++;
-            }
-          } catch {
-            // 忽略解析错误
-          }
-        }
-
-        // Only include sessions with at least one message
-        if (messageCount > 0) {
-          // 如果没有 lastActivity，使用 createdAt
-          if (lastActivity === 0) {
-            lastActivity = createdAt;
-          }
-          sessions.push({
-            id: sessionId,
-            title,
-            createdAt,
-            messageCount,
-            provider: 'claude',
-            projectId,
-            lastActivity
-          });
-        }
-      } catch (err) {
-        console.error(`Error reading session ${file}:`, err);
-      }
+    const effectiveLimit = Math.max(0, Math.floor(limit));
+    if (effectiveLimit === 0) {
+      return [];
     }
 
-    // 按最后活动时间排序（最新的在前），然后限制数量
-    return sessions.sort((a, b) => (b.lastActivity || b.createdAt) - (a.lastActivity || a.createdAt)).slice(0, limit);
+    const files = fs.readdirSync(projectDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(file => {
+        const filePath = path.join(projectDir, file);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(filePath).mtimeMs;
+        } catch {
+          // Keep unreadable files at the end; the parse step below will skip failures.
+        }
+        return { file, filePath, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, effectiveLimit);
+
+    const cachedSessions = files
+      .map(({ file, filePath }) => SessionStorage.getCachedSummary(
+        filePath,
+        projectId,
+        file.replace('.jsonl', '')
+      )?.info)
+      .filter((session): session is SessionInfo => Boolean(session));
+
+    return cachedSessions
+      .sort((a, b) => (b.lastActivity || b.createdAt) - (a.lastActivity || a.createdAt))
+      .slice(0, effectiveLimit);
   }
 
   /**

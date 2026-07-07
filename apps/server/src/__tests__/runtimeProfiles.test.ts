@@ -61,6 +61,49 @@ describe('runtimeProfiles', () => {
     }));
   });
 
+  test('keeps same-looking Claude profiles distinct when hidden config differs', () => {
+    const claudeDir = path.join(tempHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+
+    const sharedEnv = {
+      ANTHROPIC_BASE_URL: 'https://claude.example.com',
+      ANTHROPIC_AUTH_TOKEN: 'shared-token',
+      ANTHROPIC_MODEL: 'claude-sonnet-4'
+    };
+
+    const profileOne = {
+      env: sharedEnv,
+      model: 'claude-sonnet-4',
+      permissions: {
+        defaultMode: 'bypassPermissions'
+      }
+    };
+    const profileTwo = {
+      env: sharedEnv,
+      model: 'claude-sonnet-4',
+      permissions: {
+        defaultMode: 'ask'
+      }
+    };
+
+    fs.writeFileSync(path.join(claudeDir, 'settings_key1.json'), JSON.stringify(profileOne, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(claudeDir, 'settings_key2.json'), JSON.stringify(profileTwo, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(profileTwo, null, 2), 'utf-8');
+
+    const result = listRuntimeProfiles('claude');
+
+    expect(result.provider).toBe('claude');
+    expect(result.profiles).toHaveLength(2);
+    expect(result.selectedProfileName).toBe('settings_key2');
+    expect(result.activeProfile).toEqual(expect.objectContaining({
+      provider: 'claude',
+      model: 'claude-sonnet-4',
+      baseUrl: 'https://claude.example.com',
+      authTokenConfigured: true,
+      isSaved: false
+    }));
+  });
+
   test('saves Claude manual overrides using provider-agnostic input fields', () => {
     const claudeDir = path.join(tempHome, '.claude');
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -204,4 +247,5 @@ describe('runtimeProfiles', () => {
       isSaved: false
     }));
   });
+
 });

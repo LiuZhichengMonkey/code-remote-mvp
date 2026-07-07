@@ -62,7 +62,9 @@ export const normalizeRuntimeProfileSummary = (
   }
 
   const profile = value as Record<string, unknown>;
-  const provider = profile.provider === 'codex' ? 'codex' : fallbackProvider;
+  const provider = profile.provider === 'codex'
+    ? 'codex'
+    : fallbackProvider;
 
   return {
     name: typeof profile.name === 'string' ? profile.name : '',

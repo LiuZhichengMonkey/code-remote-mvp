@@ -63,7 +63,7 @@ program
     console.log(chalk.bold.cyan([
       '+--------------------------------------+',
       '|          CodeRemote Server           |',
-      '|    Claude Code + Codex Remote UI     |',
+      '| Claude Code + Codex UI               |',
       '+--------------------------------------+'
     ].join('\n')));
     console.log();

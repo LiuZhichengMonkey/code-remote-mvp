@@ -11,6 +11,7 @@ import {
   Copy,
   Download,
   FileText,
+  ImageIcon,
   RotateCcw,
   Sparkles
 } from 'lucide-react';
@@ -28,6 +29,13 @@ import {
 import { filterProcessForDisplay } from '../../uiPreferences';
 import { useI18n } from '../../i18n';
 import { RECONNECT_PLACEHOLDER_MESSAGE_PREFIX } from '../../state/chatStateCache';
+import {
+  getPathDisplayName,
+  isBrowserExternalLink,
+  isLikelyLocalResourceLink,
+  isPlainTextLocalResourceCandidate,
+  normalizeLocalResourcePath
+} from '../../localResource';
 
 const highlightCode = (code: string, language: string): string => {
   const keywords: Record<string, string[]> = {
@@ -61,11 +69,6 @@ const highlightCode = (code: string, language: string): string => {
 };
 
 const MERMAID_DIAGRAM_START = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|sankey-beta|block-beta|packet-beta|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment)\b/i;
-const WINDOWS_DRIVE_LINK_PATTERN = /^\/?[A-Za-z]:[\\/]/;
-const FILE_URI_LINK_PATTERN = /^file:\/\/\/?/i;
-const LOCAL_FILE_PREFIX_PATTERN = /^(?:\.{1,2}[\\/]|~[\\/]|\/(?!\/))/;
-const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
-
 const getWholeMessageMermaidSource = (content: string): string | null => {
   const trimmed = content.trim();
   if (!trimmed || trimmed.startsWith('```')) {
@@ -85,29 +88,17 @@ const renderMarkdownParagraph = ({ children }: { children: React.ReactNode }) =>
   <p className="whitespace-pre-wrap">{children}</p>
 );
 
-const isLocalFileLink = (href: string): boolean => {
-  const trimmed = href.trim();
-  if (!trimmed || trimmed.startsWith('#')) {
-    return false;
-  }
+const INTERACTIVE_TEXT_SKIP_ELEMENT_TYPES = new Set(['a', 'button', 'code', 'img', 'pre']);
+const INTERACTIVE_RESOURCE_TOKEN_PATTERN = /\S+/g;
 
-  if (FILE_URI_LINK_PATTERN.test(trimmed) || WINDOWS_DRIVE_LINK_PATTERN.test(trimmed)) {
-    return true;
-  }
+const splitDecoratedToken = (rawToken: string): { leading: string; core: string; trailing: string } => {
+  const leadingMatch = rawToken.match(/^[([{"'`]+/);
+  const trailingMatch = rawToken.match(/[)\]},"'`.;:!?]+$/);
+  const leading = leadingMatch?.[0] || '';
+  const trailing = trailingMatch?.[0] || '';
+  const core = rawToken.slice(leading.length, rawToken.length - trailing.length);
 
-  if (trimmed.startsWith('//')) {
-    return false;
-  }
-
-  if (URI_SCHEME_PATTERN.test(trimmed)) {
-    return false;
-  }
-
-  if (LOCAL_FILE_PREFIX_PATTERN.test(trimmed)) {
-    return true;
-  }
-
-  return true;
+  return { leading, core, trailing };
 };
 
 const getNodeTextContent = (node: React.ReactNode): string => {
@@ -135,6 +126,42 @@ const formatAttachmentSize = (size?: number): string | null => {
   const exponent = Math.min(Math.floor(Math.log(size) / Math.log(1024)), units.length - 1);
   const value = size / Math.pow(1024, exponent);
   return `${value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[exponent]}`;
+};
+
+const InlineImageWithFallback = ({
+  src,
+  alt,
+  className,
+  referrerPolicy
+}: {
+  src: string;
+  alt: string;
+  className: string;
+  referrerPolicy?: React.HTMLAttributeReferrerPolicy;
+}) => {
+  const { t } = useI18n();
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div className="flex min-h-[8rem] min-w-[8rem] max-w-full flex-col items-center justify-center gap-2 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-5 text-center text-amber-100">
+        <ImageIcon size={22} />
+        <div className="max-w-[18rem] truncate text-sm font-medium">{alt}</div>
+        <div className="text-xs text-amber-100/70">{t('bubble.filePreviewFailed', { error: 'image' })}</div>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      className={className}
+      referrerPolicy={referrerPolicy}
+      onError={() => setFailed(true)}
+    />
+  );
 };
 
 const CodeBlock = ({ code, language }: { code: string; language: string }) => {
@@ -304,66 +331,53 @@ const ProcessPanel = ({
           {getProcessStateLabel(process.state, t)}
         </span>
         <span className="text-white/20">{eventCount}</span>
-        <motion.div
-          animate={{ rotate: isExpanded ? 180 : 0 }}
-          transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-        >
-          <ChevronDown size={14} />
-        </motion.div>
+        <ChevronDown
+          size={14}
+          className={cn('transition-transform duration-200', isExpanded && 'rotate-180')}
+        />
       </button>
 
-      <AnimatePresence initial={false}>
-        {isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{
-              height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
-              opacity: { duration: 0.2 }
-            }}
-            className="overflow-hidden"
-          >
-            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3 space-y-2">
-              {process.events.map((event, index) => {
-                const summary = getProcessEventSummary(event, t);
-                const showToolInput = event.type === 'tool_use' && event.toolInput && Object.keys(event.toolInput).length > 0;
-                const showToolResult = event.type === 'tool_result' && typeof event.result === 'string' && event.result.trim() !== '';
-                const eventKey = ('toolUseId' in event && event.toolUseId)
-                  ? `${event.type}-${event.toolUseId}-${event.timestamp}`
-                  : `${event.type}-${event.timestamp}-${index}`;
+      {isExpanded && (
+        <div className="overflow-hidden">
+          <div className="max-h-[280px] space-y-2 overflow-y-auto no-scrollbar rounded-xl border border-white/5 bg-white/[0.03] p-3 pr-2">
+            {process.events.map((event, index) => {
+              const summary = getProcessEventSummary(event, t);
+              const showToolInput = event.type === 'tool_use' && event.toolInput && Object.keys(event.toolInput).length > 0;
+              const showToolResult = event.type === 'tool_result' && typeof event.result === 'string' && event.result.trim() !== '';
+              const eventKey = ('toolUseId' in event && event.toolUseId)
+                ? `${event.type}-${event.toolUseId}-${event.timestamp}`
+                : `${event.type}-${event.timestamp}-${index}`;
 
-                return (
-                  <div
-                    key={eventKey}
-                    className="rounded-lg border border-white/5 bg-black/10 p-3"
-                  >
-                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/35">
-                      <span className={cn('inline-flex h-2 w-2 rounded-full', getProcessEventDotClass(event))} />
-                      <span>{getProcessEventLabel(event, t)}</span>
-                    </div>
-                    {summary && (
-                      <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-white/80">
-                        {normalizeLegacyDisplayText(summary)}
-                      </div>
-                    )}
-                    {showToolInput && (
-                      <pre className="!mt-2 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-[11px] text-white/55">
-                        {JSON.stringify(event.toolInput, null, 2)}
-                      </pre>
-                    )}
-                    {showToolResult && (
-                      <pre className="!mt-2 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-[11px] text-white/55">
-                        {normalizeLegacyDisplayText(event.result)}
-                      </pre>
-                    )}
+              return (
+                <div
+                  key={eventKey}
+                  className="rounded-lg border border-white/5 bg-black/10 p-3"
+                >
+                  <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-white/35">
+                    <span className={cn('inline-flex h-2 w-2 rounded-full', getProcessEventDotClass(event))} />
+                    <span>{getProcessEventLabel(event, t)}</span>
                   </div>
-                );
-              })}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+                  {summary && (
+                    <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-white/80">
+                      {normalizeLegacyDisplayText(summary)}
+                    </div>
+                  )}
+                  {showToolInput && (
+                    <pre className="!mt-2 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-[11px] text-white/55">
+                      {JSON.stringify(event.toolInput, null, 2)}
+                    </pre>
+                  )}
+                  {showToolResult && (
+                    <pre className="!mt-2 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-[11px] text-white/55">
+                      {normalizeLegacyDisplayText(event.result)}
+                    </pre>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -373,8 +387,9 @@ interface ChatBubbleProps {
   isStreaming?: boolean;
   onRetry?: () => void;
   onCopy?: (text: string) => void;
-  onRegenerate?: () => void;
+  onRegenerate?: (messageId: string) => void;
   onOptionClick?: (option: string) => void;
+  onAttachmentPreview?: (attachment: Attachment) => void;
   onAttachmentDownload?: (attachment: Attachment) => void;
   onFileLinkClick?: (href: string, label?: string) => void;
   processPanelPreferences: ProcessPanelPreferences;
@@ -387,6 +402,7 @@ export const ChatBubble = React.memo(({
   onCopy,
   onRegenerate,
   onOptionClick,
+  onAttachmentPreview,
   onAttachmentDownload,
   onFileLinkClick,
   processPanelPreferences
@@ -514,6 +530,98 @@ export const ChatBubble = React.memo(({
     return acc;
   }, {} as Record<string, typeof message.options>) || {};
 
+  const renderInlineResourceButton = useMemo(() => (
+    (value: string, fallbackLabel?: string, key?: string | number) => {
+      const normalized = normalizeLocalResourcePath(value);
+      const label = fallbackLabel?.trim() || getPathDisplayName(normalized, value.trim() || 'file');
+
+      return (
+        <button
+          key={key}
+          type="button"
+          onClick={() => onFileLinkClick?.(normalized, label)}
+          className="cursor-pointer text-left underline underline-offset-2 text-cyan-200 decoration-cyan-300/40 transition-colors hover:text-cyan-100 hover:decoration-cyan-200/60"
+        >
+          {label}
+        </button>
+      );
+    }
+  ), [onFileLinkClick]);
+
+  const renderInteractiveTextNode = useMemo(() => {
+    const processNode = (node: React.ReactNode, keyPrefix: string): React.ReactNode => {
+      if (typeof node === 'string') {
+        const parts: React.ReactNode[] = [];
+        let lastIndex = 0;
+        let tokenIndex = 0;
+
+        for (const match of node.matchAll(INTERACTIVE_RESOURCE_TOKEN_PATTERN)) {
+          const rawToken = match[0];
+          const startIndex = match.index ?? 0;
+          const endIndex = startIndex + rawToken.length;
+          const { leading, core, trailing } = splitDecoratedToken(rawToken);
+
+          if (startIndex > lastIndex) {
+            parts.push(node.slice(lastIndex, startIndex));
+          }
+
+          if (!core || !isPlainTextLocalResourceCandidate(core) || !onFileLinkClick) {
+            parts.push(rawToken);
+            lastIndex = endIndex;
+            continue;
+          }
+
+          if (leading) {
+            parts.push(leading);
+          }
+
+          parts.push(renderInlineResourceButton(core, core, `${keyPrefix}-resource-${tokenIndex}`));
+
+          if (trailing) {
+            parts.push(trailing);
+          }
+
+          lastIndex = endIndex;
+          tokenIndex += 1;
+        }
+
+        if (lastIndex < node.length) {
+          parts.push(node.slice(lastIndex));
+        }
+
+        return parts.length > 0 ? parts : node;
+      }
+
+      if (Array.isArray(node)) {
+        return node.map((child, index) => (
+          <React.Fragment key={`${keyPrefix}-${index}`}>
+            {processNode(child, `${keyPrefix}-${index}`)}
+          </React.Fragment>
+        ));
+      }
+
+      if (!React.isValidElement(node)) {
+        return node;
+      }
+
+      if (typeof node.type === 'string' && INTERACTIVE_TEXT_SKIP_ELEMENT_TYPES.has(node.type)) {
+        return node;
+      }
+
+      const childProps = node.props as { children?: React.ReactNode };
+      if (!('children' in childProps) || childProps.children === undefined) {
+        return node;
+      }
+
+      return React.cloneElement(node, {
+        ...childProps,
+        key: (node.key as string | null) ?? keyPrefix
+      }, processNode(childProps.children, `${keyPrefix}-children`));
+    };
+
+    return processNode;
+  }, [onFileLinkClick, renderInlineResourceButton]);
+
   const markdownComponents = useMemo(() => ({
     code({ className, children, inline, ...props }: any) {
       const match = /language-([\w-]+)/.exec(className || '');
@@ -527,46 +635,109 @@ export const ChatBubble = React.memo(({
           : <CodeBlock code={codeString} language={language || 'text'} />;
       }
 
+      if (inline && onFileLinkClick && isPlainTextLocalResourceCandidate(codeString)) {
+        return (
+          <code className={className} {...props}>
+            {renderInlineResourceButton(codeString, codeString, `inline-code-${codeString}`)}
+          </code>
+        );
+      }
+
       return (
         <code className={className} {...props}>
           {children}
         </code>
       );
     },
-    p: renderMarkdownParagraph,
+    p({ children }: { children: React.ReactNode }) {
+      return renderMarkdownParagraph({
+        children: renderInteractiveTextNode(children, 'paragraph')
+      });
+    },
+    li({ children }: { children: React.ReactNode }) {
+      return <li>{renderInteractiveTextNode(children, 'list-item')}</li>;
+    },
     a({ href, children, ...props }: any) {
       const resolvedHref = typeof href === 'string' ? href.trim() : '';
       const label = getNodeTextContent(children).trim();
-      const localFileLink = !!resolvedHref && isLocalFileLink(resolvedHref);
+      const localFileLink = !!resolvedHref && isLikelyLocalResourceLink(resolvedHref);
+      const externalLink = !!resolvedHref && isBrowserExternalLink(resolvedHref);
 
-      if (localFileLink && onFileLinkClick) {
+      if (resolvedHref) {
         return (
-          <a
-            href={resolvedHref}
+          <button
+            type="button"
             onClick={(event) => {
               event.preventDefault();
-              onFileLinkClick(resolvedHref, label);
+              event.stopPropagation();
+
+              if (localFileLink && onFileLinkClick) {
+                onFileLinkClick(normalizeLocalResourcePath(resolvedHref), label);
+                return;
+              }
+
+              if (externalLink) {
+                const newWindow = window.open(resolvedHref, '_blank', 'noopener,noreferrer');
+                if (!newWindow) {
+                  window.location.href = resolvedHref;
+                }
+                return;
+              }
+
+              if (onFileLinkClick) {
+                onFileLinkClick(normalizeLocalResourcePath(resolvedHref), label);
+              }
             }}
+            className={cn(
+              'cursor-pointer text-left underline underline-offset-2 transition-colors',
+              localFileLink
+                ? 'text-cyan-200 decoration-cyan-300/40 hover:text-cyan-100 hover:decoration-cyan-200/60'
+                : 'text-white/85 decoration-white/25 hover:text-white hover:decoration-white/50'
+            )}
             {...props}
           >
             {children}
-          </a>
+          </button>
         );
       }
 
-      const openInNewTab = /^(?:https?:)?\/\//i.test(resolvedHref);
+      return <>{children}</>;
+    },
+    img({ src, alt, ...props }: any) {
+      const resolvedSrc = typeof src === 'string' ? src.trim() : '';
+      const label = typeof alt === 'string' && alt.trim()
+        ? alt.trim()
+        : getPathDisplayName(resolvedSrc, 'image');
+      const localFileImage = !!resolvedSrc && isLikelyLocalResourceLink(resolvedSrc);
+
+      if (localFileImage && onFileLinkClick) {
+        return (
+          <button
+            type="button"
+            onClick={() => onFileLinkClick(normalizeLocalResourcePath(resolvedSrc), label)}
+            className="flex w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-left transition-colors hover:bg-white/[0.08]"
+          >
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-100">
+              <ImageIcon size={18} />
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium text-white">{label}</span>
+              <span className="block truncate text-xs text-white/45">{resolvedSrc}</span>
+            </span>
+          </button>
+        );
+      }
+
       return (
-        <a
-          href={resolvedHref}
-          target={openInNewTab ? '_blank' : undefined}
-          rel={openInNewTab ? 'noreferrer noopener' : undefined}
-          {...props}
-        >
-          {children}
-        </a>
+        <InlineImageWithFallback
+          src={resolvedSrc}
+          alt={label}
+          className="max-h-[420px] w-auto max-w-full rounded-2xl border border-white/10 object-contain shadow-[0_16px_48px_rgba(0,0,0,0.28)]"
+          referrerPolicy={/^(?:https?:)?\/\//i.test(resolvedSrc) ? 'no-referrer' : undefined}
+        />
       );
     }
-  }), [isStreaming, onFileLinkClick]);
+  }), [isStreaming, onFileLinkClick, renderInlineResourceButton, renderInteractiveTextNode]);
 
   return (
     <motion.div
@@ -582,7 +753,7 @@ export const ChatBubble = React.memo(({
         'max-w-[90%] relative group',
         isUser ? 'items-end' : 'items-start'
       )}>
-        {isUser && message.status === 'error' && (
+              {isUser && message.status === 'error' && (
           <button
             onClick={onRetry}
             className="absolute -left-8 top-1/2 -translate-y-1/2 text-red-500 animate-pulse"
@@ -594,19 +765,52 @@ export const ChatBubble = React.memo(({
         {message.attachments && message.attachments.length > 0 && (
           <div className={cn('mb-2 flex flex-wrap gap-2', isUser ? 'justify-end' : 'justify-start')}>
             {message.attachments.map(att => {
-              const canPreviewImage = att.type.startsWith('image/') && !!att.url;
+              const canPreviewImage = att.type.startsWith('image/');
+              const canRenderInlineImage = canPreviewImage && !!att.url;
               const sizeLabel = formatAttachmentSize(att.size);
               const canDownload = !!att.relativePath && att.available !== false;
+              const canOpenPreview = canPreviewImage && canDownload && !!onAttachmentPreview;
 
-              if (canPreviewImage) {
+              if (canRenderInlineImage || canOpenPreview) {
                 return (
                   <div key={att.id} className="group/attachment relative overflow-hidden rounded-xl border border-white/10">
-                    <img
-                      src={att.url}
-                      alt={att.name}
-                      className="h-32 w-32 object-cover"
-                      referrerPolicy="no-referrer"
-                    />
+                    {canRenderInlineImage ? (
+                      canOpenPreview ? (
+                        <button
+                          type="button"
+                          onClick={() => onAttachmentPreview?.(att)}
+                          className="block"
+                        >
+                          <InlineImageWithFallback
+                            src={att.url}
+                            alt={att.name}
+                            className="h-32 w-32 object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        </button>
+                      ) : (
+                        <InlineImageWithFallback
+                          src={att.url}
+                          alt={att.name}
+                          className="h-32 w-32 object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                      )
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onAttachmentPreview?.(att)}
+                        className="flex h-32 w-32 flex-col items-center justify-center gap-2 bg-white/[0.04] px-3 text-center transition-colors hover:bg-white/[0.08]"
+                      >
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-100">
+                          <ImageIcon size={18} />
+                        </div>
+                        <div className="line-clamp-2 text-xs font-medium text-white/90">{att.name}</div>
+                        {sizeLabel && (
+                          <div className="text-[11px] text-white/45">{sizeLabel}</div>
+                        )}
+                      </button>
+                    )}
                     {canDownload && (
                       <button
                         type="button"
@@ -660,36 +864,26 @@ export const ChatBubble = React.memo(({
             <div className="mb-4 overflow-hidden">
               <button
                 onClick={() => setIsThinkingExpanded(!isThinkingExpanded)}
-                className="flex items-center gap-2 text-[11px] font-bold text-white/30 hover:text-white/50 transition-colors uppercase tracking-[0.1em] mb-2 group/thinking"
+                className="grid w-full grid-cols-[20px_minmax(0,1fr)_14px] items-center gap-2 text-left text-[11px] font-bold text-white/30 hover:text-white/50 transition-colors uppercase tracking-[0.1em] mb-2 group/thinking"
               >
-                <div className="w-5 h-5 rounded-full bg-accent/10 flex items-center justify-center group-hover/thinking:bg-accent/20 transition-colors">
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/10 transition-colors group-hover/thinking:bg-accent/20">
                   <Brain size={12} className="text-accent" />
                 </div>
-                <span>{t('bubble.thinkingProcess')}</span>
-                <motion.div
-                  animate={{ rotate: isThinkingExpanded ? 180 : 0 }}
-                  transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-                >
-                  <ChevronDown size={14} />
-                </motion.div>
+                <span className="min-w-0 truncate">{t('bubble.thinkingProcess')}</span>
+                <ChevronDown
+                  size={14}
+                  className={cn(
+                    'justify-self-end transition-transform duration-200',
+                    isThinkingExpanded && 'rotate-180'
+                  )}
+                />
               </button>
 
-              <AnimatePresence initial={false}>
-                {isThinkingExpanded && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{
-                      height: { duration: 0.25, ease: [0.4, 0, 0.2, 1] },
-                      opacity: { duration: 0.2 }
-                    }}
-                    className="overflow-hidden bg-white/[0.03] rounded-xl p-4 border border-white/5 text-[13.5px] text-white/50 italic leading-relaxed font-serif whitespace-pre-wrap"
-                  >
-                    {thinkingContent}
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              {isThinkingExpanded && (
+                <div className="max-h-[260px] overflow-y-auto no-scrollbar rounded-xl border border-white/5 bg-white/[0.03] p-4 text-[13.5px] font-serif italic leading-relaxed whitespace-pre-wrap text-white/50">
+                  {thinkingContent}
+                </div>
+              )}
             </div>
           )}
 
@@ -717,12 +911,10 @@ export const ChatBubble = React.memo(({
                     <span className="text-xs px-2 py-0.5 bg-accent/20 text-accent rounded-full">{agentRound}</span>
                   )}
                 </div>
-                <motion.div
-                  animate={{ rotate: isAgentExpanded ? 180 : 0 }}
-                  transition={{ duration: 0.2 }}
-                >
-                  <ChevronDown size={16} className="text-white/40" />
-                </motion.div>
+                <ChevronDown
+                  size={16}
+                  className={cn('text-white/40 transition-transform duration-200', isAgentExpanded && 'rotate-180')}
+                />
               </button>
               <AnimatePresence initial={false}>
                 {isAgentExpanded && (
@@ -812,7 +1004,7 @@ export const ChatBubble = React.memo(({
               <Copy size={14} />
             </button>
             <button
-              onClick={onRegenerate}
+              onClick={() => onRegenerate?.(message.id)}
               className="text-white/30 hover:text-white/60 p-1"
             >
               <RotateCcw size={14} />

@@ -43,8 +43,10 @@ const messages = {
     'common.code': 'code',
     'common.unknownModel': 'Unknown model',
     'common.unknownError': 'Unknown error',
+    'common.temporarilyUnavailable': 'Temporarily unavailable',
 
     'header.newProviderSession': 'New {provider} session',
+    'provider.temporarilyUnavailable': '{provider} is temporarily unavailable',
     'header.testModeBadge': 'Test · {ownerId}',
 
     'session.defaultTitle': 'New Chat',
@@ -214,8 +216,10 @@ const messages = {
     'common.code': '代码',
     'common.unknownModel': '未知模型',
     'common.unknownError': '未知错误',
+    'common.temporarilyUnavailable': '暂不可用',
 
     'header.newProviderSession': '新建 {provider} 会话',
+    'provider.temporarilyUnavailable': '{provider} 暂不可用',
     'header.testModeBadge': '测试 · {ownerId}',
 
     'session.defaultTitle': '新会话',

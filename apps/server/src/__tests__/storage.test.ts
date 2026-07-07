@@ -217,6 +217,99 @@ describe('SessionStorage', () => {
       expect(result2.session?.messages?.length).toBe(10);
       expect(result2.hasMore).toBe(true);
     });
+
+    test('loads the newest window in chronological order', () => {
+      const sessionId = 'tail-window';
+      const filePath = path.join(testDir, `${sessionId}.jsonl`);
+      const baseTime = Date.parse('2026-04-01T10:00:00.000Z');
+      const lines = Array.from({ length: 8 }, (_, i) => JSON.stringify({
+        type: i % 2 === 0 ? 'user' : 'assistant',
+        sessionId,
+        uuid: `tail-${i}`,
+        timestamp: new Date(baseTime + i * 1000).toISOString(),
+        message: { role: i % 2 === 0 ? 'user' : 'assistant', content: `Tail ${i}` }
+      }));
+
+      fs.writeFileSync(filePath, lines.join('\n') + '\n', 'utf-8');
+
+      const latest = storage.loadPaginated(sessionId, 3);
+      expect(latest.totalMessages).toBe(8);
+      expect(latest.hasMore).toBe(true);
+      expect(latest.session?.messages.map(message => message.content)).toEqual([
+        'Tail 5',
+        'Tail 6',
+        'Tail 7'
+      ]);
+
+      const previous = storage.loadPaginated(sessionId, 3, 3);
+      expect(previous.session?.messages.map(message => message.content)).toEqual([
+        'Tail 2',
+        'Tail 3',
+        'Tail 4'
+      ]);
+    });
+
+    test('keeps consecutive assistant lines merged during windowed loading', () => {
+      const sessionId = 'assistant-merge-window';
+      const filePath = path.join(testDir, `${sessionId}.jsonl`);
+      const baseTime = Date.parse('2026-04-01T10:00:00.000Z');
+      const line = (type: 'user' | 'assistant', index: number, content: string) => JSON.stringify({
+        type,
+        sessionId,
+        uuid: `merge-${index}`,
+        timestamp: new Date(baseTime + index * 1000).toISOString(),
+        message: {
+          role: type,
+          content: type === 'assistant'
+            ? [{ type: 'text', text: content }]
+            : content
+        }
+      });
+
+      fs.writeFileSync(filePath, [
+        line('user', 0, 'Question'),
+        line('assistant', 1, 'Part one'),
+        line('assistant', 2, 'Part two'),
+        line('user', 3, 'Follow up')
+      ].join('\n') + '\n', 'utf-8');
+
+      const result = storage.loadPaginated(sessionId, 3);
+      expect(result.totalMessages).toBe(3);
+      expect(result.session?.messages.map(message => ({
+        role: message.role,
+        content: message.content
+      }))).toEqual([
+        { role: 'user', content: 'Question' },
+        { role: 'assistant', content: 'Part one\n\n---\n\nPart two' },
+        { role: 'user', content: 'Follow up' }
+      ]);
+    });
+
+    test('does not merge assistants across filtered task notifications', () => {
+      const sessionId = 'task-notification-boundary';
+      const filePath = path.join(testDir, `${sessionId}.jsonl`);
+      const baseTime = Date.parse('2026-04-01T10:00:00.000Z');
+      const line = (type: 'user' | 'assistant', index: number, content: string) => JSON.stringify({
+        type,
+        sessionId,
+        uuid: `boundary-${index}`,
+        timestamp: new Date(baseTime + index * 1000).toISOString(),
+        message: { role: type, content }
+      });
+
+      fs.writeFileSync(filePath, [
+        line('assistant', 0, 'First assistant'),
+        line('user', 1, '<task-notification>background</task-notification>'),
+        line('assistant', 2, 'Second assistant')
+      ].join('\n') + '\n', 'utf-8');
+
+      const result = storage.loadPaginated(sessionId, 3);
+      expect(result.totalMessages).toBe(2);
+      expect(result.session?.messages.map(message => message.content)).toEqual([
+        'First assistant',
+        'Second assistant'
+      ]);
+    });
   });
 
   describe('静态方法', () => {

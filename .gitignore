@@ -15,7 +15,10 @@ __pycache__/
 # Build outputs
 apps/server/dist/
 apps/server/*.log
-apps/web/dist/
+apps/web/dist/*
+!apps/web/dist/index.html
+!apps/web/dist/assets/
+!apps/web/dist/assets/**
 
 # Flutter
 apps/mobile/.dart_tool/
@@ -66,6 +69,7 @@ logs/
 # Local runtime state
 .coderemote/
 .codex/
+.tmp/
 apps/server/.coderemote/
 bg-test.txt
 runtime/
@@ -73,10 +77,10 @@ apps/server/node_modules/
 apps/web/node_modules/
 
 # Legacy root leftovers from the pre-apps layout
-cli/
-web/
-debate-reports/
-multi-agent-sessions/
+/cli/
+/web/
+/debate-reports/
+/multi-agent-sessions/
 
 # Local scratch datasets and archives
 IMAGDressing-main.zip

@@ -297,6 +297,9 @@ export const sessionHasRenderableResult = (
 ): boolean => {
   const session = findLocalSession(sessions, projectSessions, sessionId, projectId) || fallbackSession || null;
   if (!session || session.messages.length === 0) {
+    if (typeof session?.hasRenderableResult === 'boolean') {
+      return session.hasRenderableResult;
+    }
     return false;
   }
 
@@ -320,7 +323,11 @@ export const mergeSessionSummaryList = (
       ...incomingSession,
       title: incomingSession.title || existingSession.title,
       provider: incomingSession.provider || existingSession.provider,
+      cwd: incomingSession.cwd || existingSession.cwd,
       createdAt: incomingSession.createdAt || existingSession.createdAt,
+      messageCount: incomingSession.messageCount ?? existingSession.messageCount,
+      hasRenderableResult: incomingSession.hasRenderableResult ?? existingSession.hasRenderableResult,
+      contextUsage: incomingSession.contextUsage || existingSession.contextUsage,
       messages: incomingSession.messages.length > 0
         ? incomingSession.messages
         : existingSession.messages
@@ -338,15 +345,22 @@ export const mergeResumedSessionWithLocalState = (
   const existingBase = stripTrailingSyntheticRunningPlaceholder(existingSession);
   const resumedBase = stripTrailingSyntheticRunningPlaceholder(resumedSession) || resumedSession;
   const preferredBase = preferMoreCompleteSession(existingBase, resumedBase) || resumedBase;
+  const preferredContextUsage = resumedBase.contextUsage || existingBase?.contextUsage;
+  const preferredCwd = resumedBase.cwd || existingBase?.cwd;
+  const preferredSession = {
+    ...preferredBase,
+    ...(preferredContextUsage ? { contextUsage: preferredContextUsage } : {}),
+    ...(preferredCwd ? { cwd: preferredCwd } : {})
+  };
 
   if (!options?.preserveRunningState) {
-    return preferredBase;
+    return preferredSession;
   }
 
-  const hasRunningModel = preferredBase.messages[preferredBase.messages.length - 1]?.role === 'model'
-    && preferredBase.messages[preferredBase.messages.length - 1]?.status === 'sending';
+  const hasRunningModel = preferredSession.messages[preferredSession.messages.length - 1]?.role === 'model'
+    && preferredSession.messages[preferredSession.messages.length - 1]?.status === 'sending';
   if (hasRunningModel) {
-    return preferredBase;
+    return preferredSession;
   }
 
   const preferredRunningMessage = preferRunningMessage(
@@ -355,12 +369,12 @@ export const mergeResumedSessionWithLocalState = (
   );
 
   if (!preferredRunningMessage) {
-    return preferredBase;
+    return preferredSession;
   }
 
   return {
-    ...preferredBase,
-    messages: [...preferredBase.messages, preferredRunningMessage]
+    ...preferredSession,
+    messages: [...preferredSession.messages, preferredRunningMessage]
   };
 };
 

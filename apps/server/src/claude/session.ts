@@ -3,7 +3,21 @@ import { DEFAULT_PROVIDER, Provider, SUPPORTED_PROVIDERS } from '../session/prov
 import { ClaudeMessage, ClaudeSession, SessionInfo, createSession } from './types';
 import { SessionStorage } from './storage';
 
-type ProviderStorage = SessionStorage | CodexSessionStorage;
+interface ProviderStorage {
+  getProjectId(): string;
+  load(sessionId: string): ClaudeSession | null;
+  loadPaginated(
+    sessionId: string,
+    limit?: number,
+    beforeIndex?: number
+  ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number };
+  list(): ClaudeSession[];
+  listInfo(): SessionInfo[];
+  delete(sessionId: string): boolean;
+  rename(sessionId: string, newTitle: string): boolean;
+  save?(session: ClaudeSession): void;
+}
+
 interface SessionContext {
   cwd?: string;
   projectId?: string;
@@ -19,15 +33,6 @@ export class SessionManager {
       claude: new SessionStorage(workspaceRoot),
       codex: new CodexSessionStorage(workspaceRoot)
     };
-    this.loadAllSessions();
-  }
-
-  private loadAllSessions(): void {
-    for (const provider of SUPPORTED_PROVIDERS) {
-      for (const session of this.storages[provider].list()) {
-        this.sessions.set(session.id, session);
-      }
-    }
   }
 
   private getProvidersToTry(provider?: Provider): Provider[] {
@@ -46,6 +51,30 @@ export class SessionManager {
   private getCachedOrLoaded(sessionId: string, provider?: Provider): ClaudeSession | null {
     const cached = this.sessions.get(sessionId);
     if (cached && (!provider || cached.provider === provider)) {
+      if ((cached as ClaudeSession & { _partial?: boolean })._partial) {
+        const canonicalSession = this.storages[cached.provider].load(sessionId);
+        if (canonicalSession) {
+          if (!canonicalSession.cwd && cached.cwd) {
+            canonicalSession.cwd = cached.cwd;
+          }
+          if (!canonicalSession.projectId && cached.projectId) {
+            canonicalSession.projectId = cached.projectId;
+          }
+          if (!canonicalSession.providerSessionId && cached.providerSessionId) {
+            canonicalSession.providerSessionId = cached.providerSessionId;
+          }
+          if (canonicalSession.provider === 'claude' && cached.claudeSessionId) {
+            canonicalSession.claudeSessionId = cached.claudeSessionId;
+          }
+
+          this.sessions.set(sessionId, canonicalSession);
+          if (this.currentSession?.id === sessionId) {
+            this.currentSession = canonicalSession;
+          }
+          return canonicalSession;
+        }
+      }
+
       return cached;
     }
 
@@ -131,11 +160,38 @@ export class SessionManager {
     beforeIndex?: number,
     provider?: Provider
   ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
-    for (const candidate of this.getProvidersToTry(provider)) {
+    const cached = this.sessions.get(sessionId);
+    const cachedMatchesProvider = cached && (!provider || cached.provider === provider);
+    const cachedIsPartial = cachedMatchesProvider && (cached as ClaudeSession & { _partial?: boolean })._partial;
+
+    if (cachedMatchesProvider && !cachedIsPartial) {
+      this.currentSession = cached;
+
+      const totalMessages = cached.messages.length;
+      const endIndex = beforeIndex !== undefined
+        ? Math.max(0, totalMessages - beforeIndex)
+        : totalMessages;
+      const startIndex = Math.max(0, endIndex - limit);
+
+      return {
+        session: {
+          ...cached,
+          messages: cached.messages.slice(startIndex, endIndex)
+        },
+        hasMore: startIndex > 0,
+        totalMessages
+      };
+    }
+
+    const providersToTry = cachedMatchesProvider && cached
+      ? [cached.provider]
+      : this.getProvidersToTry(provider);
+
+    for (const candidate of providersToTry) {
       const result = this.storages[candidate].loadPaginated(sessionId, limit, beforeIndex);
       if (result.session) {
-        this.currentSession = result.session;
         this.sessions.set(sessionId, result.session);
+        this.currentSession = result.session;
         return result;
       }
     }
@@ -144,16 +200,17 @@ export class SessionManager {
   }
 
   resumeLatest(provider?: Provider): ClaudeSession | null {
-    const sessions = provider
-      ? this.storages[provider].list()
-      : SUPPORTED_PROVIDERS.flatMap(candidate => this.storages[candidate].list());
-
-    const latest = sessions.sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
-    if (latest) {
-      this.currentSession = latest;
-      this.sessions.set(latest.id, latest);
+    const summaries = this.list(provider);
+    const latest = summaries[0];
+    if (!latest) {
+      return null;
     }
-    return latest;
+
+    const session = this.getCachedOrLoaded(latest.id, latest.provider);
+    if (session) {
+      this.currentSession = session;
+    }
+    return session;
   }
 
   addMessage(message: ClaudeMessage): void {
@@ -265,6 +322,13 @@ export class SessionManager {
     this.currentSession = null;
   }
 
+  saveSession(session: ClaudeSession): ClaudeSession {
+    this.sessions.set(session.id, session);
+    this.currentSession = session;
+    this.storages[session.provider].save?.(session);
+    return session;
+  }
+
   getMessagesForAPI(): ClaudeMessage[] {
     return this.currentSession ? [...this.currentSession.messages] : [];
   }
@@ -300,6 +364,56 @@ export class SessionManager {
     }
 
     return session;
+  }
+
+  refreshSessionForSession(sessionId: string, provider?: Provider, sourceSessionId?: string): ClaudeSession | null {
+    const cached = this.sessions.get(sessionId) || null;
+    const effectiveProvider = provider || cached?.provider || DEFAULT_PROVIDER;
+    const lookupIds = [sourceSessionId, sessionId].filter((value, index, values) => (
+      typeof value === 'string' && values.indexOf(value) === index
+    )) as string[];
+
+    for (const lookupId of lookupIds) {
+      const loadedSession = this.storages[effectiveProvider].load(lookupId);
+      if (!loadedSession) {
+        continue;
+      }
+
+      if (cached) {
+        if (!loadedSession.cwd && cached.cwd) {
+          loadedSession.cwd = cached.cwd;
+        }
+        if (!loadedSession.projectId && cached.projectId) {
+          loadedSession.projectId = cached.projectId;
+        }
+      }
+
+      if (sourceSessionId) {
+        loadedSession.providerSessionId = sourceSessionId;
+        if (loadedSession.provider === 'claude') {
+          loadedSession.claudeSessionId = sourceSessionId;
+        }
+      }
+
+      if (loadedSession.id !== sessionId) {
+        this.sessions.delete(loadedSession.id);
+        loadedSession.id = sessionId;
+      }
+
+      if (lookupId !== sessionId) {
+        this.sessions.delete(lookupId);
+      }
+
+      this.sessions.set(sessionId, loadedSession);
+
+      if (this.currentSession?.id === sessionId || this.currentSession?.id === lookupId) {
+        this.currentSession = loadedSession;
+      }
+
+      return loadedSession;
+    }
+
+    return null;
   }
 
   updateSessionIdForSession(sessionId: string, newSessionId: string, provider?: Provider): ClaudeSession | null {

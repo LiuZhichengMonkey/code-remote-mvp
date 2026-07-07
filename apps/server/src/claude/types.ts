@@ -7,6 +7,7 @@ export interface ClaudeMessage {
   content: string;
   timestamp: number;
   images?: string[];
+  thinking?: string;
   process?: MessageProcess;
 }
 
@@ -109,7 +110,7 @@ export interface ToolResultEvent {
 export interface ClaudeError {
   type: 'claude_error';
   error: string;
-  code: 'CLI_NOT_FOUND' | 'API_KEY_MISSING' | 'RATE_LIMITED' | 'SESSION_NOT_FOUND' | 'STREAM_ERROR' | 'SESSION_BUSY';
+  code: 'CLI_NOT_FOUND' | 'CLI_PERMISSION_DENIED' | 'API_KEY_MISSING' | 'RATE_LIMITED' | 'SESSION_NOT_FOUND' | 'STREAM_ERROR' | 'SESSION_BUSY';
   sessionId?: string;
   provider?: Provider;
   timestamp: number;
@@ -123,6 +124,7 @@ export interface SessionInfo {
   provider: Provider;
   projectId?: string;
   lastActivity?: number;
+  hasRenderableResult?: boolean;
 }
 
 export function createMessage(role: 'user' | 'assistant', content: string, images?: string[]): ClaudeMessage {

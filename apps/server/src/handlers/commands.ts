@@ -81,14 +81,17 @@ export class CommandHandler {
   private validatePath(targetPath: string): { valid: boolean; resolved?: string; error?: string } {
     try {
       const resolved = path.resolve(this.allowedRoot, targetPath);
-      const normalized = path.normalize(resolved);
+      const relativePath = path.relative(this.allowedRoot, resolved);
 
-      // 检查是否在工作目录内
-      if (!normalized.startsWith(this.allowedRoot)) {
+      if (
+        relativePath.startsWith('..')
+        || path.isAbsolute(relativePath)
+        || relativePath.includes(`..${path.sep}`)
+      ) {
         return { valid: false, error: 'Access denied: path outside workspace' };
       }
 
-      return { valid: true, resolved: normalized };
+      return { valid: true, resolved };
     } catch (e) {
       return { valid: false, error: 'Invalid path' };
     }
@@ -441,6 +444,7 @@ export class CommandHandler {
 | /grep | /grep <pattern> [file] | 搜索内容 |
 | /mkdir | /mkdir <dir> | 创建目录 |
 | /rm | /rm <file> | 删除文件 |
+| /compact | /compact | 压缩当前会话上下文 |
 | /help | /help | 显示帮助 |
 
 **示例**:
@@ -448,6 +452,7 @@ export class CommandHandler {
 - \`/ls src\` - 列出 src 目录
 - \`/glob **/*.ts\` - 搜索所有 TypeScript 文件
 - \`/grep TODO src/\` - 搜索 TODO
+- \`/compact\` - 压缩当前会话上下文
 `;
 
     return {

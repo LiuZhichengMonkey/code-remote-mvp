@@ -28,7 +28,8 @@ import {
   RemoteFileEntry,
   SkillOption,
   WorkspaceFileListResult,
-  ServerAccessState
+  ServerAccessState,
+  SessionContextUsage
 } from './types';
 import { cn } from './utils';
 import { useDiscussion } from './useDiscussion';
@@ -51,11 +52,15 @@ import {
 import { debugLog } from './debugLog';
 import {
   appendMessageProcessEvent,
+  ALL_PROVIDERS,
   createReconnectedRunningMessage,
+  getFallbackProvider,
   getProcessPanelSettingOptions,
   getProviderBadgeClass,
   getProviderLabel,
+  isProviderTemporarilyUnavailable,
   localizeSessionTitle,
+  normalizeSupportedProviders,
   normalizeLegacyDisplayText,
   setMessageProcessState,
   updateRunningModelMessage,
@@ -89,6 +94,12 @@ import { ScrollIndex as ScrollIndexView } from './components/chat/ScrollIndex';
 import { ChatBubble as ChatBubbleView } from './components/chat/ChatBubble';
 import { FilesPanel as FilesPanelView } from './components/files/FilesPanel';
 import { SUPPORTED_LANGUAGES, useI18n } from './i18n';
+import {
+  getPathDisplayName,
+  isBareFileName,
+  isPreviewableImagePath,
+  normalizeLocalResourcePath
+} from './localResource';
 
 interface ProjectInfo {
   id: string;
@@ -97,6 +108,12 @@ interface ProjectInfo {
   provider: Provider;
   lastActivity?: number;
 }
+
+const projectHasKnownSessions = (project?: Pick<ProjectInfo, 'sessionCount'> | null): boolean => (
+  typeof project?.sessionCount === 'number' && project.sessionCount > 0
+);
+
+const HISTORY_PROJECT_SESSION_LIMIT = 100;
 
 interface WSMessage {
   type: string;
@@ -133,6 +150,7 @@ const ConnectionPanel = ({
   isConnected,
   isConnecting,
   serverAccess,
+  supportedProviders,
   runtimeProfileProvider,
   runtimeProfileState,
   onRuntimeProfileProviderChange,
@@ -155,6 +173,7 @@ const ConnectionPanel = ({
   isConnected: boolean;
   isConnecting: boolean;
   serverAccess: ServerAccessState;
+  supportedProviders: Provider[];
   runtimeProfileProvider: Provider;
   runtimeProfileState: RuntimeProfileProviderState;
   onRuntimeProfileProviderChange: (provider: Provider) => void;
@@ -351,23 +370,40 @@ const ConnectionPanel = ({
             </button>
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            {(['claude', 'codex'] as Provider[]).map((provider) => (
-              <button
-                key={provider}
-                type="button"
-                onClick={() => {
-                  setShowSettingsDropdown(false);
-                  onRuntimeProfileProviderChange(provider);
-                }}
-                className={cn(
-                  'inline-flex items-center rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
-                  runtimeProfileProvider === provider
-                    ? getProviderBadgeClass(provider)
-                    : 'border-white/10 bg-white/5 text-white/55 hover:bg-white/10'
-                )}
-              >
-                {getProviderLabel(provider, t)}
-              </button>
+            {supportedProviders.map((provider) => (
+              (() => {
+                const isUnavailable = isProviderTemporarilyUnavailable(provider);
+                return (
+                  <button
+                    key={provider}
+                    type="button"
+                    disabled={isUnavailable}
+                    onClick={() => {
+                      if (isUnavailable) {
+                        return;
+                      }
+                      setShowSettingsDropdown(false);
+                      onRuntimeProfileProviderChange(provider);
+                    }}
+                    title={isUnavailable ? t('provider.temporarilyUnavailable', { provider: getProviderLabel(provider, t) }) : undefined}
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors',
+                      isUnavailable
+                        ? 'cursor-not-allowed border-white/10 bg-white/5 text-white/30 opacity-60'
+                        : runtimeProfileProvider === provider
+                          ? getProviderBadgeClass(provider)
+                          : 'border-white/10 bg-white/5 text-white/55 hover:bg-white/10',
+                    )}
+                  >
+                    <span>{getProviderLabel(provider, t)}</span>
+                    {isUnavailable && (
+                      <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-200">
+                        {t('common.temporarilyUnavailable')}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()
             ))}
           </div>
           <div className="relative mt-3" ref={settingsDropdownRef}>
@@ -666,7 +702,6 @@ const SESSION_TOKEN_STORAGE_KEY = 'coderemote_token_session';
 const TOKEN_PERSISTED_KEY = 'coderemote_token_persisted';
 const LEGACY_DEFAULT_TOKEN = 'test123';
 const REMOTE_FILE_SOURCE_VALUES = new Set(['workspace', 'attachment', 'upload', 'export', 'recent']);
-const IMAGE_PREVIEWABLE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
 
 type FilesTab = 'session' | 'recent' | 'workspace';
 
@@ -674,11 +709,13 @@ interface RemoteFileRequestContext {
   sessionId?: string | null;
   projectId?: string | null;
   provider?: Provider;
+  scope?: 'session' | 'workspace';
 }
 
 interface ImagePreviewState {
   path: string;
   fileName: string;
+  context?: RemoteFileRequestContext;
   objectUrl: string | null;
   isLoading: boolean;
   error: string | null;
@@ -713,52 +750,6 @@ const getHttpBaseUrl = (value: string): string => {
   } catch {
     return '';
   }
-};
-
-const getPathFileName = (relativePath: string, fallback = 'download'): string => {
-  const normalized = relativePath.replace(/\\/g, '/').replace(/\/+$/, '');
-  const segments = normalized.split('/').filter(Boolean);
-  return segments[segments.length - 1] || fallback;
-};
-
-const normalizeLocalFileLinkPath = (value: string): string => {
-  if (!value) {
-    return '';
-  }
-
-  let normalized = value.trim();
-  if (!normalized) {
-    return '';
-  }
-
-  if (/^file:\/\//i.test(normalized)) {
-    try {
-      normalized = decodeURIComponent(new URL(normalized).pathname);
-    } catch {
-      normalized = normalized.replace(/^file:\/+/i, '/');
-    }
-  } else {
-    try {
-      normalized = decodeURIComponent(normalized);
-    } catch {
-      // Keep the original string when the link is not URI-encoded.
-    }
-  }
-
-  normalized = normalized.replace(/\\/g, '/');
-  return normalized.replace(/^\/(?=[A-Za-z]:\/)/, '');
-};
-
-const isPreviewableImagePath = (value: string): boolean => {
-  const normalized = normalizeLocalFileLinkPath(value);
-  const sanitized = normalized.split(/[?#]/, 1)[0] || normalized;
-  const extensionIndex = sanitized.lastIndexOf('.');
-
-  if (extensionIndex === -1) {
-    return false;
-  }
-
-  return IMAGE_PREVIEWABLE_EXTENSIONS.has(sanitized.slice(extensionIndex + 1).toLowerCase());
 };
 
 const parseContentDispositionFileName = (
@@ -836,6 +827,54 @@ const normalizeIncomingMessages = (messages: any[]): Message[] => (
   Array.isArray(messages) ? messages.map(normalizeIncomingMessage) : []
 );
 
+const isCompactCommand = (value: string): boolean => /^\/compact(?:\s+.*)?$/i.test(value.trim());
+
+const normalizeSessionContextUsage = (usage: any): SessionContextUsage | undefined => {
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+
+  const provider = usage.provider === 'codex'
+    ? 'codex'
+    : 'claude';
+  const budgetTokens = typeof usage.budgetTokens === 'number' && Number.isFinite(usage.budgetTokens)
+    ? Math.max(0, Math.floor(usage.budgetTokens))
+    : 0;
+  const estimatedTokens = typeof usage.estimatedTokens === 'number' && Number.isFinite(usage.estimatedTokens)
+    ? Math.max(0, Math.floor(usage.estimatedTokens))
+    : 0;
+  const remainingTokens = typeof usage.remainingTokens === 'number' && Number.isFinite(usage.remainingTokens)
+    ? Math.max(0, Math.floor(usage.remainingTokens))
+    : Math.max(0, budgetTokens - estimatedTokens);
+  const overflowTokens = typeof usage.overflowTokens === 'number' && Number.isFinite(usage.overflowTokens)
+    ? Math.max(0, Math.floor(usage.overflowTokens))
+    : Math.max(0, estimatedTokens - budgetTokens);
+  const usedPercent = typeof usage.usedPercent === 'number' && Number.isFinite(usage.usedPercent)
+    ? usage.usedPercent
+    : (budgetTokens > 0 ? Math.min(100, Math.round((estimatedTokens / budgetTokens) * 1000) / 10) : 0);
+  const remainingPercent = typeof usage.remainingPercent === 'number' && Number.isFinite(usage.remainingPercent)
+    ? usage.remainingPercent
+    : (budgetTokens > 0 ? Math.max(0, Math.round((remainingTokens / budgetTokens) * 1000) / 10) : 0);
+
+  return {
+    provider,
+    budgetTokens,
+    estimatedTokens,
+    remainingTokens,
+    overflowTokens,
+    usedPercent,
+    remainingPercent,
+    isOverBudget: typeof usage.isOverBudget === 'boolean' ? usage.isOverBudget : overflowTokens > 0,
+    messageCount: typeof usage.messageCount === 'number' && Number.isFinite(usage.messageCount)
+      ? Math.max(0, Math.floor(usage.messageCount))
+      : 0,
+    estimatedCharacters: typeof usage.estimatedCharacters === 'number' && Number.isFinite(usage.estimatedCharacters)
+      ? Math.max(0, Math.floor(usage.estimatedCharacters))
+      : 0,
+    isEstimated: true
+  };
+};
+
 const normalizeRemoteFileEntry = (entry: any): RemoteFileEntry => {
   const source = typeof entry?.source === 'string' && REMOTE_FILE_SOURCE_VALUES.has(entry.source)
     ? entry.source as RemoteFileEntry['source']
@@ -856,6 +895,24 @@ const normalizeRemoteFileEntry = (entry: any): RemoteFileEntry => {
 const normalizeRemoteFileEntries = (entries: any[]): RemoteFileEntry[] => (
   Array.isArray(entries) ? entries.map(normalizeRemoteFileEntry) : []
 );
+
+const joinWorkspaceDirectory = (rootPath: string | null, relativePath: string): string | undefined => {
+  const root = rootPath?.trim();
+  if (!root) {
+    return undefined;
+  }
+
+  const normalizedRelativePath = relativePath
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
+  if (!normalizedRelativePath) {
+    return root;
+  }
+
+  const separator = root.endsWith('\\') || root.endsWith('/') ? '' : '\\';
+  return `${root}${separator}${normalizedRelativePath.replace(/\//g, '\\')}`;
+};
 
 const normalizeSkillOption = (skill: any): SkillOption => {
   const command = typeof skill?.command === 'string' && skill.command.trim()
@@ -984,6 +1041,11 @@ export default function App() {
   const serverRehydratedRunningSessionsRef = useRef<Set<string>>(new Set());
   const runningSessionRehydrationTimeoutRef = useRef<number | null>(null);
   const pendingRunningSessionRestoreRef = useRef<ActiveRunningSessionCacheEntry | null>(null);
+  const pendingCompactSourceSessionRef = useRef<{
+    sessionId: string;
+    projectId?: string | null;
+    provider?: Provider;
+  } | null>(null);
 
   // Chat state - start empty, will be populated from server
   const [sessions, setSessions] = useState<ChatSession[]>(() => (
@@ -1003,12 +1065,15 @@ export default function App() {
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set()); // Track completed sessions (for notification)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [newSessionProvider, setNewSessionProvider] = useState<Provider>(() => loadActiveRunningSessionCache()?.provider || 'claude');
+  const [supportedProviders, setSupportedProviders] = useState<Provider[]>(() => [...ALL_PROVIDERS]);
+  const [newSessionProvider, setNewSessionProvider] = useState<Provider>(() => (
+    getFallbackProvider(loadActiveRunningSessionCache()?.provider)
+  ));
   const syncNewSessionProvider = useCallback((provider?: Provider) => {
     if (provider) {
-      setNewSessionProvider(provider);
+      setNewSessionProvider(getFallbackProvider(provider, supportedProviders));
     }
-  }, []);
+  }, [supportedProviders]);
   const noteWebSocketActivity = useCallback(() => {
     lastKeepaliveSentAtRef.current = Date.now();
   }, []);
@@ -1163,12 +1228,13 @@ export default function App() {
   }, [noteWebSocketActivity, serverAccess.permissions.canManageSettings]);
 
   const handleRuntimeProfileProviderChange = useCallback((provider: Provider) => {
-    setRuntimeProfileProvider(provider);
+    const nextProvider = getFallbackProvider(provider, supportedProviders);
+    setRuntimeProfileProvider(nextProvider);
 
-    if (showSettings && isConnected && !runtimeProfiles[provider].loaded && !runtimeProfiles[provider].loading) {
-      requestRuntimeProfiles(provider);
+    if (showSettings && isConnected && !runtimeProfiles[nextProvider].loaded && !runtimeProfiles[nextProvider].loading) {
+      requestRuntimeProfiles(nextProvider);
     }
-  }, [isConnected, requestRuntimeProfiles, runtimeProfiles, showSettings]);
+  }, [isConnected, requestRuntimeProfiles, runtimeProfiles, showSettings, supportedProviders]);
 
   const handleToggleRuntimeProfileEditor = useCallback(() => {
     setRuntimeProfiles(prev => {
@@ -1332,6 +1398,7 @@ export default function App() {
   const [sessionFiles, setSessionFiles] = useState<RemoteFileEntry[]>([]);
   const [currentFilesPath, setCurrentFilesPath] = useState('');
   const [filesParentPath, setFilesParentPath] = useState<string | null>(null);
+  const [workspaceRootPath, setWorkspaceRootPath] = useState<string | null>(null);
   const [workspaceEntries, setWorkspaceEntries] = useState<RemoteFileEntry[]>([]);
   const [recentFiles, setRecentFiles] = useState<RemoteFileEntry[]>([]);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -1715,17 +1782,20 @@ export default function App() {
       projectId?: string | null;
       provider?: Provider;
       timestamp?: number;
+      contextUsage?: SessionContextUsage | null;
     }
   ) => {
     const timestamp = options?.timestamp || Date.now();
     const provider = options?.provider || 'claude';
     const title = normalizeLegacyDisplayText(options?.title || sessionId.substring(0, 12));
     const projectId = options?.projectId || undefined;
+    const contextUsage = normalizeSessionContextUsage(options?.contextUsage);
     const shell: ChatSession = {
       id: sessionId,
       title,
       createdAt: timestamp,
       provider,
+      ...(contextUsage ? { contextUsage } : {}),
       messages: [createReconnectedRunningMessage(provider, timestamp)]
     };
 
@@ -1757,6 +1827,7 @@ export default function App() {
       projectId?: string | null;
       provider?: Provider;
       timestamp?: number;
+      contextUsage?: SessionContextUsage | null;
     }
   ) => {
     if (!sessionId) {
@@ -1770,6 +1841,7 @@ export default function App() {
       : options.projectId || undefined;
     const provider = options?.provider || existingDetails.provider || 'claude';
     const timestamp = options?.timestamp || Date.now();
+    const contextUsage = normalizeSessionContextUsage(options?.contextUsage);
 
     markSessionAsRunning(sessionId, {
       title,
@@ -1783,7 +1855,8 @@ export default function App() {
         title,
         projectId,
         provider,
-        timestamp
+        timestamp,
+        contextUsage
       });
       return;
     }
@@ -1791,7 +1864,8 @@ export default function App() {
     updateSessionAcrossCollections(sessionId, session => restoreRunningSessionMessage({
       ...session,
       title,
-      provider
+      provider,
+      ...(contextUsage ? { contextUsage } : {})
     }, provider, timestamp));
   }, [
     ensureRunningSessionShell,
@@ -1950,9 +2024,10 @@ export default function App() {
       return;
     }
 
-    void loadSkills('claude');
-    void loadSkills('codex');
-  }, [isConnected, loadSkills]);
+    supportedProviders.forEach(provider => {
+      void loadSkills(provider);
+    });
+  }, [isConnected, loadSkills, supportedProviders]);
 
   const loadSessionFiles = useCallback(async (
     sessionId: string | null | undefined = currentSessionIdRef.current,
@@ -2005,6 +2080,119 @@ export default function App() {
     }
   }, [fetchFileApi, isConnected]);
 
+  const findSessionFileByName = useCallback((entries: RemoteFileEntry[], name: string): RemoteFileEntry | null => {
+    const normalizedName = name.trim().toLowerCase();
+    if (!normalizedName) {
+      return null;
+    }
+
+    const availableMatches = entries.filter(entry => (
+      entry.kind === 'file'
+      && entry.available !== false
+      && entry.name.toLowerCase() === normalizedName
+    ));
+
+    return availableMatches[0] || null;
+  }, []);
+
+  const resolveMessageResourcePath = useCallback(async (
+    value: string,
+    context: RemoteFileRequestContext
+  ): Promise<{ relativePath: string; context?: RemoteFileRequestContext } | null> => {
+    const normalizedValue = normalizeLocalResourcePath(value);
+    if (!normalizedValue) {
+      return null;
+    }
+
+    if (!isBareFileName(normalizedValue)) {
+      return {
+        relativePath: normalizedValue,
+        context
+      };
+    }
+
+    const localSessionMatch = findSessionFileByName(sessionFiles, normalizedValue);
+    if (localSessionMatch) {
+      return {
+        relativePath: localSessionMatch.relativePath,
+        context
+      };
+    }
+
+    if (context.sessionId) {
+      const response = await fetchFileApi('/api/files/session', {
+        sessionId: context.sessionId,
+        ...(context.projectId ? { projectId: context.projectId } : {}),
+        ...(context.provider ? { provider: context.provider } : {})
+      });
+      const payload = await response.json();
+      const fetchedEntries = normalizeRemoteFileEntries(payload?.entries);
+      setSessionFiles(fetchedEntries);
+
+      const fetchedMatch = findSessionFileByName(fetchedEntries, normalizedValue);
+      if (fetchedMatch) {
+        return {
+          relativePath: fetchedMatch.relativePath,
+          context
+        };
+      }
+    }
+
+    const localRecentMatch = findSessionFileByName(recentFiles, normalizedValue);
+    if (localRecentMatch) {
+      return {
+        relativePath: localRecentMatch.relativePath
+      };
+    }
+
+    const recentResponse = await fetchFileApi('/api/files/recent');
+    const recentPayload = await recentResponse.json();
+    const fetchedRecentEntries = normalizeRemoteFileEntries(recentPayload?.entries);
+    setRecentFiles(fetchedRecentEntries);
+
+    const fetchedRecentMatch = findSessionFileByName(fetchedRecentEntries, normalizedValue);
+    if (fetchedRecentMatch) {
+      return {
+        relativePath: fetchedRecentMatch.relativePath
+      };
+    }
+
+    const searchResponse = await fetchFileApi('/api/files/search', {
+      name: normalizedValue
+    });
+    const searchPayload = await searchResponse.json();
+    const searchEntries = normalizeRemoteFileEntries(searchPayload?.entries);
+    const searchMatch = findSessionFileByName(searchEntries, normalizedValue);
+    return searchMatch
+      ? {
+          relativePath: searchMatch.relativePath
+        }
+      : null;
+  }, [
+    fetchFileApi,
+    findSessionFileByName,
+    recentFiles,
+    sessionFiles
+  ]);
+
+  const getWorkspaceFileContext = useCallback((): RemoteFileRequestContext | undefined => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) {
+      return undefined;
+    }
+
+    return {
+      sessionId,
+      projectId: currentProjectId,
+      provider: currentSession?.provider || newSessionProvider,
+      scope: 'workspace'
+    };
+  }, [
+    currentProjectId,
+    currentSession?.provider,
+    newSessionProvider
+  ]);
+
   const loadWorkspaceFiles = useCallback(async (nextPath = '') => {
     if (!isConnected) {
       return;
@@ -2014,10 +2202,16 @@ export default function App() {
     setIsFilesLoading(true);
 
     try {
+      const context = getWorkspaceFileContext();
       const response = await fetchFileApi('/api/files/list', {
-        path: nextPath
+        path: nextPath,
+        ...(context?.sessionId ? { sessionId: context.sessionId } : {}),
+        ...(context?.projectId ? { projectId: context.projectId } : {}),
+        ...(context?.provider ? { provider: context.provider } : {}),
+        ...(context?.scope ? { scope: context.scope } : {})
       });
       const payload = await response.json() as WorkspaceFileListResult;
+      setWorkspaceRootPath(typeof payload?.rootPath === 'string' ? payload.rootPath : null);
       setCurrentFilesPath(typeof payload?.path === 'string' ? payload.path : nextPath);
       setFilesParentPath(typeof payload?.parentPath === 'string' ? payload.parentPath : null);
       setWorkspaceEntries(normalizeRemoteFileEntries(payload?.entries as any[]));
@@ -2026,7 +2220,7 @@ export default function App() {
     } finally {
       setIsFilesLoading(false);
     }
-  }, [fetchFileApi, isConnected]);
+  }, [fetchFileApi, getWorkspaceFileContext, isConnected]);
 
   const fetchRemoteFileBlob = useCallback(async (
     relativePath: string,
@@ -2037,9 +2231,10 @@ export default function App() {
       path: relativePath,
       ...(context?.sessionId ? { sessionId: context.sessionId } : {}),
       ...(context?.projectId ? { projectId: context.projectId } : {}),
-      ...(context?.provider ? { provider: context.provider } : {})
+      ...(context?.provider ? { provider: context.provider } : {}),
+      ...(context?.scope ? { scope: context.scope } : {})
     });
-    const fallbackName = fileName || getPathFileName(relativePath);
+    const fallbackName = fileName || getPathDisplayName(relativePath, 'download');
 
     return {
       blob: await response.blob(),
@@ -2056,7 +2251,7 @@ export default function App() {
     fileName?: string,
     context?: RemoteFileRequestContext
   ) => {
-    if (!relativePath) {
+    if (relativePath === undefined || relativePath === null) {
       return;
     }
 
@@ -2109,6 +2304,7 @@ export default function App() {
       return {
         path: relativePath,
         fileName,
+        context,
         objectUrl: null,
         isLoading: true,
         error: null
@@ -2118,7 +2314,7 @@ export default function App() {
     try {
       const resource = await fetchRemoteFileBlob(relativePath, fileName, context);
       if (!resource.mimeType.startsWith('image/')) {
-        throw new Error(t('bubble.filePreviewFailed', { error: resource.mimeType }));
+        throw new Error(resource.mimeType);
       }
 
       const objectUrl = window.URL.createObjectURL(resource.blob);
@@ -2138,6 +2334,7 @@ export default function App() {
         return {
           ...previous,
           fileName: resource.fileName,
+          context,
           objectUrl,
           isLoading: false,
           error: null
@@ -2174,8 +2371,20 @@ export default function App() {
     });
   }, [currentProjectId, currentSession?.provider, downloadRemoteFile, newSessionProvider]);
 
+  const handleAttachmentPreview = useCallback((attachment: Attachment) => {
+    if (!attachment.relativePath || !attachment.type.startsWith('image/')) {
+      return;
+    }
+
+    void openImagePreview(attachment.relativePath, attachment.name, {
+      sessionId: currentSessionIdRef.current,
+      projectId: currentProjectId,
+      provider: currentSession?.provider || newSessionProvider
+    });
+  }, [currentProjectId, currentSession?.provider, newSessionProvider, openImagePreview]);
+
   const handleMessageFileLink = useCallback((href: string, label?: string) => {
-    const normalizedPath = normalizeLocalFileLinkPath(href);
+    const normalizedPath = normalizeLocalResourcePath(href);
     if (!normalizedPath) {
       return;
     }
@@ -2187,15 +2396,66 @@ export default function App() {
       projectId: currentProjectId,
       provider: currentSession?.provider || newSessionProvider
     };
-    const fileName = label?.trim() || getPathFileName(normalizedPath);
+    const fileName = label?.trim() || getPathDisplayName(normalizedPath, 'download');
 
-    if (isPreviewableImagePath(normalizedPath)) {
-      void openImagePreview(normalizedPath, fileName, context);
+    void (async () => {
+      try {
+        const resolvedResource = await resolveMessageResourcePath(normalizedPath, context);
+        if (!resolvedResource) {
+          setFilesError('File not found');
+          return;
+        }
+
+        if (isPreviewableImagePath(resolvedResource.relativePath)) {
+          await openImagePreview(resolvedResource.relativePath, fileName, resolvedResource.context);
+          return;
+        }
+
+        await downloadRemoteFile(resolvedResource.relativePath, fileName, resolvedResource.context);
+      } catch (error) {
+        setFilesError(error instanceof Error ? error.message : 'Failed to open file');
+      }
+    })();
+  }, [
+    currentProjectId,
+    currentSession?.provider,
+    downloadRemoteFile,
+    newSessionProvider,
+    openImagePreview,
+    resolveMessageResourcePath,
+    touchWebSocketActivity
+  ]);
+
+  const handleFilesOpenFile = useCallback((entry: RemoteFileEntry) => {
+    if (entry.kind !== 'file' || entry.available === false) {
       return;
     }
 
-    void downloadRemoteFile(normalizedPath, fileName, context);
-  }, [currentProjectId, currentSession?.provider, downloadRemoteFile, newSessionProvider, openImagePreview, touchWebSocketActivity]);
+    const context = activeFilesTab === 'session'
+      ? {
+          sessionId: currentSessionIdRef.current,
+          projectId: currentProjectId,
+          provider: currentSession?.provider || newSessionProvider
+        }
+      : activeFilesTab === 'workspace'
+      ? getWorkspaceFileContext()
+      : undefined;
+
+    if ((entry.mimeType || '').startsWith('image/') || isPreviewableImagePath(entry.relativePath)) {
+      void openImagePreview(entry.relativePath, entry.name, context);
+      return;
+    }
+
+    void downloadRemoteFile(entry.relativePath, entry.name, context);
+  }, [
+    activeFilesTab,
+    currentProjectId,
+    currentSession?.provider,
+    downloadRemoteFile,
+    getWorkspaceFileContext,
+    newSessionProvider,
+    openImagePreview
+  ]);
 
   useEffect(() => {
     imagePreviewUrlRef.current = imagePreview?.objectUrl || null;
@@ -2254,10 +2514,9 @@ export default function App() {
       return;
     }
 
-    void loadWorkspaceFiles(currentFilesPath);
+    void loadWorkspaceFiles('');
   }, [
     activeFilesTab,
-    currentFilesPath,
     currentProjectId,
     currentSession?.provider,
     isConnected,
@@ -2290,9 +2549,8 @@ export default function App() {
       return;
     }
 
-    void loadWorkspaceFiles(currentFilesPath);
+    void loadWorkspaceFiles('');
   }, [
-    currentFilesPath,
     currentProjectId,
     currentSession?.provider,
     isConnected,
@@ -2333,6 +2591,24 @@ export default function App() {
     setActiveFilesTab('workspace');
     void loadWorkspaceFiles(nextPath);
   }, [loadWorkspaceFiles]);
+
+  useEffect(() => {
+    if (!showFilesPanel || activeFilesTab !== 'workspace' || !isConnected) {
+      return;
+    }
+
+    setCurrentFilesPath('');
+    void loadWorkspaceFiles('');
+  }, [
+    activeFilesTab,
+    currentProjectId,
+    currentSession?.provider,
+    currentSessionId,
+    isConnected,
+    loadWorkspaceFiles,
+    newSessionProvider,
+    showFilesPanel
+  ]);
 
   useEffect(() => {
     if (!showFilesPanel || activeFilesTab !== 'session' || !isConnected) {
@@ -2550,11 +2826,15 @@ export default function App() {
               canManageSettings: msg.permissions?.canManageSettings !== false
             }
           };
+          const nextSupportedProviders = normalizeSupportedProviders(msg.supportedProviders);
 
           setIsConnected(true);
           setIsConnecting(false);
           setShowSettings(false); // Auto-close settings panel on success
           setServerAccess(nextServerAccess);
+          setSupportedProviders(nextSupportedProviders);
+          setNewSessionProvider(previous => getFallbackProvider(previous, nextSupportedProviders));
+          setRuntimeProfileProvider(previous => getFallbackProvider(previous, nextSupportedProviders));
           debugLog('Auth successful');
           serverRehydratedRunningSessionsRef.current = new Set();
           clearRunningSessionRehydrationTimeout();
@@ -2674,6 +2954,8 @@ export default function App() {
           if (msg.message) {
             alert(msg.message);
           }
+        } else if (msg.type === 'error') {
+          alert(msg.content || t('common.unknownError'));
         } else if (msg.type === 'settings_error') {
           const provider = msg.provider || 'claude';
           setRuntimeProfiles(prev => ({
@@ -2733,7 +3015,8 @@ export default function App() {
                   title: preferredSession.title,
                   projectId: preferredSession.projectId,
                   provider: preferredSession.provider,
-                  timestamp: msg.timestamp || Date.now()
+                  timestamp: msg.timestamp || Date.now(),
+                  contextUsage: preferredSession.contextUsage
                 });
                 setCurrentSessionId(preferredRunningSessionId);
                 currentSessionIdRef.current = preferredRunningSessionId;
@@ -2761,7 +3044,8 @@ export default function App() {
               title: msg.title,
               projectId: msg.projectId,
               provider: msg.provider,
-              timestamp: msg.timestamp || Date.now()
+              timestamp: msg.timestamp || Date.now(),
+              contextUsage: msg.contextUsage
             });
             sendResumeRequest(newWs, msg.sessionId, msg.projectId, msg.provider);
             debugLog('Reconnected to running session:', msg.sessionId);
@@ -2773,11 +3057,28 @@ export default function App() {
             if (pendingRunningSessionRestoreRef.current?.sessionId === msg.sessionId) {
               pendingRunningSessionRestoreRef.current = null;
             }
+            const compactSource = msg.reason === 'compact'
+              ? pendingCompactSourceSessionRef.current
+              : null;
+            const snapshotProjectId = msg.projectId || compactSource?.projectId || null;
+            const snapshotProvider = msg.provider || compactSource?.provider;
+
+            if (msg.reason === 'compact') {
+              if (compactSource?.sessionId && compactSource.sessionId !== msg.sessionId) {
+                clearRunningSessionState(compactSource.sessionId);
+              }
+              setCurrentSessionId(msg.sessionId);
+              currentSessionIdRef.current = msg.sessionId;
+              setCurrentProjectId(snapshotProjectId);
+              syncNewSessionProvider(snapshotProvider);
+            }
+
             applyRunningSessionSnapshot(msg.sessionId, {
               title: msg.title,
-              projectId: msg.projectId,
-              provider: msg.provider,
-              timestamp: msg.timestamp || Date.now()
+              projectId: snapshotProjectId,
+              provider: snapshotProvider,
+              timestamp: msg.timestamp || Date.now(),
+              contextUsage: msg.contextUsage
             });
           }
         } else if (msg.type === 'attachments_registered') {
@@ -3014,10 +3315,12 @@ export default function App() {
             const messages = session.messages;
             const lastMsg = messages[messages.length - 1];
             const provider = msg.provider || session.provider || currentProvider;
+            const contextUsage = normalizeSessionContextUsage(msg.contextUsage);
 
             if (lastMsg && lastMsg.role === 'model') {
               return {
                 ...session,
+                ...(contextUsage ? { contextUsage } : {}),
                 messages: [...messages.slice(0, -1), {
                   ...lastMsg,
                   timestamp: msg.timestamp || Date.now(),
@@ -3026,6 +3329,13 @@ export default function App() {
                     ? setMessageProcessState(lastMsg.process, provider, 'completed')
                     : lastMsg.process
                 }]
+              };
+            }
+
+            if (contextUsage) {
+              return {
+                ...session,
+                contextUsage
               };
             }
 
@@ -3069,6 +3379,9 @@ export default function App() {
           const errorSessionId = targetSessionId;
           const errorTimestamp = msg.timestamp || Date.now();
           const errorMessage = msg.error || t('common.unknownError');
+          if (pendingCompactSourceSessionRef.current?.sessionId === errorSessionId) {
+            pendingCompactSourceSessionRef.current = null;
+          }
           if (errorSessionId) {
             clearRunningSessionState(errorSessionId);
           }
@@ -3146,15 +3459,22 @@ export default function App() {
         } else if (msg.type === 'project_list') {
           // Handle project list from server
           debugLog('Received project list:', msg.projects);
-          setProjects(msg.projects || []);
+          const incomingProjects: ProjectInfo[] = msg.projects || [];
+          setProjects(incomingProjects);
+          setProjectSessions(prev => {
+            const next = { ...prev };
+            let changed = false;
+
+            for (const project of incomingProjects) {
+              if (projectHasKnownSessions(project) && next[project.id]?.length === 0) {
+                delete next[project.id];
+                changed = true;
+              }
+            }
+
+            return changed ? next : prev;
+          });
           setLoadingProjects(new Set());
-          if (msg.projects && msg.projects.length > 0) {
-            // Auto-expand the first (most recent) project to show sessions
-            const firstProject = msg.projects[0];
-            setExpandedProjects(prev => new Set(prev).add(firstProject.id));
-            setLoadingProjects(prev => new Set(prev).add(firstProject.id));
-            newWs.send(JSON.stringify({ type: 'session', action: 'list_by_project', projectId: firstProject.id }));
-          }
         } else if (msg.type === 'session_list') {
           // Handle session list from server
           debugLog('Received session list:', msg.sessions, 'projectId:', msg.projectId);
@@ -3171,7 +3491,10 @@ export default function App() {
                 title: normalizeLegacyDisplayText(s.summary || s.title || 'Untitled'),
                 messages: [],
                 createdAt: s.createdAt || Date.now(),
-                provider: s.provider || msg.provider || 'claude'
+                provider: s.provider || msg.provider || 'claude',
+                messageCount: s.messageCount,
+                hasRenderableResult: s.hasRenderableResult,
+                ...(normalizeSessionContextUsage(s.contextUsage || msg.contextUsage) ? { contextUsage: normalizeSessionContextUsage(s.contextUsage || msg.contextUsage) } : {})
               }));
               setProjectSessions(prev => ({
                 ...prev,
@@ -3190,7 +3513,10 @@ export default function App() {
               title: normalizeLegacyDisplayText(s.title),
               messages: [],
               createdAt: s.createdAt,
-              provider: s.provider || msg.provider || 'claude'
+              provider: s.provider || msg.provider || 'claude',
+              messageCount: s.messageCount,
+              hasRenderableResult: s.hasRenderableResult,
+              ...(normalizeSessionContextUsage(s.contextUsage || msg.contextUsage) ? { contextUsage: normalizeSessionContextUsage(s.contextUsage || msg.contextUsage) } : {})
             }));
             setSessions(prev => mergeSessionSummaryList(prev, serverSessions));
 
@@ -3226,12 +3552,15 @@ export default function App() {
           debugLog('[session_created] pendingHostSessionRef.current:', pendingHostSessionRef.current ? 'HAS VALUE' : 'NULL');
           if (msg.session) {
             const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
+            const contextUsage = normalizeSessionContextUsage(msg.session.contextUsage || msg.contextUsage);
             const newSession: ChatSession = {
               id: msg.session.id,
               title: normalizeLegacyDisplayText(msg.session.title || 'New Chat'),
               messages: [],
               createdAt: msg.session.createdAt || Date.now(),
-              provider: sessionProvider
+              provider: sessionProvider,
+              ...(typeof msg.session.cwd === 'string' && msg.session.cwd ? { cwd: msg.session.cwd } : {}),
+              ...(contextUsage ? { contextUsage } : {})
             };
 
             // Determine which project this session belongs to
@@ -3298,6 +3627,7 @@ export default function App() {
           if (msg.session) {
             const sessionProvider = msg.session.provider || msg.provider || newSessionProvider;
             const resumedMessages = normalizeIncomingMessages(msg.session.messages || []);
+            const contextUsage = normalizeSessionContextUsage(msg.session.contextUsage || msg.contextUsage);
             const shouldAppendRunningPlaceholder = runningSessionsRef.current.has(msg.session.id)
               && !(
                 resumedMessages.length > 0
@@ -3311,7 +3641,9 @@ export default function App() {
                 ? [...resumedMessages, createReconnectedRunningMessage(sessionProvider, Date.now())]
                 : resumedMessages,
               createdAt: msg.session.createdAt || Date.now(),
-              provider: sessionProvider
+              provider: sessionProvider,
+              ...(typeof msg.session.cwd === 'string' && msg.session.cwd ? { cwd: msg.session.cwd } : {}),
+              ...(contextUsage ? { contextUsage } : {})
             };
             if (pendingRunningSessionRestoreRef.current?.sessionId === resumedSession.id) {
               pendingRunningSessionRestoreRef.current = null;
@@ -3407,13 +3739,18 @@ export default function App() {
           // Handle session ID update from server (when Claude CLI returns a new session ID)
           debugLog('Session ID updated:', msg.oldSessionId, '->', msg.newSessionId);
           syncNewSessionProvider(msg.provider);
+          const contextUsage = normalizeSessionContextUsage(msg.contextUsage);
+          const isCompactUpdate = msg.operation === 'compact';
+          const compactSource = isCompactUpdate ? pendingCompactSourceSessionRef.current : null;
+          const updatedProjectId = msg.projectId || compactSource?.projectId || null;
           setSessions(prev => prev.map(s => {
             if (s.id === msg.oldSessionId) {
               return {
                 ...s,
                 id: msg.newSessionId,
                 title: msg.title || s.title,
-                provider: msg.provider || s.provider
+                provider: msg.provider || s.provider,
+                ...(contextUsage ? { contextUsage } : {})
               };
             }
             return s;
@@ -3428,7 +3765,8 @@ export default function App() {
                     ...s,
                     id: msg.newSessionId,
                     title: msg.title || s.title,
-                    provider: msg.provider || s.provider
+                    provider: msg.provider || s.provider,
+                    ...(contextUsage ? { contextUsage } : {})
                   };
                 }
                 return s;
@@ -3439,7 +3777,8 @@ export default function App() {
           // Update runningSessions if the old session was running
           renameRunningSessionState(msg.oldSessionId, msg.newSessionId, {
             title: msg.title,
-            provider: msg.provider
+            projectId: updatedProjectId,
+            provider: msg.provider || compactSource?.provider
           });
           // Update completedSessions as well
           setCompletedSessions(prev => {
@@ -3451,9 +3790,15 @@ export default function App() {
             }
             return prev;
           });
-          if (currentSessionIdRef.current === msg.oldSessionId) {
+          if (isCompactUpdate && compactSource?.sessionId) {
+            clearRunningSessionState(compactSource.sessionId);
+            pendingCompactSourceSessionRef.current = null;
+          }
+          if (isCompactUpdate || currentSessionIdRef.current === msg.oldSessionId) {
             setCurrentSessionId(msg.newSessionId);
             currentSessionIdRef.current = msg.newSessionId;
+            setCurrentProjectId(updatedProjectId);
+            syncNewSessionProvider(msg.provider || compactSource?.provider);
           }
         } else if (msg.type === 'messages_loaded') {
           // Handle more messages loaded (pagination)
@@ -3620,13 +3965,29 @@ export default function App() {
 
   // Create new session (on server)
   const createNewSession = (provider: Provider = newSessionProvider, title?: string) => {
+    if (isProviderTemporarilyUnavailable(provider)) {
+      syncNewSessionProvider(getFallbackProvider(provider, supportedProviders));
+      alert(t('provider.temporarilyUnavailable', { provider: getProviderLabel(provider, t) }));
+      return;
+    }
+
+    const resolvedProvider = getFallbackProvider(provider, supportedProviders);
+    const sourceSessionId = currentSessionIdRef.current;
+    const cwd = currentSession?.cwd
+      || (activeFilesTab === 'workspace'
+      ? joinWorkspaceDirectory(workspaceRootPath, currentFilesPath)
+      : undefined);
+
     if (wsRef.current && isConnected) {
-      syncNewSessionProvider(provider);
+      syncNewSessionProvider(resolvedProvider);
       noteWebSocketActivity();
       wsRef.current.send(JSON.stringify({
         type: 'session',
         action: 'new',
-        provider,
+        provider: resolvedProvider,
+        ...(sourceSessionId ? { sessionId: sourceSessionId } : {}),
+        ...(sourceSessionId && currentProjectId ? { projectId: currentProjectId } : {}),
+        ...(cwd ? { cwd } : {}),
         ...(title ? { title } : {})
       }));
     }
@@ -3707,11 +4068,21 @@ export default function App() {
         return newSet;
       }
       newSet.add(projectId);
-      // Load sessions for this project if not loaded
-      if (!projectSessions[projectId] && wsRef.current && isConnected) {
+      const project = projects.find(item => item.id === projectId);
+      const cachedSessions = projectSessions[projectId];
+      const shouldLoadSessions = !cachedSessions
+        || (cachedSessions.length === 0 && projectHasKnownSessions(project));
+
+      // Load sessions for this project if not loaded, or if an earlier empty response is stale.
+      if (shouldLoadSessions && wsRef.current && isConnected) {
         setLoadingProjects(prev => new Set(prev).add(projectId));
         noteWebSocketActivity();
-        wsRef.current.send(JSON.stringify({ type: 'session', action: 'list_by_project', projectId }));
+        wsRef.current.send(JSON.stringify({
+          type: 'session',
+          action: 'list_by_project',
+          projectId,
+          limit: HISTORY_PROJECT_SESSION_LIMIT
+        }));
       }
       return newSet;
     });
@@ -3851,6 +4222,38 @@ export default function App() {
     const activeWs = wsRef.current;
     if (!activeWs || !isConnected) {
       debugLog('Not connected, ws:', activeWs, 'isConnected:', isConnected);
+      return;
+    }
+
+    if (isCompactCommand(text)) {
+      const sourceSessionId = currentSessionIdRef.current;
+      if (!sourceSessionId) {
+        debugLog('[handleSend] No current session to compact');
+        return;
+      }
+
+      const provider = resolveSessionProvider(sourceSessionId, currentProjectId, currentProvider);
+      pendingCompactSourceSessionRef.current = {
+        sessionId: sourceSessionId,
+        projectId: currentProjectId,
+        provider
+      };
+
+      const message: any = {
+        type: 'claude',
+        content: text,
+        stream: true,
+        sessionId: sourceSessionId,
+        provider,
+        timestamp: Date.now()
+      };
+      if (currentProjectId) {
+        message.projectId = currentProjectId;
+      }
+
+      debugLog('[handleSend] Sending compact request:', JSON.stringify(message));
+      noteWebSocketActivity();
+      activeWs.send(JSON.stringify(message));
       return;
     }
 
@@ -4053,6 +4456,35 @@ export default function App() {
     activeWs.send(JSON.stringify(message));
   };
 
+  const handleSendRef = useRef(handleSend);
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  }, [handleSend]);
+
+  const messagesRef = useRef<Message[]>(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const handleMessageRegenerate = useCallback((messageId: string) => {
+    const currentMessages = messagesRef.current;
+    const messageIndex = currentMessages.findIndex(message => message.id === messageId);
+    if (messageIndex <= 0) {
+      return;
+    }
+
+    const previousUserMessage = currentMessages[messageIndex - 1];
+    if (previousUserMessage.role !== 'user') {
+      return;
+    }
+
+    void handleSendRef.current(previousUserMessage.content, previousUserMessage.attachments || []);
+  }, []);
+
+  const handleMessageOptionClick = useCallback((option: string) => {
+    void handleSendRef.current(option, []);
+  }, []);
+
   const handleStop = () => {
     const sessionIdToStop = currentSessionIdRef.current;
     // Send stop request to server to kill Claude CLI process
@@ -4112,9 +4544,9 @@ export default function App() {
     setShowSettings(prev => !prev);
   };
 
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = useCallback((text: string) => {
     navigator.clipboard.writeText(text);
-  };
+  }, []);
 
   const jumpToMessage = (id: string) => {
     const element = document.getElementById(`message-${id}`);
@@ -4145,7 +4577,9 @@ export default function App() {
         serverAccess={serverAccess}
         currentProvider={currentProvider}
         newSessionProvider={newSessionProvider}
+        supportedProviders={supportedProviders}
         onNewSessionProviderChange={setNewSessionProvider}
+        contextUsage={currentSession?.contextUsage}
       />
 
       {/* Settings Panel */}
@@ -4172,6 +4606,7 @@ export default function App() {
                 isConnected={isConnected}
                 isConnecting={isConnecting}
                 serverAccess={serverAccess}
+                supportedProviders={supportedProviders}
                 runtimeProfileProvider={runtimeProfileProvider}
                 runtimeProfileState={runtimeProfiles[runtimeProfileProvider]}
                 onRuntimeProfileProviderChange={handleRuntimeProfileProviderChange}
@@ -4206,6 +4641,7 @@ export default function App() {
         onTabChange={handleFilesTabChange}
         onRefresh={handleFilesRefresh}
         onOpenPath={handleFilesOpenPath}
+        onOpenFile={handleFilesOpenFile}
         onDownload={(path, fileName) => {
           void downloadRemoteFile(
             path,
@@ -4216,6 +4652,8 @@ export default function App() {
                   projectId: currentProjectId,
                   provider: currentSession?.provider || newSessionProvider
                 }
+              : activeFilesTab === 'workspace'
+              ? getWorkspaceFileContext()
               : undefined
           );
         }}
@@ -4247,11 +4685,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => void downloadRemoteFile(imagePreview.path, imagePreview.fileName, {
-                        sessionId: currentSessionIdRef.current,
-                        projectId: currentProjectId,
-                        provider: currentSession?.provider || newSessionProvider
-                      })}
+                      onClick={() => void downloadRemoteFile(imagePreview.path, imagePreview.fileName, imagePreview.context)}
                       disabled={imagePreview.isLoading || !!imagePreview.error}
                       className={cn(
                         'rounded-full border px-4 py-2 text-sm font-medium transition-colors',
@@ -4657,21 +5091,14 @@ export default function App() {
                 message={msg}
                 isStreaming={msg.status === 'sending'}
                 onCopy={copyToClipboard}
-                onRegenerate={() => {
-                  const idx = messages.findIndex(m => m.id === msg.id);
-                  if (idx > 0) {
-                    const prevUserMsg = messages[idx - 1];
-                    if (prevUserMsg.role === 'user') {
-                    handleSend(prevUserMsg.content, prevUserMsg.attachments || []);
-                  }
-                }
-              }}
-              onOptionClick={(option) => handleSend(option, [])}
-              onAttachmentDownload={handleAttachmentDownload}
-              onFileLinkClick={handleMessageFileLink}
-              processPanelPreferences={uiPreferences.processPanel}
-            />
-          ))
+                onRegenerate={handleMessageRegenerate}
+                onOptionClick={handleMessageOptionClick}
+                onAttachmentPreview={handleAttachmentPreview}
+                onAttachmentDownload={handleAttachmentDownload}
+                onFileLinkClick={handleMessageFileLink}
+                processPanelPreferences={uiPreferences.processPanel}
+              />
+            ))
         )}
 
       {/* Loading indicator while the active provider is processing */}

@@ -1,7 +1,5 @@
-import 'dart:convert';
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import '../services/websocket_service.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/connection_dialog.dart';
@@ -25,8 +23,18 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _connectionError;
   String _serverUrl = '';
   String _authToken = '';
+  List<String> _supportedProviders = const ['claude', 'codex'];
+  String _selectedProvider = 'claude';
+  List<SessionSummary> _sessionSummaries = const [];
+  SessionContextState? _sessionContext;
 
+  StreamSubscription<WebSocketConnectionState>? _connectionSubscription;
+  StreamSubscription<String>? _errorSubscription;
   StreamSubscription<String>? _messageSubscription;
+  StreamSubscription<SessionContextState?>? _contextSubscription;
+  StreamSubscription<SupportedProvidersState>? _providersSubscription;
+  StreamSubscription<List<SessionSummary>>? _sessionListSubscription;
+  StreamSubscription<List<RemoteChatMessage>>? _historySubscription;
 
   @override
   void initState() {
@@ -34,7 +42,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _wsService = WebSocketService();
 
     // Listen to connection state changes
-    _wsService.connectionStateStream.listen((state) {
+    _connectionSubscription = _wsService.connectionStateStream.listen((state) {
       setState(() {
         _isConnected = state == WebSocketConnectionState.connected;
         _isConnecting = state == WebSocketConnectionState.connecting;
@@ -43,7 +51,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     // Listen to errors
-    _wsService.errorStream.listen((error) {
+    _errorSubscription = _wsService.errorStream.listen((error) {
       setState(() {
         _connectionError = error;
         _isConnecting = false;
@@ -55,13 +63,53 @@ class _ChatScreenState extends State<ChatScreen> {
       _addMessage(MessageType.received, message);
     });
 
+    _contextSubscription = _wsService.contextStateStream.listen((state) {
+      setState(() {
+        _sessionContext = state;
+      });
+    });
+
+    _providersSubscription = _wsService.supportedProvidersStream.listen((state) {
+      setState(() {
+        _supportedProviders = state.providers;
+        if (!_supportedProviders.contains(_selectedProvider)) {
+          _selectedProvider = _supportedProviders.first;
+        }
+      });
+    });
+
+    _sessionListSubscription = _wsService.sessionListStream.listen((sessions) {
+      setState(() {
+        _sessionSummaries = sessions;
+      });
+    });
+
+    _historySubscription = _wsService.historyMessagesStream.listen((messages) {
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(messages.map((message) => ChatMessage(
+                type: message.role == 'user' ? MessageType.sent : MessageType.received,
+                content: message.content,
+                timestamp: DateTime.now(),
+              )));
+      });
+      _scrollToBottom();
+    });
+
     // Load saved connection info
     _loadConnectionInfo();
   }
 
   @override
   void dispose() {
+    _connectionSubscription?.cancel();
+    _errorSubscription?.cancel();
     _messageSubscription?.cancel();
+    _contextSubscription?.cancel();
+    _providersSubscription?.cancel();
+    _sessionListSubscription?.cancel();
+    _historySubscription?.cancel();
     _wsService.dispose();
     _controller.dispose();
     _scrollController.dispose();
@@ -140,7 +188,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _disconnect() {
     _wsService.disconnect();
     _messages.clear();
-    setState(() {});
+    setState(() {
+      _sessionContext = null;
+      _sessionSummaries = const [];
+    });
   }
 
   void _addMessage(MessageType type, String content) {
@@ -152,7 +203,10 @@ class _ChatScreenState extends State<ChatScreen> {
       ));
     });
 
-    // Scroll to bottom
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -171,7 +225,121 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.clear();
 
     _addMessage(MessageType.sent, text);
-    await _wsService.sendMessage(text);
+    await _wsService.sendMessage(text, provider: _selectedProvider);
+  }
+
+  void _selectProvider(String provider) {
+    if (!_supportedProviders.contains(provider)) {
+      return;
+    }
+
+    setState(() {
+      _selectedProvider = provider;
+    });
+    _wsService.selectProvider(provider);
+    if (_isConnected) {
+      _wsService.requestSessions();
+    }
+  }
+
+  void _startNewSession() {
+    if (!_isConnected) {
+      return;
+    }
+
+    setState(() {
+      _messages.clear();
+      _sessionContext = null;
+    });
+    _wsService.createNewSession(provider: _selectedProvider);
+    _wsService.requestSessions();
+  }
+
+  void _resumeSession(SessionSummary session) {
+    Navigator.of(context).pop();
+    setState(() {
+      _selectedProvider = session.provider;
+      _messages.clear();
+      _sessionContext = null;
+    });
+    _wsService.resumeSession(session);
+  }
+
+  Future<void> _showHistorySheet() async {
+    if (!_isConnected) {
+      return;
+    }
+
+    _wsService.requestSessions();
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final theme = Theme.of(context);
+        final sessions = _sessionSummaries;
+
+        if (sessions.isEmpty) {
+          return SizedBox(
+            height: 220,
+            child: Center(
+              child: Text(
+                'No sessions',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          );
+        }
+
+        return SafeArea(
+          child: ListView.separated(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+            itemCount: sessions.length,
+            separatorBuilder: (_, __) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final session = sessions[index];
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: CircleAvatar(
+                  child: Text(_providerShortLabel(session.provider)),
+                ),
+                title: Text(
+                  session.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  '${_providerLabel(session.provider)} | ${session.messageCount} messages',
+                ),
+                onTap: () => _resumeSession(session),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  String _providerLabel(String provider) {
+    switch (provider) {
+      case 'codex':
+        return 'Codex';
+      case 'claude':
+      default:
+        return 'Claude';
+    }
+  }
+
+  String _providerShortLabel(String provider) {
+    switch (provider) {
+      case 'codex':
+        return 'Cx';
+      case 'claude':
+      default:
+        return 'Cl';
+    }
   }
 
   @override
@@ -185,6 +353,16 @@ class _ChatScreenState extends State<ChatScreen> {
           ConnectionStatus(
             isConnected: _isConnected,
             isConnecting: _isConnecting,
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            onPressed: _isConnected ? _showHistorySheet : null,
+            tooltip: 'History',
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_comment_outlined),
+            onPressed: _isConnected ? _startNewSession : null,
+            tooltip: 'New Chat',
           ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
@@ -234,7 +412,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ],
               ),
-            ),
+          ),
+
+          if (_sessionContext != null && _isConnected)
+            _buildContextBanner(theme),
 
           // Messages
           Expanded(
@@ -372,39 +553,148 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
       child: SafeArea(
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: TextField(
-                controller: _controller,
-                decoration: InputDecoration(
-                  hintText: 'Type a message...',
-                  hintStyle: TextStyle(
-                    color: theme.colorScheme.onSurfaceVariant.withOpacity(0.5),
-                  ),
-                  suffixIcon: _controller.text.isNotEmpty
-                      ? IconButton(
-                          icon: const Icon(Icons.clear),
-                          onPressed: () => _controller.clear(),
-                        )
-                      : null,
+            if (_isConnected && _supportedProviders.length > 1)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Row(
+                  children: _supportedProviders.map((provider) {
+                    final selected = provider == _selectedProvider;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(_providerLabel(provider)),
+                        selected: selected,
+                        onSelected: (_) => _selectProvider(provider),
+                      ),
+                    );
+                  }).toList(),
                 ),
-                textCapitalization: TextCapitalization.sentences,
-                onSubmitted: (_) => _sendMessage(),
-                onChanged: (_) => setState(() {}),
-                enabled: _isConnected,
               ),
-            ),
-            const SizedBox(width: 12),
-            FilledButton.icon(
-              onPressed: _isConnected && _controller.text.isNotEmpty
-                  ? _sendMessage
-                  : null,
-              icon: const Icon(Icons.send),
-              label: const Text('Send'),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    decoration: InputDecoration(
+                      hintText: 'Type a message...',
+                      hintStyle: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant.withOpacity(0.5),
+                      ),
+                      suffixIcon: _controller.text.isNotEmpty
+                          ? IconButton(
+                              icon: const Icon(Icons.clear),
+                              onPressed: () => _controller.clear(),
+                            )
+                          : null,
+                    ),
+                    textCapitalization: TextCapitalization.sentences,
+                    onSubmitted: (_) => _sendMessage(),
+                    onChanged: (_) => setState(() {}),
+                    enabled: _isConnected,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  onPressed: _isConnected && _controller.text.isNotEmpty
+                      ? _sendMessage
+                      : null,
+                  icon: const Icon(Icons.send),
+                  label: const Text('Send'),
+                ),
+              ],
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildContextBanner(ThemeData theme) {
+    final state = _sessionContext;
+    if (state == null) {
+      return const SizedBox.shrink();
+    }
+
+    final progress = state.budgetTokens > 0
+        ? (state.usedPercent / 100).clamp(0.0, 1.0)
+        : 0.0;
+    final accent = state.isOverBudget
+        ? theme.colorScheme.error
+        : state.remainingPercent < 20
+            ? theme.colorScheme.tertiary
+            : theme.colorScheme.primary;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            accent.withOpacity(0.18),
+            accent.withOpacity(0.06),
+          ],
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: accent.withOpacity(0.28),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.memory_rounded,
+                size: 18,
+                color: accent,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Estimated context ${state.usedPercent.toStringAsFixed(1)}% used | ${state.remainingPercent.toStringAsFixed(1)}% left',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                state.isOverBudget
+                    ? 'Over budget'
+                    : '~${state.remainingTokens.toString()} tokens left',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: accent,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 8,
+              backgroundColor: theme.colorScheme.surfaceContainerHighest.withOpacity(0.45),
+              color: accent,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            state.title != null && state.title!.isNotEmpty
+                ? '${state.title} | ${state.messageCount} messages | /compact to shrink'
+                : '${state.messageCount} messages | /compact to shrink',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
       ),
     );
   }

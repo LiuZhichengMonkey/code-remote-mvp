@@ -6,6 +6,39 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   codex: 'Codex'
 };
 
+export const ALL_PROVIDERS: Provider[] = ['claude', 'codex'];
+export const TEMPORARILY_UNAVAILABLE_PROVIDERS: Provider[] = [];
+
+export const isProvider = (value: unknown): value is Provider => (
+  value === 'claude' || value === 'codex'
+);
+
+export const normalizeSupportedProviders = (providers: unknown): Provider[] => {
+  if (!Array.isArray(providers)) {
+    return [...ALL_PROVIDERS];
+  }
+
+  const next = providers.filter(isProvider).filter((provider, index, values) => values.indexOf(provider) === index);
+  return next.length > 0 ? next : [...ALL_PROVIDERS];
+};
+
+export const isProviderTemporarilyUnavailable = (provider?: Provider): boolean => (
+  provider ? TEMPORARILY_UNAVAILABLE_PROVIDERS.includes(provider) : false
+);
+
+export const getFallbackProvider = (
+  provider?: Provider | null,
+  supportedProviders: Provider[] = ALL_PROVIDERS
+): Provider => {
+  const availableProviders = supportedProviders.filter(candidate => !isProviderTemporarilyUnavailable(candidate));
+
+  if (provider && availableProviders.includes(provider)) {
+    return provider;
+  }
+
+  return availableProviders[0] || 'claude';
+};
+
 export const RECONNECTING_AFTER_REFRESH_STATUS_LABEL = 'Reconnecting after refresh';
 export const RESTORED_RUNNING_STATUS_LABEL = 'Restored after refresh. Waiting for the next live update...';
 
@@ -19,9 +52,12 @@ const translateOrFallback = (
 export const getProviderLabel = (provider?: Provider, translate?: TranslateFn): string => {
   const safeProvider = provider || 'claude';
 
-  return safeProvider === 'codex'
-    ? translateOrFallback(translate, 'provider.codex', PROVIDER_LABELS.codex)
-    : translateOrFallback(translate, 'provider.claude', PROVIDER_LABELS.claude);
+  switch (safeProvider) {
+    case 'codex':
+      return translateOrFallback(translate, 'provider.codex', PROVIDER_LABELS.codex);
+    default:
+      return translateOrFallback(translate, 'provider.claude', PROVIDER_LABELS.claude);
+  }
 };
 
 export const getReconnectPlaceholderContent = (

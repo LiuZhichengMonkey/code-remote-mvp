@@ -25,6 +25,24 @@ interface ParsedSessionRecord {
   filePath: string;
 }
 
+interface CodexSummaryRecord {
+  info: SessionInfo;
+  filePath: string;
+  cwd?: string;
+}
+
+interface FileCacheEntry<T> {
+  mtimeMs: number;
+  size: number;
+  value: T | null;
+}
+
+interface JsonlFileEntry {
+  filePath: string;
+  mtimeMs: number;
+  size: number;
+}
+
 export interface CodexProjectInfo {
   id: string;
   displayName: string;
@@ -110,7 +128,24 @@ function walkJsonlFiles(rootDir: string): string[] {
   return results;
 }
 
+function walkJsonlFileEntries(rootDir: string): JsonlFileEntry[] {
+  return walkJsonlFiles(rootDir)
+    .map(filePath => {
+      try {
+        const stat = fs.statSync(filePath);
+        return { filePath, mtimeMs: stat.mtimeMs, size: stat.size };
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry): entry is JsonlFileEntry => entry !== null)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
 export class CodexSessionStorage {
+  private static summaryCache = new Map<string, FileCacheEntry<CodexSummaryRecord>>();
+  private static sessionPathIndex = new Map<string, string>();
+
   private workspaceRoot: string;
   private projectPath: string;
   private metadataFile: string;
@@ -508,6 +543,204 @@ export class CodexSessionStorage {
     }
   }
 
+  private parseSessionSummary(filePath: string): CodexSummaryRecord | null {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const lines = content.split(/\r?\n/).filter(line => line.trim());
+
+      let sessionId = '';
+      let title = 'New Chat';
+      let cwd = '';
+      let createdAt = 0;
+      let updatedAt = 0;
+      let messageCount = 0;
+      let hasRenderableResult = false;
+      let pendingProcessHasEvents = false;
+      let currentAssistantHasMessage = false;
+
+      for (let index = 0; index < lines.length; index++) {
+        try {
+          const entry: any = JSON.parse(lines[index]);
+          const entryTimestamp = parseTimestamp(entry.timestamp);
+
+          if (entryTimestamp > 0) {
+            createdAt = createdAt === 0 ? entryTimestamp : Math.min(createdAt, entryTimestamp);
+            updatedAt = Math.max(updatedAt, entryTimestamp);
+          }
+
+          if (entry.type === 'session_meta') {
+            sessionId = entry.payload?.id || sessionId;
+            cwd = entry.payload?.cwd || cwd;
+
+            const payloadTimestamp = parseTimestamp(entry.payload?.timestamp);
+            if (payloadTimestamp > 0) {
+              createdAt = createdAt === 0 ? payloadTimestamp : Math.min(createdAt, payloadTimestamp);
+              updatedAt = Math.max(updatedAt, payloadTimestamp);
+            }
+            continue;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'user_message') {
+            const messageText = typeof entry.payload.message === 'string' ? entry.payload.message : '';
+            const imagePaths = this.extractUserMessageImagePaths(entry.payload);
+            if (messageText.trim() || imagePaths.length > 0) {
+              messageCount += 1;
+              if (title === 'New Chat' && messageText.trim()) {
+                title = messageText.trim().substring(0, 50);
+              }
+            }
+            pendingProcessHasEvents = false;
+            currentAssistantHasMessage = false;
+            continue;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') {
+            pendingProcessHasEvents = true;
+            currentAssistantHasMessage = false;
+            continue;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'agent_message') {
+            const phase = typeof entry.payload.phase === 'string' ? entry.payload.phase : '';
+            const text = typeof entry.payload.message === 'string' ? entry.payload.message.trim() : '';
+            if (text && phase && phase !== 'final_answer') {
+              pendingProcessHasEvents = true;
+            }
+            continue;
+          }
+
+          if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
+            if (!currentAssistantHasMessage && pendingProcessHasEvents) {
+              messageCount += 1;
+              hasRenderableResult = true;
+              currentAssistantHasMessage = true;
+            }
+            pendingProcessHasEvents = false;
+            continue;
+          }
+
+          if (entry.type === 'response_item' && entry.payload?.type === 'reasoning') {
+            pendingProcessHasEvents = true;
+            continue;
+          }
+
+          if (
+            entry.type === 'response_item'
+            && (entry.payload?.type === 'function_call' || entry.payload?.type === 'custom_tool_call')
+          ) {
+            pendingProcessHasEvents = true;
+            continue;
+          }
+
+          if (
+            entry.type === 'response_item'
+            && (entry.payload?.type === 'function_call_output' || entry.payload?.type === 'custom_tool_call_output')
+          ) {
+            pendingProcessHasEvents = true;
+            continue;
+          }
+
+          if (entry.type !== 'response_item' || entry.payload?.type !== 'message' || entry.payload?.role !== 'assistant') {
+            continue;
+          }
+
+          const phase = typeof entry.payload.phase === 'string' ? entry.payload.phase : '';
+          if (phase && phase !== 'final_answer') {
+            continue;
+          }
+
+          const text = Array.isArray(entry.payload.content)
+            ? entry.payload.content
+              .filter((item: any) => item?.type === 'output_text' && typeof item.text === 'string')
+              .map((item: any) => item.text)
+              .join('')
+            : '';
+
+          if (!text.trim()) {
+            continue;
+          }
+
+          messageCount += 1;
+          hasRenderableResult = true;
+          pendingProcessHasEvents = false;
+          currentAssistantHasMessage = true;
+        } catch {
+          // Ignore malformed lines.
+        }
+      }
+
+      if (!sessionId || messageCount === 0) {
+        return null;
+      }
+
+      const metadata = this.getMetadataStore()[sessionId];
+      if (metadata?.title) {
+        title = metadata.title;
+      }
+
+      const projectId = cwd ? pathToProjectKey(cwd) : undefined;
+      const effectiveCreatedAt = createdAt || Date.now();
+      const effectiveUpdatedAt = Math.max(updatedAt, metadata?.updatedAt || 0, effectiveCreatedAt);
+
+      return {
+        filePath,
+        cwd: cwd || undefined,
+        info: {
+          id: sessionId,
+          title,
+          createdAt: effectiveCreatedAt,
+          messageCount,
+          provider: 'codex',
+          projectId,
+          lastActivity: effectiveUpdatedAt,
+          hasRenderableResult
+        }
+      };
+    } catch (error) {
+      console.error(`[CodexSessionStorage] Failed to parse session summary ${filePath}:`, error);
+      return null;
+    }
+  }
+
+  private static sessionIndexKey(sessionId: string, projectId?: string): string {
+    return `${projectId || '*'}:${sessionId}`;
+  }
+
+  private getCachedSessionSummary(filePath: string): CodexSummaryRecord | null {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      CodexSessionStorage.summaryCache.delete(filePath);
+      return null;
+    }
+
+    const cached = CodexSessionStorage.summaryCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.value;
+    }
+
+    const value = this.parseSessionSummary(filePath);
+    CodexSessionStorage.summaryCache.set(filePath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value
+    });
+
+    if (value) {
+      CodexSessionStorage.sessionPathIndex.set(
+        CodexSessionStorage.sessionIndexKey(value.info.id, value.info.projectId),
+        filePath
+      );
+      CodexSessionStorage.sessionPathIndex.set(
+        CodexSessionStorage.sessionIndexKey(value.info.id),
+        filePath
+      );
+    }
+
+    return value;
+  }
+
   private scanSessions(projectId?: string): ParsedSessionRecord[] {
     const records = walkJsonlFiles(CODEX_SESSIONS_DIR)
       .map(filePath => this.parseSessionFile(filePath))
@@ -520,25 +753,62 @@ export class CodexSessionStorage {
     return filtered.sort((a, b) => b.session.updatedAt - a.session.updatedAt);
   }
 
+  private scanSessionSummaries(projectId?: string, limit?: number): CodexSummaryRecord[] {
+    const effectiveLimit = limit === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, Math.floor(limit));
+    if (effectiveLimit === 0) {
+      return [];
+    }
+
+    const records: CodexSummaryRecord[] = [];
+    for (const { filePath } of walkJsonlFileEntries(CODEX_SESSIONS_DIR)) {
+      const record = this.getCachedSessionSummary(filePath);
+      if (!record || (projectId && record.info.projectId !== projectId)) {
+        continue;
+      }
+
+      records.push(record);
+      if (records.length >= effectiveLimit) {
+        break;
+      }
+    }
+
+    return records.sort((a, b) => (b.info.lastActivity || b.info.createdAt) - (a.info.lastActivity || a.info.createdAt));
+  }
+
+  private findSummaryRecord(sessionId: string, projectId?: string): CodexSummaryRecord | null {
+    const indexedPath = CodexSessionStorage.sessionPathIndex.get(
+      CodexSessionStorage.sessionIndexKey(sessionId, projectId)
+    ) || CodexSessionStorage.sessionPathIndex.get(CodexSessionStorage.sessionIndexKey(sessionId));
+
+    if (indexedPath) {
+      const indexedRecord = this.getCachedSessionSummary(indexedPath);
+      if (
+        indexedRecord
+        && indexedRecord.info.id === sessionId
+        && (!projectId || indexedRecord.info.projectId === projectId)
+      ) {
+        return indexedRecord;
+      }
+    }
+
+    return this.scanSessionSummaries(projectId).find(record => record.info.id === sessionId) || null;
+  }
+
   list(): ClaudeSession[] {
     return this.scanSessions(this.getProjectId()).map(record => record.session);
   }
 
-  listInfo(): SessionInfo[] {
-    return this.list().map(session => ({
-      id: session.id,
-      title: session.title,
-      createdAt: session.createdAt,
-      messageCount: session.messages.length,
-      provider: 'codex',
-      projectId: session.projectId,
-      lastActivity: session.updatedAt
-    }));
+  listInfo(limit?: number): SessionInfo[] {
+    return this.scanSessionSummaries(this.getProjectId(), limit).map(record => record.info);
   }
 
   load(sessionId: string): ClaudeSession | null {
-    const record = this.scanSessions(this.getProjectId()).find(item => item.session.id === sessionId);
-    return record?.session || null;
+    const record = this.findSummaryRecord(sessionId, this.getProjectId());
+    if (!record) {
+      return null;
+    }
+
+    return this.parseSessionFile(record.filePath)?.session || null;
   }
 
   loadPaginated(sessionId: string, limit: number = 20, beforeIndex?: number): {
@@ -559,15 +829,17 @@ export class CodexSessionStorage {
     return {
       session: {
         ...session,
-        messages
-      },
+        messages,
+        _partial: true,
+        _totalMessages: totalMessages
+      } as any,
       hasMore: startIndex > 0,
       totalMessages
     };
   }
 
   delete(sessionId: string): boolean {
-    const record = this.scanSessions(this.getProjectId()).find(item => item.session.id === sessionId);
+    const record = this.findSummaryRecord(sessionId, this.getProjectId());
     if (!record || !fs.existsSync(record.filePath)) {
       return false;
     }
@@ -584,8 +856,8 @@ export class CodexSessionStorage {
   }
 
   rename(sessionId: string, newTitle: string): boolean {
-    const exists = this.scanSessions(this.getProjectId()).some(item => item.session.id === sessionId);
-    if (!exists) {
+    const record = this.findSummaryRecord(sessionId, this.getProjectId());
+    if (!record) {
       return false;
     }
 
@@ -600,16 +872,16 @@ export class CodexSessionStorage {
   }
 
   getLatest(): ClaudeSession | null {
-    const sessions = this.list();
-    return sessions.length > 0 ? sessions[0] : null;
+    const latest = this.listInfo()[0];
+    return latest ? this.load(latest.id) : null;
   }
 
   static listAllProjects(): CodexProjectInfo[] {
     const storage = new CodexSessionStorage(process.cwd());
     const grouped = new Map<string, CodexProjectInfo>();
 
-    for (const record of storage.scanSessions()) {
-      const projectId = record.session.projectId;
+    for (const record of storage.scanSessionSummaries()) {
+      const projectId = record.info.projectId;
       if (!projectId) {
         continue;
       }
@@ -617,15 +889,15 @@ export class CodexSessionStorage {
       const existing = grouped.get(projectId);
       if (existing) {
         existing.sessionCount += 1;
-        existing.lastActivity = Math.max(existing.lastActivity, record.session.updatedAt);
+        existing.lastActivity = Math.max(existing.lastActivity, record.info.lastActivity || record.info.createdAt);
         continue;
       }
 
       grouped.set(projectId, {
         id: projectId,
-        displayName: record.session.cwd || projectKeyToPath(projectId),
+        displayName: record.cwd || projectKeyToPath(projectId),
         sessionCount: 1,
-        lastActivity: record.session.updatedAt,
+        lastActivity: record.info.lastActivity || record.info.createdAt,
         provider: 'codex'
       });
     }
@@ -633,13 +905,17 @@ export class CodexSessionStorage {
     return Array.from(grouped.values()).sort((a, b) => b.lastActivity - a.lastActivity);
   }
 
+  private static createProjectStorage(projectId: string): CodexSessionStorage {
+    return new CodexSessionStorage(process.cwd(), projectKeyToPath(projectId));
+  }
+
   static listSessionsByProject(projectId: string, limit: number = 1000): SessionInfo[] {
-    const storage = new CodexSessionStorage(process.cwd(), projectId);
-    return storage.listInfo().slice(0, limit);
+    const storage = CodexSessionStorage.createProjectStorage(projectId);
+    return storage.listInfo(limit);
   }
 
   static loadSessionFromProject(projectId: string, sessionId: string): ClaudeSession | null {
-    const storage = new CodexSessionStorage(process.cwd(), projectId);
+    const storage = CodexSessionStorage.createProjectStorage(projectId);
     return storage.load(sessionId);
   }
 
@@ -649,17 +925,17 @@ export class CodexSessionStorage {
     limit: number = 20,
     beforeIndex?: number
   ): { session: ClaudeSession | null; hasMore: boolean; totalMessages: number } {
-    const storage = new CodexSessionStorage(process.cwd(), projectId);
+    const storage = CodexSessionStorage.createProjectStorage(projectId);
     return storage.loadPaginated(sessionId, limit, beforeIndex);
   }
 
   static deleteSessionFromProject(projectId: string, sessionId: string): boolean {
-    const storage = new CodexSessionStorage(process.cwd(), projectId);
+    const storage = CodexSessionStorage.createProjectStorage(projectId);
     return storage.delete(sessionId);
   }
 
   static renameSessionFromProject(projectId: string, sessionId: string, newTitle: string): boolean {
-    const storage = new CodexSessionStorage(process.cwd(), projectId);
+    const storage = CodexSessionStorage.createProjectStorage(projectId);
     return storage.rename(sessionId, newTitle);
   }
 }

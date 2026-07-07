@@ -217,6 +217,62 @@ describe('CodeRemoteServer', () => {
         }
       });
     });
+
+    test('session action rejection should return an error without closing the socket', (done) => {
+      const sessionActionSpy = jest
+        .spyOn((server as any).claudeHandler, 'handleSessionAction')
+        .mockRejectedValue(new Error('session failed'));
+
+      let authComplete = false;
+
+      client.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'auth_success') {
+          authComplete = true;
+          client.send(JSON.stringify({
+            type: 'session',
+            action: 'new',
+            provider: 'codex'
+          }));
+        } else if (authComplete && msg.type === 'error') {
+          expect(msg.content).toContain('session failed');
+          setTimeout(() => {
+            expect(client.readyState).toBe(WebSocket.OPEN);
+            sessionActionSpy.mockRestore();
+            done();
+          }, 50);
+        }
+      });
+    });
+
+    test('chat action rejection should return claude_error without closing the socket', (done) => {
+      const chatActionSpy = jest
+        .spyOn((server as any).claudeHandler, 'handleClaudeMessage')
+        .mockRejectedValue(new Error('chat failed'));
+
+      let authComplete = false;
+
+      client.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'auth_success') {
+          authComplete = true;
+          client.send(JSON.stringify({
+            type: 'claude',
+            content: 'hello',
+            provider: 'codex'
+          }));
+        } else if (authComplete && msg.type === 'claude_error') {
+          expect(msg.error).toContain('chat failed');
+          setTimeout(() => {
+            expect(client.readyState).toBe(WebSocket.OPEN);
+            chatActionSpy.mockRestore();
+            done();
+          }, 50);
+        }
+      });
+    });
   });
 
   describe('sendToClient', () => {

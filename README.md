@@ -1,148 +1,120 @@
 # CodeRemote
 
-CodeRemote 是一个面向 Windows 的本地远程控制项目，提供统一的 Web UI 来连接本机的 `claude` 和 `codex` CLI。
+A unified Web UI for connecting to local AI coding assistants (`claude` and `codex`) remotely via browser or mobile app.
 
-当前推荐流程已经整理为：
+## Features
 
-1. `git clone`
-2. 复制一份本地配置
-3. 运行一次 `setup.ps1`
-4. 日常使用只运行 `start.ps1`
+- **Dual Provider Support** — Connect to Claude Code and Codex CLI tools from a single interface
+- **WebSocket Communication** — Real-time bidirectional messaging between UI and server
+- **Session Management** — Create, resume, list, and delete chat sessions organized by project
+- **Remote Access** — Tunnel support via ngrok or custom WebSocket URLs for out-of-network access
+- **Multi-Agent Discussions** — Orchestrate debates and collaborations between multiple AI agents
+- **File Browser** — Browse and preview workspace files with access control
+- **Local HTTP Proxy** — Proxy and rewrite local resources with header/URL rewriting
+- **Skill Discovery** — Detect and list available skills from connected providers
+- **i18n** — Chinese and English interface
+- **Mobile App** — Flutter-based mobile client with QR code quick-connect
 
-## 快速开始
+## Architecture
 
-### 1. 准备依赖
+```
+apps/
+├── server/     Node.js/TypeScript backend (WebSocket server, CLI wrappers)
+├── web/        React 19 web UI (TailwindCSS, Vite)
+└── mobile/     Flutter mobile app
+
+config/         Configuration files
+scripts/windows/ PowerShell automation scripts (setup, start, autostart)
+runtime/        Logs, uploads, reports, and discussion artifacts
+docs/plans/      Design documents for features
+```
+
+## Prerequisites
 
 - Node.js 18+
-- 本机可用的 `claude`
-- 本机可用的 `codex`
-- `ngrok`，仅当你需要 `tunnel.mode = "ngrok"` 时才需要
+- [claude](https://docs.anthropic.com/en/docs/claude-code) CLI, locally configured
+- [codex](https://github.com/openai/codex) CLI, locally configured
+- [ngrok](https://ngrok.com/) (only if `tunnel.mode = "ngrok"` in config)
 
-### 2. 复制配置
+## Quick Start
+
+### 1. Clone and configure
 
 ```powershell
+git clone <repo-url>
 Copy-Item .\config\coderemote.example.json .\config\coderemote.local.json
 ```
 
-默认模板已经提供一套可直接本地测试的值：
+Edit `config/coderemote.local.json` and verify at minimum:
 
-- `server.port = 8085`
-- `server.token = "test123"`
-- `server.workspaceRoot = "."`
+- `server.port` — server port (default: `8085`)
+- `server.token` — access token
+- `server.workspaceRoot` — workspace root directory
+- `tunnel.mode` — `"disabled"`, `"ngrok"`, or `"custom"`
+- `providers.claude.cliCommand` — your claude CLI command
+- `providers.codex.cliCommand` — your codex CLI command
 
-至少需要检查这些字段：
+> [!TIP]
+> To use an existing public tunnel, set `tunnel.mode = "custom"` and `tunnel.customPublicWsUrl` to your WebSocket URL.
 
-- `server.port`
-- `server.token`
-- `server.workspaceRoot`
-- `tunnel.mode`
-- `tunnel.customPublicWsUrl`
-- `providers.claude.cliCommand`
-- `providers.codex.cliCommand`
-
-如果你想直接复用现成的外网入口，常见配置是：
-
-- `tunnel.mode = "custom"`
-- `tunnel.customPublicWsUrl = "wss://acropetal-nonfalteringly-ruben.ngrok-free.dev"`
-
-注意：
-
-- `custom` 模式只告诉 CodeRemote “对外地址是什么”，不会替你创建隧道。
-- 如果你希望脚本自己启动 ngrok，请改成 `tunnel.mode = "ngrok"`。
-
-### 3. 首次安装与构建
+### 2. Install dependencies
 
 ```powershell
 .\scripts\windows\setup.ps1
 ```
 
-这个脚本会：
+This script checks dependencies, installs `apps/server` and `apps/web` packages, builds both apps, initializes the runtime directory, and writes provider configuration.
 
-- 检查 `node`、`npm`、`claude`、`codex`、`ngrok`
-- 安装 `apps/server` 和 `apps/web` 的依赖
-- 构建后端和前端
-- 初始化 `runtime/`
-- 将 provider 配置写入本机 Claude/Codex 配置
-
-### 4. 启动服务
+### 3. Start the server
 
 ```powershell
 .\scripts\windows\start.ps1
 ```
 
-启动后默认提供：
+By default:
+- Web UI: `http://localhost:8085`
+- WebSocket: `ws://localhost:8085`
 
-- 本地 UI: `http://localhost:<server.port>`
-- 本地 WebSocket: `ws://localhost:<server.port>`
+If you encounter localhost resolution issues, use `127.0.0.1` instead.
 
-如果你本机浏览器对 `localhost` 有解析或缓存问题，优先使用：
-
-- 本地 UI: `http://127.0.0.1:<server.port>`
-- 本地 WebSocket: `ws://127.0.0.1:<server.port>`
-
-如果后台启动后你怀疑服务没有常驻，可以改用前台模式：
+For foreground (log output) mode:
 
 ```powershell
 .\scripts\windows\start.ps1 -Foreground
 ```
 
-前台模式会持续输出实时日志，适合首次搭建和排查连接问题。
+### 4. Connect
 
-## 连接参数
-
-默认本地连接参数如下：
-
+**Local connection:**
 - URL: `ws://127.0.0.1:8085`
+- Token: `test123` (from default config)
+
+**Remote connection** (when tunnel is active):
+- URL: your ngrok or custom public WebSocket URL
 - Token: `test123`
 
-如果你启用了上面的自定义外网入口，则对应连接参数是：
+**Mobile app:** Scan the QR code displayed by the server, or enter URL + token manually.
 
-- URL: `wss://acropetal-nonfalteringly-ruben.ngrok-free.dev`
-- Token: `test123`
+## Autostart
 
-## 自动启动
-
-安装登录自启动：
+Install login autostart:
 
 ```powershell
 .\scripts\windows\install-autostart.ps1
 ```
 
-卸载登录自启动：
+Uninstall:
 
 ```powershell
 .\scripts\windows\uninstall-autostart.ps1
 ```
 
-是否在登录后自动打开浏览器，由 `config/coderemote.local.json` 中的 `autostart.openBrowserOnLogin` 控制。
+Control whether a browser opens on login with `autostart.openBrowserOnLogin` in the config.
 
-## 目录结构
+## Development
 
-```text
-apps/
-  server/   后端与 CLI 封装
-  web/      React Web UI
-  mobile/   Flutter 移动端
-config/
-  coderemote.example.json
-  coderemote.local.json
-scripts/windows/
-  setup.ps1
-  start.ps1
-  install-autostart.ps1
-  uninstall-autostart.ps1
-runtime/
-  logs/
-  uploads/
-  reports/
-  discussions/
-docs/
-examples/
-tests/
-```
+See [DEVELOPMENT.md](DEVELOPMENT.md) for development setup and [TESTING.md](TESTING.md) for manual testing checklists.
 
-## 开发与测试
+## Examples
 
-- 开发说明见 `DEVELOPMENT.md`
-- 手测清单见 `TESTING.md`
-- 示例见 `examples/README.md`
+See [examples/README.md](examples/README.md) for integration examples including WebSocket clients, multi-agent setups, and frontend integrations.

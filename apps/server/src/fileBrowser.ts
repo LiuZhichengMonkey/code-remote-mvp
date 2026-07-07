@@ -47,6 +47,16 @@ interface SessionFileReference {
 const RECENT_SCAN_LIMIT = 60;
 const SESSION_RECENT_LIMIT = 40;
 const RECENT_SKIP_DIRS = new Set(['.git', 'node_modules']);
+const SEARCH_SKIP_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  '.next',
+  'coverage'
+]);
+const WORKSPACE_SEARCH_LIMIT = 20;
+const WORKSPACE_SEARCH_SCAN_LIMIT = 50000;
 const TEXT_FILE_PATH_PATTERN = /(?:[A-Za-z]:[\\/][^\s"'`<>|]+|(?:\.{1,2}[\\/]|\/)[^\s"'`<>|]+|(?:[\w.-]+[\\/])+[\w.-]+(?:\.[\w.-]+)?)/g;
 const MARKDOWN_FILE_LINK_PATTERN = /\[[^\]]+\]\(([^)\s]+)\)/g;
 
@@ -80,7 +90,29 @@ function getParentRelativePath(value: string): string | null {
 }
 
 function normalizeReferencePathKey(value: string): string {
-  return value.replace(/\\/g, '/').replace(/\/+/g, '/').trim();
+  let normalized = value.trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      normalized = decodeURIComponent(new URL(normalized).pathname);
+    } catch {
+      normalized = normalized.replace(/^file:\/+/i, '/');
+    }
+  } else {
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {
+      // Keep the original string when the path is not URI-encoded.
+    }
+  }
+
+  return normalized
+    .replace(/\\/g, '/')
+    .replace(/^\/(?=[A-Za-z]:\/)/, '')
+    .replace(/\/+/g, '/');
 }
 
 function getSafeRelativePath(rootPath: string, targetPath: string): string {
@@ -190,6 +222,14 @@ function toRemoteFileEntry(rootPath: string, absolutePath: string, kind: 'file' 
   };
 }
 
+function tryToRemoteFileEntry(rootPath: string, absolutePath: string, kind: 'file' | 'directory'): RemoteFileEntry | null {
+  try {
+    return toRemoteFileEntry(rootPath, absolutePath, kind);
+  } catch {
+    return null;
+  }
+}
+
 export function listWorkspaceEntries(
   workspaceRoot: string,
   relativePath?: string | null
@@ -214,11 +254,12 @@ export function listWorkspaceEntries(
     .filter(({ entry, absoluteEntryPath }) => (
       entry.isDirectory() || (entry.isFile() && fs.existsSync(absoluteEntryPath))
     ))
-    .map(({ entry, absoluteEntryPath }) => toRemoteFileEntry(
+    .map(({ entry, absoluteEntryPath }) => tryToRemoteFileEntry(
       workspaceRoot,
       absoluteEntryPath,
       entry.isDirectory() ? 'directory' : 'file'
     ))
+    .filter((entry): entry is RemoteFileEntry => entry !== null)
     .sort((a, b) => {
       if (a.kind !== b.kind) {
         return a.kind === 'directory' ? -1 : 1;
@@ -248,7 +289,14 @@ export function listRecentWorkspaceFiles(
       continue;
     }
 
-    for (const entry of fs.readdirSync(currentPath, { withFileTypes: true })) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
       if (entry.isSymbolicLink()) {
         continue;
       }
@@ -266,7 +314,10 @@ export function listRecentWorkspaceFiles(
         continue;
       }
 
-      files.push(toRemoteFileEntry(workspaceRoot, absoluteEntryPath, 'file'));
+      const remoteEntry = tryToRemoteFileEntry(workspaceRoot, absoluteEntryPath, 'file');
+      if (remoteEntry) {
+        files.push(remoteEntry);
+      }
     }
   }
 
@@ -280,6 +331,78 @@ export function listRecentWorkspaceFiles(
       return b.mtime - a.mtime;
     })
     .slice(0, limit);
+}
+
+export function searchWorkspaceFilesByName(
+  workspaceRoot: string,
+  fileName: string,
+  limit = WORKSPACE_SEARCH_LIMIT
+): RemoteFileEntry[] {
+  const normalizedFileName = path.basename(fileName.trim()).toLowerCase();
+  if (!normalizedFileName) {
+    return [];
+  }
+
+  const stack = [workspaceRoot];
+  const matches: RemoteFileEntry[] = [];
+  let scannedFiles = 0;
+
+  while (stack.length > 0 && matches.length < limit && scannedFiles < WORKSPACE_SEARCH_SCAN_LIMIT) {
+    const currentPath = stack.pop();
+    if (!currentPath || !fs.existsSync(currentPath)) {
+      continue;
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
+      const absoluteEntryPath = path.join(currentPath, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!SEARCH_SKIP_DIRS.has(entry.name)) {
+          stack.push(absoluteEntryPath);
+        }
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      scannedFiles += 1;
+      if (entry.name.toLowerCase() === normalizedFileName) {
+        const remoteEntry = tryToRemoteFileEntry(workspaceRoot, absoluteEntryPath, 'file');
+        if (remoteEntry) {
+          matches.push(remoteEntry);
+        }
+        if (matches.length >= limit) {
+          break;
+        }
+      }
+
+      if (scannedFiles >= WORKSPACE_SEARCH_SCAN_LIMIT) {
+        break;
+      }
+    }
+  }
+
+  return matches.sort((a, b) => {
+    const mtimeDelta = b.mtime - a.mtime;
+    if (mtimeDelta !== 0) {
+      return mtimeDelta;
+    }
+
+    return a.relativePath.localeCompare(b.relativePath, undefined, { numeric: true, sensitivity: 'base' });
+  });
 }
 
 function resolveFileReference(
@@ -512,15 +635,46 @@ export function resolveSessionReferencedFile(
     return null;
   }
 
-  const resolved = buildSessionFileReferences(workspaceRoot, session)
-    .get(normalizeReferencePathKey(referencePath));
+  const references = buildSessionFileReferences(workspaceRoot, session);
 
-  return resolved
-    ? {
-        absolutePath: resolved.absolutePath,
-        entry: resolved.entry
+  const normalizedKey = normalizeReferencePathKey(referencePath);
+  const directMatch = references.get(normalizedKey);
+  if (directMatch) {
+    return {
+      absolutePath: directMatch.absolutePath,
+      entry: directMatch.entry
+    };
+  }
+
+  // When workspaceRoot equals session.cwd, absolute paths inside that workspace
+  // are stored as relative keys. The frontend may still send the absolute form,
+  // so resolve it against workspaceRoot and try a relative-key lookup.
+  try {
+    const normalizedPath = referencePath.replace(/\\/g, '/');
+    const absolutePath = path.isAbsolute(normalizedPath)
+      ? path.resolve(normalizedPath)
+      : path.resolve(workspaceRoot, normalizedPath);
+
+    const relativePath = path.relative(workspaceRoot, absolutePath);
+    if (
+      !relativePath.startsWith('..')
+      && !path.isAbsolute(relativePath)
+      && relativePath !== ''
+    ) {
+      const relativeKey = normalizeReferencePathKey(relativePath);
+      const relativeMatch = references.get(relativeKey);
+      if (relativeMatch) {
+        return {
+          absolutePath: relativeMatch.absolutePath,
+          entry: relativeMatch.entry
+        };
       }
-    : null;
+    }
+  } catch {
+    // Ignore resolution errors.
+  }
+
+  return null;
 }
 
 export function createRemoteAttachmentDescriptor(

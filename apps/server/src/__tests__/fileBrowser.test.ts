@@ -1,7 +1,12 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { listSessionRecentFiles, resolveSessionReferencedFile } from '../fileBrowser';
+import {
+  listWorkspaceEntries,
+  listSessionRecentFiles,
+  resolveSessionReferencedFile,
+  searchWorkspaceFilesByName
+} from '../fileBrowser';
 
 describe('fileBrowser session references', () => {
   let tempRoot: string;
@@ -17,6 +22,7 @@ describe('fileBrowser session references', () => {
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
@@ -103,6 +109,7 @@ describe('fileBrowser session references', () => {
 
     const markdownPath = `/${externalFile.replace(/\\/g, '/')}`;
     const portablePath = externalFile.replace(/\\/g, '/');
+    const fileUriPath = `file:///${portablePath}`;
     const session = {
       messages: [
         {
@@ -131,6 +138,98 @@ describe('fileBrowser session references', () => {
         })
       })
     );
+    expect(resolveSessionReferencedFile(workspaceRoot, session, markdownPath)).toEqual(
+      expect.objectContaining({
+        absolutePath: externalFile,
+        entry: expect.objectContaining({
+          relativePath: portablePath
+        })
+      })
+    );
+    expect(resolveSessionReferencedFile(workspaceRoot, session, fileUriPath)).toEqual(
+      expect.objectContaining({
+        absolutePath: externalFile,
+        entry: expect.objectContaining({
+          relativePath: portablePath
+        })
+      })
+    );
     expect(resolveSessionReferencedFile(workspaceRoot, session, portablePath)?.entry.available).toBeUndefined();
+  });
+
+  test('resolves absolute path when session workspace differs from server workspace root', () => {
+    const externalFile = path.join(externalRoot, 'output', 'generated.png');
+    fs.mkdirSync(path.dirname(externalFile), { recursive: true });
+    fs.writeFileSync(externalFile, 'image', 'utf-8');
+
+    const session = {
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant' as const,
+          content: `Generated image: ${externalFile}`,
+          timestamp: 5000
+        }
+      ]
+    };
+
+    // When workspaceRoot matches session.cwd (e.g. external project),
+    // the absolute path is stored as a relative key.
+    const sessionWorkspaceRoot = externalRoot;
+    const portableAbsolutePath = externalFile.replace(/\\/g, '/');
+    const relativeKey = 'output/generated.png';
+
+    const entries = listSessionRecentFiles(sessionWorkspaceRoot, session);
+    const entry = entries.find(candidate => candidate.relativePath === relativeKey);
+    expect(entry).toEqual(expect.objectContaining({
+      name: 'generated.png',
+      relativePath: relativeKey
+    }));
+
+    // Lookup with the absolute path should still find it.
+    const resolved = resolveSessionReferencedFile(sessionWorkspaceRoot, session, portableAbsolutePath);
+    expect(resolved).not.toBeNull();
+    expect(resolved!.absolutePath).toBe(externalFile);
+    expect(resolved!.entry.relativePath).toBe(relativeKey);
+    expect(resolved!.entry.available).toBeUndefined();
+  });
+
+  test('searches workspace files by bare filename beyond the recent-file limit', () => {
+    fs.mkdirSync(path.join(workspaceRoot, 'generated', 'screenshots'), { recursive: true });
+    fs.mkdirSync(path.join(workspaceRoot, 'node_modules', 'ignored'), { recursive: true });
+    fs.writeFileSync(path.join(workspaceRoot, 'generated', 'screenshots', '08-mobile-size.png'), 'image', 'utf-8');
+    fs.writeFileSync(path.join(workspaceRoot, 'node_modules', 'ignored', '08-mobile-size.png'), 'ignored', 'utf-8');
+
+    const entries = searchWorkspaceFilesByName(workspaceRoot, '08-mobile-size.png');
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        name: '08-mobile-size.png',
+        relativePath: 'generated/screenshots/08-mobile-size.png',
+        mimeType: 'image/png'
+      })
+    ]);
+  });
+
+  test('skips workspace entries that cannot be statted', () => {
+    const visibleFile = path.join(workspaceRoot, 'visible.txt');
+    const blockedDirectory = path.join(workspaceRoot, 'blocked');
+    fs.writeFileSync(visibleFile, 'visible', 'utf-8');
+    fs.mkdirSync(blockedDirectory, { recursive: true });
+
+    const originalStatSync = fs.statSync;
+    jest.spyOn(fs, 'statSync').mockImplementation(((targetPath: fs.PathLike, options?: unknown) => {
+      if (String(targetPath) === blockedDirectory) {
+        const error = new Error('invalid argument') as NodeJS.ErrnoException;
+        error.code = 'EINVAL';
+        throw error;
+      }
+
+      return (originalStatSync as any)(targetPath, options);
+    }) as typeof fs.statSync);
+
+    const result = listWorkspaceEntries(workspaceRoot);
+    expect(result.entries.map(entry => entry.name)).toContain('visible.txt');
+    expect(result.entries.map(entry => entry.name)).not.toContain('blocked');
   });
 });

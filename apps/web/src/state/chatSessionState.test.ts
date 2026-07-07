@@ -137,6 +137,20 @@ describe('chatSessionState helpers', () => {
     expect(sessionHasRenderableResult([emptySession], {}, 'empty')).toBe(false);
   });
 
+  it('uses summary renderable flags when messages are not loaded', () => {
+    const summaryOnlySession: ChatSession = {
+      id: 'summary-only',
+      title: 'Summary only',
+      createdAt: 4,
+      provider: 'codex',
+      messageCount: 8,
+      hasRenderableResult: true,
+      messages: []
+    };
+
+    expect(sessionHasRenderableResult([summaryOnlySession], {}, 'summary-only')).toBe(true);
+  });
+
   it('renames running session collections without losing metadata', () => {
     const renamed = renameRunningSessionCollections(
       new Set(['old-id']),
@@ -182,6 +196,8 @@ describe('chatSessionState helpers', () => {
       title: 'Summary title',
       createdAt: 12,
       provider: 'codex',
+      messageCount: 2,
+      hasRenderableResult: true,
       messages: []
     }];
 
@@ -191,6 +207,7 @@ describe('chatSessionState helpers', () => {
     expect(merged[0].title).toBe('Summary title');
     expect(merged[0].messages).toHaveLength(2);
     expect(merged[0].messages[1]?.content).toBe('complete answer');
+    expect(merged[0].hasRenderableResult).toBe(true);
   });
 
   it('prefers resumed messages over a reconnect placeholder while running', () => {
@@ -244,6 +261,91 @@ describe('chatSessionState helpers', () => {
     expect(merged.messages).toBe(resumed.messages);
     expect(merged.messages).toHaveLength(2);
     expect(sessionHasRenderableResult([merged], {}, 'running-1')).toBe(true);
+  });
+
+  it('preserves context usage from resumed sessions when local messages win', () => {
+    const existing: ChatSession = {
+      id: 'running-context',
+      title: 'Running session',
+      createdAt: 25,
+      provider: 'codex',
+      contextUsage: {
+        provider: 'codex',
+        budgetTokens: 128000,
+        estimatedTokens: 64000,
+        remainingTokens: 64000,
+        overflowTokens: 0,
+        usedPercent: 50,
+        remainingPercent: 50,
+        isOverBudget: false,
+        messageCount: 3,
+        estimatedCharacters: 120,
+        isEstimated: true
+      },
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: 'hello',
+          timestamp: 25,
+          status: 'sent'
+        },
+        {
+          id: 'm1',
+          role: 'model',
+          content: 'partial answer from local state',
+          timestamp: 26,
+          status: 'sending'
+        },
+        {
+          id: 'm2',
+          role: 'model',
+          content: 'more local detail',
+          timestamp: 27,
+          status: 'sending'
+        }
+      ]
+    };
+    const resumed: ChatSession = {
+      id: 'running-context',
+      title: 'Running session',
+      createdAt: 25,
+      provider: 'codex',
+      contextUsage: {
+        provider: 'codex',
+        budgetTokens: 128000,
+        estimatedTokens: 32000,
+        remainingTokens: 96000,
+        overflowTokens: 0,
+        usedPercent: 25,
+        remainingPercent: 75,
+        isOverBudget: false,
+        messageCount: 2,
+        estimatedCharacters: 80,
+        isEstimated: true
+      },
+      messages: [
+        {
+          id: 'u1',
+          role: 'user',
+          content: 'hello',
+          timestamp: 25,
+          status: 'sent'
+        },
+        {
+          id: 'm1',
+          role: 'model',
+          content: 'partial answer',
+          timestamp: 26,
+          status: 'sending'
+        }
+      ]
+    };
+
+    const merged = mergeResumedSession(existing, resumed, true);
+
+    expect(merged.messages).toBe(existing.messages);
+    expect(merged.contextUsage).toMatchObject(resumed.contextUsage);
   });
 
   it('keeps richer local running messages when the resumed copy is older', () => {

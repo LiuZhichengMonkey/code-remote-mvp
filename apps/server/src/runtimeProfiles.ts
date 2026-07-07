@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,6 +12,7 @@ export interface RuntimeProfileSummary {
   valueCount: number;
   baseUrl?: string;
   authTokenConfigured: boolean;
+  fingerprint?: string;
   isSaved: boolean;
 }
 
@@ -103,9 +105,34 @@ function countConfiguredValues(summary: Pick<RuntimeProfileSummary, 'baseUrl' | 
   return count;
 }
 
+function stableSerialize(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(item => stableSerialize(item)).join(',')}]`;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableSerialize(record[key])}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function hashProfileFingerprint(value: unknown): string {
+  return crypto.createHash('sha256').update(stableSerialize(value)).digest('hex');
+}
+
 function sameSummary(a: RuntimeProfileSummary | null, b: RuntimeProfileSummary | null): boolean {
   if (!a || !b) {
     return false;
+  }
+
+  if (a.fingerprint && b.fingerprint) {
+    return a.provider === b.provider && a.fingerprint === b.fingerprint;
   }
 
   return a.provider === b.provider
@@ -113,6 +140,7 @@ function sameSummary(a: RuntimeProfileSummary | null, b: RuntimeProfileSummary |
     && a.model === b.model
     && a.authTokenConfigured === b.authTokenConfigured;
 }
+
 
 function parseJsonObject<T>(content: string | null, fallback: T): T {
   if (!content) {
@@ -140,6 +168,10 @@ function summarizeClaudeConfig(content: string | null, name: string, isSaved: bo
   const model = (env.ANTHROPIC_MODEL || config.model || '').trim();
   const baseUrl = (env.ANTHROPIC_BASE_URL || '').trim() || undefined;
   const authTokenConfigured = Boolean((env.ANTHROPIC_AUTH_TOKEN || '').trim());
+  const fingerprint = hashProfileFingerprint({
+    provider: 'claude',
+    config
+  });
 
   const summary: RuntimeProfileSummary = {
     name,
@@ -147,6 +179,7 @@ function summarizeClaudeConfig(content: string | null, name: string, isSaved: bo
     model,
     baseUrl,
     authTokenConfigured,
+    fingerprint,
     isSaved,
     valueCount: 0
   };
@@ -252,6 +285,11 @@ function summarizeCodexConfig(
     model: typeof config.model === 'string' ? config.model.trim() : '',
     baseUrl: typeof providerConfig.base_url === 'string' ? providerConfig.base_url.trim() || undefined : undefined,
     authTokenConfigured: Boolean(typeof auth.OPENAI_API_KEY === 'string' && auth.OPENAI_API_KEY.trim()),
+    fingerprint: hashProfileFingerprint(JSON.stringify({
+      provider: 'codex',
+      config,
+      auth
+    })),
     isSaved,
     valueCount: 0
   };

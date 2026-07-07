@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import fs, { existsSync } from 'fs';
 import { basename, extname, join } from 'path';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import { AccessIdentity, TokenAuthorizer, TestTokenConfig } from './accessControl';
@@ -9,7 +10,7 @@ import { ImageSuccessResponse, ImageErrorResponse, ImageConfig } from './types/i
 import { ClaudeHandler } from './handlers/claude';
 import { DiscussionHandler, DiscussionRequest } from './handlers/discussion';
 import { getImageErrorCode, ImageErrorCode } from './imageErrorCode';
-import { normalizeProvider, Provider } from './session/provider';
+import { DEFAULT_PROVIDER, isProvider, Provider, SUPPORTED_PROVIDERS } from './session/provider';
 import { UiPreferences, UiPreferencesStorage } from './uiPreferences';
 import {
   listRuntimeProfiles,
@@ -23,9 +24,25 @@ import {
   listWorkspaceEntries,
   resolveAccessibleWorkspaceRoot,
   resolvePathWithinWorkspaceRoot,
-  resolveSessionReferencedFile
+  resolveSessionReferencedFile,
+  searchWorkspaceFilesByName
 } from './fileBrowser';
+import {
+  assertAllowedLocalProxyTarget,
+  filterProxyResponseHeaders,
+  LocalHttpProxyError,
+  rewriteCssForProxy,
+  rewriteHtmlForProxy,
+  rewriteProxyLocation
+} from './httpProxy';
 import { listAvailableSkills } from './skillDiscovery';
+import { AccioDemoRouter } from './accio-demo';
+import {
+  getZipDownloadFileName,
+  prepareDirectoryZipArchive,
+  streamZipArchive
+} from './zipArchive';
+import { ClaudeSession } from './claude/types';
 
 export interface Client {
   id: string;
@@ -45,6 +62,17 @@ export interface ServerMessage {
   clientId?: string;
   content?: string;
   timestamp?: number;
+}
+
+type FileApiScope = 'session' | 'workspace';
+
+interface FileApiContext {
+  workspaceRoot: string;
+  scope: FileApiScope;
+  session: ClaudeSession | null;
+  sessionId: string | null;
+  projectId?: string;
+  provider?: Provider;
 }
 
 export interface ClientMessage {
@@ -80,6 +108,7 @@ export interface ClientMessage {
   sessionId?: string;
   projectId?: string;
   title?: string;
+  cwd?: string;
   stream?: boolean;
   limit?: number;
   beforeIndex?: number;
@@ -108,6 +137,7 @@ export class CodeRemoteServer {
   private claudeHandler: ClaudeHandler;
   private discussionHandler: DiscussionHandler;
   private uiPreferencesStorage: UiPreferencesStorage;
+  private accioDemoRouter: AccioDemoRouter;
   private workspaceRoot: string;
   private staticPath?: string;
   private readonly debugLoggingEnabled = process.env.CODEREMOTE_DEBUG === '1';
@@ -136,14 +166,17 @@ export class CodeRemoteServer {
     this.claudeHandler = new ClaudeHandler(this.workspaceRoot);
     this.discussionHandler = new DiscussionHandler();
     this.uiPreferencesStorage = new UiPreferencesStorage(this.workspaceRoot);
+    this.accioDemoRouter = new AccioDemoRouter();
     this.discussionHandler.setSessionManager(this.claudeHandler.getSessionManager());
 
-    this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
+    this.httpServer = createServer((req, res) => {
+      void this.handleHttpRequest(req, res);
+    });
     this.wss = new WebSocketServer({ server: this.httpServer });
     this.setupServer();
   }
 
-  private handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
+  private async handleHttpRequest(req: IncomingMessage, res: ServerResponse) {
     const requestUrl = new URL(req.url || '/', 'http://localhost');
 
     if (requestUrl.pathname === '/health') {
@@ -161,21 +194,54 @@ export class CodeRemoteServer {
         return;
       }
 
-      if (requestUrl.pathname.startsWith('/api/files/') || requestUrl.pathname === '/api/skills') {
-        const accessIdentity = this.getHttpAccessIdentity(req);
+      if (this.accioDemoRouter.canHandle(requestUrl.pathname)) {
+        const accessIdentity = this.getHttpAccessIdentity(req, requestUrl, { allowQueryToken: true });
+        if (!accessIdentity) {
+          this.sendJson(res, 401, { error: 'Unauthorized' });
+          return;
+        }
+
+        const handled = await this.accioDemoRouter.handle(req, res, requestUrl);
+        if (handled) {
+          return;
+        }
+      }
+
+      if (
+        requestUrl.pathname.startsWith('/api/files/')
+        || requestUrl.pathname === '/api/skills'
+        || requestUrl.pathname === '/api/proxy/http'
+      ) {
+        const accessIdentity = this.getHttpAccessIdentity(req, requestUrl);
         if (!accessIdentity) {
           this.sendJson(res, 401, { error: 'Unauthorized' });
           return;
         }
 
         if (requestUrl.pathname === '/api/skills') {
-          this.handleSkillsApiRequest(req, res, requestUrl, accessIdentity);
+          void this.handleSkillsApiRequest(req, res, requestUrl, accessIdentity);
+          return;
+        }
+
+        if (requestUrl.pathname === '/api/proxy/http') {
+          void this.handleHttpProxyRequest(req, res, requestUrl, accessIdentity, 'api');
           return;
         }
 
         this.handleFileApiRequest(req, res, requestUrl, accessIdentity);
         return;
       }
+    }
+
+    if (requestUrl.pathname === '/proxy/http') {
+      const accessIdentity = this.getHttpAccessIdentity(req, requestUrl, { allowQueryToken: true });
+      if (!accessIdentity) {
+        this.sendJson(res, 401, { error: 'Unauthorized' });
+        return;
+      }
+
+      void this.handleHttpProxyRequest(req, res, requestUrl, accessIdentity, 'browser');
+      return;
     }
 
     if (this.staticPath && requestUrl.pathname) {
@@ -207,7 +273,7 @@ export class CodeRemoteServer {
 
   private setApiCorsHeaders(res: ServerResponse) {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
     res.setHeader('Cache-Control', 'no-store');
@@ -219,26 +285,226 @@ export class CodeRemoteServer {
     res.end(JSON.stringify(payload));
   }
 
-  private getHttpAccessIdentity(req: IncomingMessage): AccessIdentity | null {
-    const authorizationHeader = req.headers.authorization;
-    if (!authorizationHeader) {
+  private resolveFileApiContext(
+    baseWorkspaceRoot: string,
+    requestUrl: URL,
+    accessIdentity: AccessIdentity
+  ): FileApiContext | null {
+    const sessionId = requestUrl.searchParams.get('sessionId');
+    const projectId = requestUrl.searchParams.get('projectId') || undefined;
+    const provider = requestUrl.searchParams.get('provider') as Provider | null;
+    const scope: FileApiScope = requestUrl.searchParams.get('scope') === 'workspace'
+      ? 'workspace'
+      : 'session';
+
+    if (!sessionId) {
+      return {
+        workspaceRoot: baseWorkspaceRoot,
+        scope: 'workspace',
+        session: null,
+        sessionId: null,
+        projectId,
+        provider: provider || undefined
+      };
+    }
+
+    const session = this.claudeHandler.getSessionForAccess(
+      sessionId,
+      accessIdentity,
+      projectId,
+      provider || undefined
+    );
+    if (!session) {
       return null;
     }
 
-    const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
-    if (!match) {
-      return null;
-    }
-
-    return this.tokenAuthorizer.resolve(match[1].trim());
+    return {
+      workspaceRoot: session.cwd || baseWorkspaceRoot,
+      scope,
+      session,
+      sessionId,
+      projectId,
+      provider: provider || undefined
+    };
   }
 
-  private handleFileApiRequest(
+  private getHttpAccessIdentity(
+    req: IncomingMessage,
+    requestUrl: URL,
+    options?: {
+      allowQueryToken?: boolean;
+    }
+  ): AccessIdentity | null {
+    const authorizationHeader = req.headers.authorization;
+    if (authorizationHeader) {
+      const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
+      if (match) {
+        return this.tokenAuthorizer.resolve(match[1].trim());
+      }
+    }
+
+    if (options?.allowQueryToken) {
+      const queryToken = requestUrl.searchParams.get('token');
+      if (queryToken) {
+        return this.tokenAuthorizer.resolve(queryToken.trim());
+      }
+    }
+
+    return null;
+  }
+
+  private createProxyRequestHeaders(requestHeaders: IncomingMessage['headers']): Headers {
+    const forwardedHeaders = new Headers();
+    const allowedRequestHeaders = [
+      'accept',
+      'accept-language',
+      'cache-control',
+      'cookie',
+      'if-modified-since',
+      'if-none-match',
+      'user-agent'
+    ] as const;
+
+    for (const headerName of allowedRequestHeaders) {
+      const headerValue = requestHeaders[headerName];
+      if (!headerValue) {
+        continue;
+      }
+
+      forwardedHeaders.set(
+        headerName,
+        Array.isArray(headerValue) ? headerValue.join(', ') : headerValue
+      );
+    }
+
+    return forwardedHeaders;
+  }
+
+  private applyResponseHeaders(
+    res: ServerResponse,
+    headers: Record<string, string | string[]>
+  ) {
+    for (const [headerName, headerValue] of Object.entries(headers)) {
+      res.setHeader(headerName, headerValue);
+    }
+  }
+
+  private async handleHttpProxyRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    requestUrl: URL,
+    _accessIdentity: AccessIdentity,
+    routeKind: 'api' | 'browser'
+  ) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      this.sendJson(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+
+    let targetUrl: URL;
+    try {
+      targetUrl = assertAllowedLocalProxyTarget(requestUrl.searchParams.get('url'));
+    } catch (error) {
+      if (error instanceof LocalHttpProxyError) {
+        switch (error.code) {
+          case 'PROXY_MISSING_URL':
+          case 'PROXY_INVALID_URL':
+            this.sendJson(res, 400, { error: error.message });
+            return;
+          case 'PROXY_UNSUPPORTED_PROTOCOL':
+          case 'PROXY_FORBIDDEN_HOST':
+            this.sendJson(res, 403, { error: error.message });
+            return;
+          default:
+            break;
+        }
+      }
+
+      this.sendJson(res, 500, { error: 'Failed to validate proxy target' });
+      return;
+    }
+
+    const browserToken = routeKind === 'browser'
+      ? requestUrl.searchParams.get('token') || undefined
+      : undefined;
+    const abortController = new AbortController();
+    const timeoutHandle = setTimeout(() => abortController.abort(), 15000);
+
+    try {
+      const upstreamResponse = await fetch(targetUrl.toString(), {
+        method: req.method,
+        headers: this.createProxyRequestHeaders(req.headers),
+        redirect: 'manual',
+        signal: abortController.signal
+      });
+      clearTimeout(timeoutHandle);
+
+      const upstreamLocation = upstreamResponse.headers.get('location');
+      const rewrittenLocation = upstreamLocation
+        ? rewriteProxyLocation(upstreamLocation, targetUrl, {
+            routeKind,
+            token: browserToken
+          })
+        : undefined;
+      const responseHeaders = filterProxyResponseHeaders(upstreamResponse.headers, {
+        rewrittenLocation
+      });
+      const contentType = (upstreamResponse.headers.get('content-type') || '').toLowerCase();
+      const shouldRewriteHtml = req.method !== 'HEAD' && contentType.includes('text/html');
+      const shouldRewriteCss = req.method !== 'HEAD' && contentType.includes('text/css');
+
+      if (shouldRewriteHtml) {
+        const html = await upstreamResponse.text();
+        const rewrittenHtml = rewriteHtmlForProxy(html, targetUrl, {
+          routeKind,
+          token: browserToken
+        });
+        this.applyResponseHeaders(res, responseHeaders);
+        res.writeHead(upstreamResponse.status);
+        res.end(rewrittenHtml);
+        return;
+      }
+
+      if (shouldRewriteCss) {
+        const css = await upstreamResponse.text();
+        const rewrittenCss = rewriteCssForProxy(css, targetUrl, {
+          routeKind,
+          token: browserToken
+        });
+        this.applyResponseHeaders(res, responseHeaders);
+        res.writeHead(upstreamResponse.status);
+        res.end(rewrittenCss);
+        return;
+      }
+
+      this.applyResponseHeaders(res, responseHeaders);
+      res.writeHead(upstreamResponse.status);
+
+      if (req.method === 'HEAD' || upstreamResponse.status === 204 || upstreamResponse.status === 304 || !upstreamResponse.body) {
+        res.end();
+        return;
+      }
+
+      Readable.fromWeb(upstreamResponse.body as any).pipe(res);
+    } catch (error) {
+      clearTimeout(timeoutHandle);
+
+      if (error instanceof Error && error.name === 'AbortError') {
+        this.sendJson(res, 504, { error: 'Proxy request timed out' });
+        return;
+      }
+
+      console.error(chalk.red('[proxy]'), 'HTTP proxy request failed:', error);
+      this.sendJson(res, 502, { error: 'Failed to reach local target' });
+    }
+  }
+
+  private async handleFileApiRequest(
     req: IncomingMessage,
     res: ServerResponse,
     requestUrl: URL,
     accessIdentity: AccessIdentity
-  ) {
+  ): Promise<void> {
     if (req.method !== 'GET') {
       this.sendJson(res, 405, { error: 'Method not allowed' });
       return;
@@ -283,8 +549,15 @@ export class CodeRemoteServer {
 
       if (pathname === '/api/files/list') {
         const relativePath = requestUrl.searchParams.get('path') || '';
-        const result = listWorkspaceEntries(workspaceRoot, relativePath);
+        const fileContext = this.resolveFileApiContext(workspaceRoot, requestUrl, accessIdentity);
+        if (!fileContext) {
+          this.sendJson(res, 404, { error: 'Session not found' });
+          return;
+        }
+
+        const result = listWorkspaceEntries(fileContext.workspaceRoot, relativePath);
         this.sendJson(res, 200, {
+          rootPath: result.rootPath,
           path: result.path,
           parentPath: result.parentPath,
           entries: result.entries
@@ -292,32 +565,37 @@ export class CodeRemoteServer {
         return;
       }
 
-      if (pathname === '/api/files/download') {
-        const relativePath = requestUrl.searchParams.get('path');
-        if (!relativePath) {
-          this.sendJson(res, 400, { error: 'Missing path' });
+      if (pathname === '/api/files/search') {
+        const name = requestUrl.searchParams.get('name') || '';
+        if (!name.trim()) {
+          this.sendJson(res, 400, { error: 'Missing name' });
           return;
         }
 
+        const entries = searchWorkspaceFilesByName(workspaceRoot, name);
+        this.sendJson(res, 200, { entries });
+        return;
+      }
+
+      if (pathname === '/api/files/download') {
+        if (!requestUrl.searchParams.has('path')) {
+          this.sendJson(res, 400, { error: 'Missing path' });
+          return;
+        }
+        const relativePath = requestUrl.searchParams.get('path') || '';
+
         const sessionId = requestUrl.searchParams.get('sessionId');
-        const projectId = requestUrl.searchParams.get('projectId') || undefined;
-        const provider = requestUrl.searchParams.get('provider') as Provider | null;
+        const fileContext = this.resolveFileApiContext(workspaceRoot, requestUrl, accessIdentity);
+        if (!fileContext) {
+          this.sendJson(res, 404, { error: 'Session not found' });
+          return;
+        }
 
         let absolutePath: string;
-        if (sessionId) {
-          const session = this.claudeHandler.getSessionForAccess(
-            sessionId,
-            accessIdentity,
-            projectId,
-            provider || undefined
-          );
-          if (!session) {
-            this.sendJson(res, 404, { error: 'Session not found' });
-            return;
-          }
-
-          const sessionWorkspaceRoot = session.cwd || workspaceRoot;
-          const resolvedReference = resolveSessionReferencedFile(sessionWorkspaceRoot, session, relativePath);
+        if (sessionId && fileContext.scope !== 'workspace') {
+          const resolvedReference = fileContext.session
+            ? resolveSessionReferencedFile(fileContext.workspaceRoot, fileContext.session, relativePath)
+            : null;
           if (!resolvedReference || resolvedReference.entry.available === false || !existsSync(resolvedReference.absolutePath)) {
             this.sendJson(res, 404, { error: 'File not found' });
             return;
@@ -325,7 +603,7 @@ export class CodeRemoteServer {
 
           absolutePath = resolvedReference.absolutePath;
         } else {
-          absolutePath = resolvePathWithinWorkspaceRoot(workspaceRoot, relativePath).absolutePath;
+          absolutePath = resolvePathWithinWorkspaceRoot(fileContext.workspaceRoot, relativePath).absolutePath;
           if (!existsSync(absolutePath)) {
             this.sendJson(res, 404, { error: 'File not found' });
             return;
@@ -333,8 +611,47 @@ export class CodeRemoteServer {
         }
 
         const stats = fs.statSync(absolutePath);
+        if (stats.isDirectory()) {
+          if (sessionId && fileContext.scope !== 'workspace') {
+            this.sendJson(res, 400, { error: 'Session downloads only support files' });
+            return;
+          }
+
+          let archive;
+          try {
+            archive = await prepareDirectoryZipArchive(absolutePath);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            switch (message) {
+              case 'ZIP_TOO_MANY_FILES':
+                this.sendJson(res, 413, { error: 'Folder contains too many files to download' });
+                return;
+              case 'ZIP_TOO_LARGE':
+              case 'ZIP_FILE_TOO_LARGE':
+                this.sendJson(res, 413, { error: 'Folder is too large to download' });
+                return;
+              default:
+                throw error;
+            }
+          }
+
+          this.setApiCorsHeaders(res);
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(getZipDownloadFileName(absolutePath))}`
+          });
+
+          try {
+            await streamZipArchive(archive, res);
+          } catch (error) {
+            console.error(chalk.red('[files]'), 'Failed to stream folder zip:', error);
+            res.destroy(error instanceof Error ? error : undefined);
+          }
+          return;
+        }
+
         if (!stats.isFile()) {
-          this.sendJson(res, 400, { error: 'Path is not a file' });
+          this.sendJson(res, 400, { error: 'Path is not a file or folder' });
           return;
         }
 
@@ -378,28 +695,55 @@ export class CodeRemoteServer {
     }
   }
 
-  private handleSkillsApiRequest(
+  private async handleSkillsApiRequest(
     req: IncomingMessage,
     res: ServerResponse,
     requestUrl: URL,
     accessIdentity: AccessIdentity
-  ) {
+  ): Promise<void> {
     if (req.method !== 'GET') {
       this.sendJson(res, 405, { error: 'Method not allowed' });
       return;
     }
 
-    const workspaceRoot = resolveAccessibleWorkspaceRoot(this.workspaceRoot, accessIdentity);
-    const provider = normalizeProvider(requestUrl.searchParams.get('provider'));
-    const skills = listAvailableSkills(workspaceRoot, provider);
+    const provider = this.validateOptionalProvider(requestUrl.searchParams.get('provider'));
+    if (provider === null) {
+      this.sendJson(res, 400, {
+        error: this.getUnsupportedProviderMessage(requestUrl.searchParams.get('provider')),
+        supportedProviders: SUPPORTED_PROVIDERS
+      });
+      return;
+    }
 
-    this.sendJson(res, 200, { skills });
+    try {
+      const workspaceRoot = resolveAccessibleWorkspaceRoot(this.workspaceRoot, accessIdentity);
+      const skills = listAvailableSkills(workspaceRoot, provider || DEFAULT_PROVIDER);
+      this.sendJson(res, 200, { skills });
+    } catch (error) {
+      console.error(chalk.red('[skills]'), 'Failed to load skills:', error);
+      this.sendJson(res, 500, { error: 'Failed to load skills' });
+    }
   }
 
   private logDebug(...args: unknown[]) {
     if (this.debugLoggingEnabled) {
       console.log(chalk.cyan('[debug]'), ...args);
     }
+  }
+
+  private validateOptionalProvider(value: unknown): Provider | undefined | null {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    return typeof value === 'string' && isProvider(value) ? value : null;
+  }
+
+  private getUnsupportedProviderMessage(value: unknown): string {
+    const requested = typeof value === 'string' && value.trim()
+      ? value.trim()
+      : String(value);
+    return `Unsupported provider "${requested}". Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}`;
   }
 
   private getClientByWebSocket(ws: WebSocket): Client | null {
@@ -518,7 +862,7 @@ export class CodeRemoteServer {
         break;
 
       case 'session':
-        this.handleSessionAction(ws, message);
+        void this.handleSessionAction(ws, message);
         break;
 
       case 'image_meta':
@@ -531,6 +875,11 @@ export class CodeRemoteServer {
           this.sendError(ws, 'Not authenticated');
           break;
         }
+        const provider = this.validateOptionalProvider(message.provider);
+        if (provider === null) {
+          this.sendError(ws, this.getUnsupportedProviderMessage(message.provider));
+          break;
+        }
 
         console.log(
           chalk.yellow('[chat]'),
@@ -538,7 +887,7 @@ export class CodeRemoteServer {
           message.sessionId ? `for session: ${message.sessionId}` : '(all)'
         );
         const stopped = message.sessionId
-          ? this.claudeHandler.stopSession(message.sessionId, client.accessIdentity, message.projectId, message.provider)
+          ? this.claudeHandler.stopSession(message.sessionId, client.accessIdentity, message.projectId, provider)
           : this.claudeHandler.stopAccessibleSessions(client.accessIdentity);
 
         ws.send(JSON.stringify({
@@ -568,10 +917,15 @@ export class CodeRemoteServer {
             this.sendError(ws, 'Not authenticated');
             break;
           }
+          const provider = this.validateOptionalProvider(message.provider);
+          if (provider === null) {
+            this.sendError(ws, this.getUnsupportedProviderMessage(message.provider));
+            break;
+          }
 
           if (
             message.sessionId
-            && !this.claudeHandler.canAccessSession(message.sessionId, client.accessIdentity, message.projectId, message.provider)
+            && !this.claudeHandler.canAccessSession(message.sessionId, client.accessIdentity, message.projectId, provider)
           ) {
             this.sendError(ws, 'Session not found');
             break;
@@ -616,10 +970,23 @@ export class CodeRemoteServer {
 
   private handleSettingsRequest(ws: WebSocket, message: ClientMessage, client: Client | null) {
     const action = (message as any).action || 'list';
-    const provider = message.provider || 'claude';
+    const validatedProvider = this.validateOptionalProvider(message.provider);
+    const provider = validatedProvider || DEFAULT_PROVIDER;
 
     if (!client || !client.authenticated) {
       this.sendError(ws, 'Not authenticated');
+      return;
+    }
+
+    if (validatedProvider === null) {
+      ws.send(JSON.stringify({
+        type: 'settings_error',
+        action,
+        provider: message.provider,
+        error: this.getUnsupportedProviderMessage(message.provider),
+        supportedProviders: SUPPORTED_PROVIDERS,
+        timestamp: Date.now()
+      }));
       return;
     }
 
@@ -809,12 +1176,14 @@ export class CodeRemoteServer {
       accessMode: AccessIdentity['accessMode'];
       ownerId?: string;
       permissions: AccessIdentity['permissions'];
+      supportedProviders: Provider[];
     } = {
       type: 'auth_success',
       clientId,
       accessMode: accessIdentity.accessMode,
       ...(accessIdentity.ownerId ? { ownerId: accessIdentity.ownerId } : {}),
       permissions: accessIdentity.permissions,
+      supportedProviders: SUPPORTED_PROVIDERS,
       timestamp: Date.now()
     };
     ws.send(JSON.stringify(response));
@@ -887,16 +1256,32 @@ export class CodeRemoteServer {
     const sessionId = message.sessionId;
     const projectId = message.projectId;
     const attachments = message.attachments;
+    const validatedProvider = this.validateOptionalProvider(message.provider);
+    if (validatedProvider === null) {
+      const errorMessage = this.getUnsupportedProviderMessage(message.provider);
+      ws.send(JSON.stringify({
+        type: 'claude_error',
+        error: errorMessage,
+        code: 'UNSUPPORTED_PROVIDER',
+        sessionId,
+        provider: message.provider,
+        supportedProviders: SUPPORTED_PROVIDERS,
+        timestamp: Date.now()
+      }));
+      return;
+    }
+
+    const provider = validatedProvider || DEFAULT_PROVIDER;
 
     console.log(chalk.magenta('[Chat]'), 'Request received', {
-      provider: message.provider || 'claude',
+      provider,
       sessionId: sessionId || '(new)',
       projectId: projectId || '(none)',
       attachments: attachments?.length || 0,
       clientId
     });
 
-    this.claudeHandler.handleClaudeMessage(
+    void this.claudeHandler.handleClaudeMessage(
       ws,
       content,
       (code, errorMsg) => {
@@ -906,16 +1291,37 @@ export class CodeRemoteServer {
           error: errorMsg,
           code,
           sessionId,
-          provider: message.provider,
+          provider,
           timestamp: Date.now()
         }));
       },
       sessionId,
       projectId,
       attachments,
-      message.provider,
+      provider,
       client.accessIdentity
-    );
+    ).catch((error: unknown) => {
+      const normalizedErrorMessage = error instanceof Error ? error.message : 'Failed to process chat request';
+
+      console.error(
+        chalk.red('[chat]'),
+        `Failed to process request for provider ${provider}:`,
+        error
+      );
+
+      try {
+        ws.send(JSON.stringify({
+          type: 'claude_error',
+          error: normalizedErrorMessage,
+          code: 'STREAM_ERROR',
+          sessionId,
+          provider,
+          timestamp: Date.now()
+        }));
+      } catch {
+        // Ignore closed sockets.
+      }
+    });
   }
 
   private handleSessionAction(ws: WebSocket, message: ClientMessage) {
@@ -926,8 +1332,13 @@ export class CodeRemoteServer {
       this.sendError(ws, 'Not authenticated');
       return;
     }
+    const provider = this.validateOptionalProvider(message.provider);
+    if (provider === null) {
+      this.sendError(ws, this.getUnsupportedProviderMessage(message.provider));
+      return;
+    }
 
-    this.claudeHandler.handleSessionAction(
+    void this.claudeHandler.handleSessionAction(
       ws,
       (message.action || 'list') as any,
       message.sessionId,
@@ -935,9 +1346,18 @@ export class CodeRemoteServer {
       message.title,
       message.limit,
       message.beforeIndex,
-      message.provider,
-      client.accessIdentity
-    );
+      provider,
+      client.accessIdentity,
+      message.cwd
+    ).catch((error: unknown) => {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to process session request';
+      console.error(
+        chalk.red('[session]'),
+        `Failed to process "${message.action || 'list'}" action for provider ${provider || DEFAULT_PROVIDER}:`,
+        error
+      );
+      this.sendError(ws, errorMessage);
+    });
   }
 
   private handleImageMeta(ws: WebSocket, message: ClientMessage) {

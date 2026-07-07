@@ -187,4 +187,101 @@ describe('CodexSessionStorage', () => {
       })
     ]);
   });
+
+  test('static project methods resolve encoded Codex project keys', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-test-'));
+
+    try {
+      jest.resetModules();
+      jest.doMock('os', () => ({
+        ...jest.requireActual('os'),
+        homedir: () => tempHome
+      }));
+
+      jest.isolateModules(() => {
+        const { CodexSessionStorage: IsolatedCodexSessionStorage } = require('../codexStorage');
+        const { pathToProjectKey } = require('../session/provider');
+        const sessionId = 'codex-static-session-1';
+        const isolatedProjectPath = path.join(tempHome, 'project');
+        const projectId = pathToProjectKey(isolatedProjectPath);
+        const sessionDir = path.join(tempHome, '.codex', 'sessions', '2026', '03', '21');
+        const sessionPath = path.join(sessionDir, `rollout-${sessionId}.jsonl`);
+        const timestamp = (offsetMs: number) => new Date(Date.parse('2026-03-21T10:00:00.000Z') + offsetMs).toISOString();
+
+        fs.mkdirSync(isolatedProjectPath, { recursive: true });
+        fs.mkdirSync(sessionDir, { recursive: true });
+        fs.writeFileSync(sessionPath, [
+          JSON.stringify({
+            type: 'session_meta',
+            timestamp: timestamp(0),
+            payload: {
+              id: sessionId,
+              cwd: isolatedProjectPath,
+              timestamp: timestamp(0)
+            }
+          }),
+          JSON.stringify({
+            type: 'event_msg',
+            timestamp: timestamp(1000),
+            payload: {
+              type: 'user_message',
+              message: 'restore codex history'
+            }
+          }),
+          JSON.stringify({
+            type: 'response_item',
+            timestamp: timestamp(2000),
+            payload: {
+              type: 'message',
+              role: 'assistant',
+              phase: 'final_answer',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'Restored answer'
+                }
+              ]
+            }
+          })
+        ].join('\n') + '\n', 'utf-8');
+
+        expect(IsolatedCodexSessionStorage.listAllProjects()).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: projectId,
+            sessionCount: 1
+          })
+        ]));
+
+        const sessions = IsolatedCodexSessionStorage.listSessionsByProject(projectId);
+        expect(sessions).toHaveLength(1);
+        expect(sessions[0]).toEqual(expect.objectContaining({
+          id: sessionId,
+          provider: 'codex',
+          projectId,
+          messageCount: 2,
+          hasRenderableResult: true
+        }));
+
+        const loaded = IsolatedCodexSessionStorage.loadSessionFromProject(projectId, sessionId);
+        expect(loaded?.messages.map((message: { role: string; content: string }) => ({
+          role: message.role,
+          content: message.content
+        }))).toEqual([
+          { role: 'user', content: 'restore codex history' },
+          { role: 'assistant', content: 'Restored answer' }
+        ]);
+
+        const paginated = IsolatedCodexSessionStorage.loadSessionFromProjectPaginated(projectId, sessionId, 1);
+        expect(paginated.totalMessages).toBe(2);
+        expect(paginated.hasMore).toBe(true);
+        expect(paginated.session?.messages).toHaveLength(1);
+      });
+    } finally {
+      jest.dontMock('os');
+      jest.resetModules();
+      if (fs.existsSync(tempHome)) {
+        fs.rmSync(tempHome, { recursive: true, force: true });
+      }
+    }
+  });
 });
