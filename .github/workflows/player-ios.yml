@@ -1,0 +1,76 @@
+name: iOS player unsigned build
+
+# ponytail: rung 2 - reuse v2rayForPhone's manual macOS build/artifact workflow.
+on:
+  workflow_dispatch:
+  push:
+    branches: [build/ios-player]
+    paths:
+      - .github/workflows/player-ios.yml
+      - apps/mobile/lib/main_player.dart
+      - apps/mobile/lib/screens/torrent_player_screen.dart
+      - scripts/package-player-ios.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: player-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Flutter 3.35.7
+        run: |
+          git clone --depth 1 --branch 3.35.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/player-flutter"
+          echo "$RUNNER_TEMP/player-flutter/bin" >> "$GITHUB_PATH"
+      - name: Generate independent player project
+        run: |
+          flutter --version
+          flutter create --platforms=ios --org com.coderemote --project-name torrent_player runtime/player-ios
+          cp apps/mobile/lib/screens/torrent_player_screen.dart runtime/player-ios/lib/player_screen.dart
+          cp apps/mobile/lib/main_player.dart runtime/player-ios/lib/main.dart
+          sed -i '' "s@screens/torrent_player_screen.dart@player_screen.dart@" runtime/player-ios/lib/main.dart
+          cd runtime/player-ios
+          flutter pub add http:^1.2.0 video_player:^2.9.2
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Torrent Player' ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string Connect to your computer player on the same Wi-Fi.' ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true' ios/Runner/Info.plist
+      - name: Analyze player
+        working-directory: runtime/player-ios
+        run: |
+          rm test/widget_test.dart
+          flutter analyze
+      - name: Compile simulator
+        working-directory: runtime/player-ios
+        run: flutter build ios --simulator --debug
+      - name: Compile unsigned iPhone app
+        working-directory: runtime/player-ios
+        run: flutter build ios --release --no-codesign
+      - name: Package unsigned IPA
+        run: |
+          python3 scripts/package-player-ios.py runtime/player-ios/build/ios/iphoneos/Runner.app runtime/player-ios-kit
+      - name: Preserve unsigned signing kit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TorrentPlayer-unsigned-signing-kit
+          path: runtime/player-ios-kit/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: player-ios-build-evidence
+          path: |
+            runtime/player-ios/pubspec.lock
+            runtime/player-ios/build/ios/**/*.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
