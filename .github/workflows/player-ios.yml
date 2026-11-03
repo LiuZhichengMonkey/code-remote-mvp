@@ -66,6 +66,11 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string Discover torrent peers for downloading on this iPhone.' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true' ios/Runner/Info.plist
+      - name: Start simulator while compiling
+        run: |
+          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
+          echo "PLAYER_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          xcrun simctl boot "$simulator_id"
       - name: Analyze player
         working-directory: runtime/player-ios
         run: |
@@ -74,14 +79,6 @@ jobs:
       - name: Compile simulator
         working-directory: runtime/player-ios
         run: flutter build ios --simulator --debug
-      - name: Run embedded engine on iPhone simulator
-        timeout-minutes: 10
-        working-directory: runtime/player-ios
-        run: |
-          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
-          xcrun simctl boot "$simulator_id"
-          xcrun simctl bootstatus "$simulator_id" -b
-          flutter test integration_test/standalone_test.dart -d "$simulator_id" --timeout 5m --verbose
       - name: Compile unsigned iPhone app
         working-directory: runtime/player-ios
         run: flutter build ios --release --no-codesign
@@ -101,6 +98,12 @@ jobs:
           path: runtime/player-ios-kit/
           if-no-files-found: error
           retention-days: 7
+      - name: Run embedded engine on iPhone simulator
+        timeout-minutes: 20
+        working-directory: runtime/player-ios
+        run: |
+          xcrun simctl bootstatus "$PLAYER_SIMULATOR_ID" -b
+          flutter test integration_test/standalone_test.dart -d "$PLAYER_SIMULATOR_ID" --timeout 5m --verbose
       - name: Preserve build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

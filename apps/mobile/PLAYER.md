@@ -35,4 +35,6 @@
 
 Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢复、损坏状态保留、真实本地 BT 节点传输与 Range/HEAD、重启离线读取、删除中断恢复、写入失败回滚，以及等待中的视频请求取消（部分测试覆盖多项行为）。
 
-独立版 macOS CI 编译及模拟器运行仍在验证。签名、真机安装、真机实际播放、公共磁力资源可用性与设备内存峰值尚未验证。完成后补充确切 CI 和 IPA 路径。
+另用同一 Go 引擎在 Windows 上测试了 WebTorrent 官方公开资源 Big Buck Bunny（infohash `dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c`）：从磁力获取元信息、连接公共节点、下载并通过 HTTP 206 读取 1024 字节 MP4 文件头（`ftyp`）成功。日志为 `runtime/standalone-public-probe.log`；这不代表已验证完整影片播放或 iPhone 下载速度。
+
+独立版 macOS CI 编译及模拟器运行仍在验证。签名、真机安装、真机实际播放与设备内存峰值尚未验证。完成后补充确切 CI 和 IPA 路径。
