@@ -64,3 +64,7 @@ Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢�
 空缓存公开 Big Buck Bunny 实测完成 276,445,467 字节（视频 276,134,947 字节），约 30 秒，最高两秒采样约 16.9 MB/s；FFmpeg 前 3 秒解码通过。日志 `runtime/standalone-public-fresh-20261104.log`。这仅代表当前 Windows 网络，不代表 iPhone 的网络表现。新增 256 KB/s 本地 BT 做种、真实 H.264 MP4 尾部 moov（32 MB free box）的模拟器 AVPlayer 解码/播放/跳转测试；构建和模拟器结果待验证，旧 IPA 不含本次修复。
 
 本机用同一限速 BT 夹具经引擎 HTTP 流解码真实 MP4 前 2 秒成功，此时仅下载约 17 MB / 33.65 MB；记录在 `runtime/local-stream-ffmpeg.log` 和 `runtime/local-stream-client.log`。这验证了引擎真实视频流，尚不能替代 AVPlayer 回归。
+
+最终回归：[CI 41696847216](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/41696847216)（提交 `a33d785`）全部成功，包含 Go 竞态检测、Dart 分析、生命周期、模拟器和 iPhone 编译、原生引擎恢复，以及真实 AVPlayer 解码/播放/跳转。视频在仅下载 1,867,203 / 33,652,163 字节时完成播放和跳转断言，跳转后时间为 8.804 秒。首轮 41693838247 因 GitHub macOS ARM runner 容量不足未执行；改用 macOS 15/Xcode 26.3 后通过。
+
+新版 IPA：`runtime/player-ios-streaming-41696847216/TorrentPlayer-unsigned.ipa`，12,292,347 字节，SHA256 `5958aa4e38a1b3e7c825e1c4d25e180f3efa4f96e7c665e4b1ff344e76c87858`。已核对 ZIP、iPhoneOS、后台配置、原生符号和 Release 不含 Debug 入口，记录在同目录 `verification.json`。模拟器通过不能代表用户真机网络或锁屏后台授权，仍需签名后安装验收。
