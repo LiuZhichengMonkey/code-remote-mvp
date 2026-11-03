@@ -17,6 +17,11 @@ def package(app: Path, output: Path):
         raise ValueError('Missing app executable')
     if info.get('CFBundleSupportedPlatforms') != ['iPhoneOS']:
         raise ValueError('Expected an iPhoneOS build, not a simulator build')
+    if not {'audio', 'processing'}.issubset(info.get('UIBackgroundModes', [])):
+        raise ValueError('Missing player background execution modes')
+    expected_background_id = info.get('CFBundleIdentifier', '') + '.download.*'
+    if expected_background_id not in info.get('BGTaskSchedulerPermittedIdentifiers', []):
+        raise ValueError('Missing matching background download identifier')
     if list(app.rglob('embedded.mobileprovision')):
         raise ValueError('Unexpected provisioning profile in unsigned kit')
     if output.exists():

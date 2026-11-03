@@ -80,8 +80,11 @@ jobs:
         working-directory: runtime/player-ios
         run: |
           rm test/widget_test.dart
-          flutter analyze
-          flutter test test/player_lifecycle_test.dart
+          flutter analyze --no-pub
+      - name: Test player lifecycle
+        timeout-minutes: 4
+        working-directory: runtime/player-ios
+        run: flutter test --no-pub test/player_lifecycle_test.dart
       - name: Compile simulator
         working-directory: runtime/player-ios
         run: flutter build ios --simulator --debug
