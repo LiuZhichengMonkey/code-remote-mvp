@@ -13,6 +13,7 @@ on:
       - apps/mobile/ios-player/**
       - scripts/build-player-torrent-ios.sh
       - scripts/configure-player-ios.rb
+      - scripts/patch-player-flutter-test.py
       - scripts/package-player-ios.py
 
 permissions:
@@ -42,6 +43,7 @@ jobs:
       - name: Install Flutter 3.35.7
         run: |
           git clone --depth 1 --branch 3.35.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/player-flutter"
+          python3 scripts/patch-player-flutter-test.py "$RUNNER_TEMP/player-flutter/packages/flutter_tools/lib/src/ios/simulators.dart"
           echo "$RUNNER_TEMP/player-flutter/bin" >> "$GITHUB_PATH"
       - name: Generate independent player project
         run: |
@@ -86,7 +88,7 @@ jobs:
         run: |
           python3 scripts/package-player-ios.py runtime/player-ios/build/ios/iphoneos/Runner.app runtime/player-ios-kit
           cp apps/mobile/ios-player/THIRD_PARTY_NOTICES.txt runtime/player-ios-kit/
-          tar -czf runtime/player-ios-kit/player-source.tar.gz apps/mobile/lib/main_player.dart apps/mobile/lib/screens/torrent_player_screen.dart apps/mobile/torrent_engine apps/mobile/ios-player scripts/build-player-torrent-ios.sh scripts/configure-player-ios.rb .github/workflows/player-ios.yml
+          tar -czf runtime/player-ios-kit/player-source.tar.gz apps/mobile/lib/main_player.dart apps/mobile/lib/screens/torrent_player_screen.dart apps/mobile/torrent_engine apps/mobile/ios-player scripts/build-player-torrent-ios.sh scripts/configure-player-ios.rb scripts/patch-player-flutter-test.py .github/workflows/player-ios.yml
           cd apps/mobile/torrent_engine
           go list -m all > ../../../runtime/player-ios-kit/go-dependencies.txt
           torrent_source="$(go mod download -json github.com/anacrolix/torrent | python3 -c 'import json,sys; print(json.load(sys.stdin)["Zip"])')"
@@ -104,6 +106,13 @@ jobs:
         run: |
           xcrun simctl bootstatus "$PLAYER_SIMULATOR_ID" -b
           flutter test integration_test/standalone_test.dart -d "$PLAYER_SIMULATOR_ID" --timeout 5m --verbose
+      - name: Preserve simulator diagnostics
+        if: always() && env.PLAYER_SIMULATOR_ID != ''
+        timeout-minutes: 2
+        run: |
+          mkdir -p runtime/player-ios-simulator-diagnostics
+          xcrun simctl spawn "$PLAYER_SIMULATOR_ID" log show --last 15m --style compact --predicate 'process == "Runner"' > runtime/player-ios-simulator-diagnostics/runner.log 2>&1 || true
+          xcrun simctl io "$PLAYER_SIMULATOR_ID" screenshot runtime/player-ios-simulator-diagnostics/simulator.png || true
       - name: Preserve build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -112,5 +121,6 @@ jobs:
           path: |
             runtime/player-ios/pubspec.lock
             runtime/player-ios/build/ios/**/*.xcresult
+            runtime/player-ios-simulator-diagnostics/
           if-no-files-found: ignore
           retention-days: 7

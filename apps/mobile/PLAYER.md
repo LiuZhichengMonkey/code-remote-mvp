@@ -37,4 +37,10 @@ Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢�
 
 另用同一 Go 引擎在 Windows 上测试了 WebTorrent 官方公开资源 Big Buck Bunny（infohash `dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c`）：从磁力获取元信息、连接公共节点、下载并通过 HTTP 206 读取 1024 字节 MP4 文件头（`ftyp`）成功。日志为 `runtime/standalone-public-probe.log`；这不代表已验证完整影片播放或 iPhone 下载速度。
 
-独立版 macOS CI 编译及模拟器运行仍在验证。签名、真机安装、真机实际播放与设备内存峰值尚未验证。完成后补充确切 CI 和 IPA 路径。
+独立版提交 `c22d1ac` 的 [macOS 构建](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/41581420845) 已通过引擎竞态检测、Dart 分析、完整模拟器编译、iPhone release 编译和打包。但模拟器集成运行失败：App 启动后工具等待 VM Service 地址达 12 分钟，用例未开始，因此整轮 workflow 为 failure。
+
+本机 IPA：`runtime/player-ios-standalone-41581420845/TorrentPlayer-unsigned.ipa`，12,264,265 字节。已核对 ZIP 完整性、arm64/iPhoneOS、内嵌 TorrentStart/TorrentStop 符号及源码/依赖说明附件。SHA256：`57529f002ef6d4daadb85b960cb734ec6cc35a3e10aa007b6bd67958d6d7ea88`。同目录 `verification.json` 保存检查结果。
+
+签名、真机安装、真机实际播放与设备内存峰值尚未验证。此前模拟器测试 run `41579627556` 在安装测试 App 时达到 10 分钟时限，测试用例未开始，不计为运行通过；本轮将首次开机与编译重叠，并增加运行时限。
+
+运行日志与 [Flutter 官方修复 c3ed85e](https://github.com/flutter/flutter/commit/c3ed85ef987759ee54a6bce275490cde2a238dc1) 描述的模拟器日志就绪竞态一致：App 先启动，log stream 后启动，可能漏掉 VM 服务地址。CI 用 `scripts/patch-player-flutter-test.py` 将该等待逻辑移植到固定的 3.35.7 工具源码，严格匹配待替换内容；不改变应用或 Flutter engine 二进制。修复是否解决本项目运行问题仍需重跑验证。
