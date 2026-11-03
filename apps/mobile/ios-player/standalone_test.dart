@@ -23,6 +23,9 @@ void main() {
     try {
       final start = await channel.invokeMapMethod<String, dynamic>('start', {'token': token});
       base = start!['baseUrl'] as String;
+      if (start['continuedSupported'] == true) {
+        expect(start['backgroundRegistered'], true, reason: 'Native background handler must match the permitted plist identifier');
+      }
       expect(Uri.parse(base).host, '127.0.0.1');
       final unauthorized = await client.get(Uri.parse('$base/api/torrents'));
       expect(unauthorized.statusCode, 401);

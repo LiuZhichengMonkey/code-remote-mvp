@@ -22,6 +22,13 @@ import BackgroundTasks
   private var stopReason = ""
   private var backgroundStatus = "点击后台继续下载可申请后台运行"
   private var identifier: String { (Bundle.main.bundleIdentifier ?? "com.coderemote.torrentPlayer") + ".download" }
+  // The plist advertises a wildcard, but register a concrete job identifier.
+  // Registering the literal wildcard is rejected by the native scheduler.
+  private lazy var jobIdentifier = identifier + "." + UUID().uuidString
+  private var continuedSupported: Bool {
+    if #available(iOS 26.0, *) { return true }
+    return false
+  }
 
   override func application(
     _ application: UIApplication,
@@ -30,7 +37,7 @@ import BackgroundTasks
     GeneratedPluginRegistrant.register(with: self)
     // ponytail: rung 4 - native execution grants; no Dart background scheduler.
     if #available(iOS 26.0, *) {
-      registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier + ".*", using: .main) { [weak self] task in
+      registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: jobIdentifier, using: .main) { [weak self] task in
         guard let self = self, let task = task as? BGContinuedProcessingTask else {
           task.setTaskCompleted(success: false); return
         }
@@ -96,7 +103,8 @@ import BackgroundTasks
   private func status() -> [String: Any] {
     return ["running": port > 0, "baseUrl": "http://127.0.0.1:\(port)", "cachePath": cachePath,
       "reason": stopReason, "backgroundStatus": backgroundStatus,
-      "backgroundActive": continued != nil, "backgroundRequested": submitted]
+      "backgroundActive": continued != nil, "backgroundRequested": submitted,
+      "continuedSupported": continuedSupported, "backgroundRegistered": registered]
   }
 
   private func startEngine(token: String, result: @escaping FlutterResult) {
@@ -144,7 +152,7 @@ import BackgroundTasks
     }
     if continued != nil || submitted { return }
     if #available(iOS 26.0, *), registered {
-      let id = identifier + "." + UUID().uuidString
+      let id = jobIdentifier
       let request = BGContinuedProcessingTaskRequest(identifier: id, title: "磁力下载", subtitle: "正在连接节点和读取下载进度")
       request.strategy = .fail
       submitted = true
