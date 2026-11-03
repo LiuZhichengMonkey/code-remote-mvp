@@ -29,7 +29,17 @@ void main() {
   });
 
   Future<void> lifecycle(WidgetTester tester, AppLifecycleState state) async {
-    tester.binding.handleAppLifecycleStateChanged(state);
+    const path = [AppLifecycleState.resumed, AppLifecycleState.inactive, AppLifecycleState.hidden, AppLifecycleState.paused];
+    var current = path.indexOf(tester.binding.lifecycleState ?? AppLifecycleState.resumed);
+    final target = path.indexOf(state);
+    if (current < 0) {
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      current = 0;
+    }
+    while (current != target) {
+      current += current < target ? 1 : -1;
+      tester.binding.handleAppLifecycleStateChanged(path[current]);
+    }
     await tester.pump(); await tester.pump();
   }
 
