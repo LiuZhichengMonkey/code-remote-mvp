@@ -31,6 +31,14 @@ type Record struct {
 	Deleting bool   `json:"deleting,omitempty"`
 }
 
+// ponytail: rung 2/5 - reuse desktop discovery endpoints and the BT library's tracker transport.
+var fallbackTrackers = [][]string{
+	{"udp://tracker.opentrackr.org:1337/announce"},
+	{"udp://open.stealth.si:80/announce"},
+	{"udp://tracker.torrent.eu.org:451/announce"},
+	{"https://tracker.tamers.uniondeschenes.com:443/announce"},
+}
+
 type task struct {
 	Record
 	t         *torrent.Torrent
@@ -226,6 +234,19 @@ func (e *Engine) attach(r Record) (*task, error) {
 		t, err = e.client.AddMagnet(r.Magnet)
 	}
 	if err != nil {
+		return nil, err
+	}
+	// Restored metadata alone loses magnet peer hints, web seeds and updated trackers.
+	spec, err := torrent.TorrentSpecFromMagnetUri(r.Magnet)
+	if err != nil {
+		t.Drop()
+		return nil, err
+	}
+	if info := t.Info(); info == nil || info.Private == nil || !*info.Private {
+		spec.Trackers = append(spec.Trackers, fallbackTrackers...)
+	}
+	if err = t.MergeSpec(spec); err != nil {
+		t.Drop()
 		return nil, err
 	}
 	x := &task{Record: r, t: t, lastTime: time.Now()}

@@ -17,6 +17,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/time/rate"
 )
 
 const secret = "0123456789abcdef0123456789abcdef"
@@ -167,7 +168,7 @@ func TestCorruptStateIsPreserved(t *testing.T) {
 
 func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 	seedRoot := t.TempDir()
-	payload := bytes.Repeat([]byte("0123456789abcdef"), 128*1024)
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 1024*1024)
 	file := filepath.Join(seedRoot, "sample.mp4")
 	if err := os.WriteFile(file, payload, 0600); err != nil {
 		t.Fatal(err)
@@ -204,10 +205,16 @@ func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	root := t.TempDir()
-	e := launch(t, root)
-	magnet := mi.Magnet(nil, &info).String()
+	e, err := start(root, secret, func(c *torrent.ClientConfig) {
+		offline(c)
+		c.DownloadRateLimiter = rate.NewLimiter(2*1024*1024, 64*1024)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	magnet := mi.Magnet(nil, &info).String() + "&x.pe=" + url.QueryEscape(seed.ListenAddrs()[0].String())
 	id := add(t, e, magnet)
-	e.tasks[id].t.AddPeers([]torrent.PeerInfo{{Addr: seed.ListenAddrs()[0]}})
 	select {
 	case <-e.tasks[id].t.GotInfo():
 	case <-time.After(15 * time.Second):
@@ -225,6 +232,25 @@ func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 	if got := body(t, r); r.StatusCode != 206 || !bytes.Equal(got, payload[1000:2000]) {
 		t.Fatalf("range mismatch status %d", r.StatusCode)
 	}
+	if done := e.tasks[id].t.BytesCompleted(); done == 0 || done >= int64(len(payload)) {
+		t.Fatalf("range must arrive before full download: %d/%d", done, len(payload))
+	}
+	req, _ = http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", e.Port(), stream), nil)
+	req.Header.Set("Range", "bytes=-1000")
+	r, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := body(t, r); r.StatusCode != 206 || !bytes.Equal(got, payload[len(payload)-1000:]) {
+		t.Fatalf("tail range mismatch status %d", r.StatusCode)
+	}
+	if e.tasks[id].t.BytesCompleted() >= int64(len(payload)) {
+		t.Fatal("tail range waited for whole file")
+	}
+	// Restart mid-download without manually injecting peers: saved metadata must
+	// retain the magnet's only discovery route when DHT and trackers are disabled.
+	e.Close()
+	e = launch(t, root)
 	r = request(t, e, "HEAD", stream, "")
 	if r.StatusCode != 200 || r.ContentLength != int64(len(payload)) {
 		t.Fatalf("HEAD failed %d %d", r.StatusCode, r.ContentLength)

@@ -58,3 +58,9 @@ Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢�
 签名、真机安装、真机实际播放与设备内存峰值尚未验证。此前模拟器测试 run `41579627556` 在安装测试 App 时达到 10 分钟时限，测试用例未开始，不计为运行通过；本轮将首次开机与编译重叠，并增加运行时限。
 
 运行日志与 [Flutter 官方修复 c3ed85e](https://github.com/flutter/flutter/commit/c3ed85ef987759ee54a6bce275490cde2a238dc1) 描述的模拟器日志就绪竞态一致：App 先启动，log stream 后启动，可能漏掉 VM 服务地址。CI 用 `scripts/patch-player-flutter-test.py` 将该等待逻辑移植到固定的 3.35.7 工具源码，严格匹配待替换内容；不改变应用或 Flutter engine 二进制。应用该修复后，run `41584413771` 实际执行模拟器测试并通过。
+
+2026-11-04 下载/播放排查：补上 Windows 版已有的备用 Tracker；恢复已有种子元数据时重新应用原磁力的节点提示、Tracker 和 WebSeed。下载 UI 区分未连接、等待数据和完成。7 项 Go 回归通过，其中限速 BT 测试明确要求首部/尾部 Range 在整文件未完成时返回，并在中途重启后仅依赖保存的磁力节点提示续传。
+
+空缓存公开 Big Buck Bunny 实测完成 276,445,467 字节（视频 276,134,947 字节），约 30 秒，最高两秒采样约 16.9 MB/s；FFmpeg 前 3 秒解码通过。日志 `runtime/standalone-public-fresh-20261104.log`。这仅代表当前 Windows 网络，不代表 iPhone 的网络表现。新增 256 KB/s 本地 BT 做种、真实 H.264 MP4 尾部 moov（32 MB free box）的模拟器 AVPlayer 解码/播放/跳转测试；构建和模拟器结果待验证，旧 IPA 不含本次修复。
+
+本机用同一限速 BT 夹具经引擎 HTTP 流解码真实 MP4 前 2 秒成功，此时仅下载约 17 MB / 33.65 MB；记录在 `runtime/local-stream-ffmpeg.log` 和 `runtime/local-stream-client.log`。这验证了引擎真实视频流，尚不能替代 AVPlayer 回归。

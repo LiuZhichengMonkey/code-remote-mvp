@@ -111,8 +111,21 @@ jobs:
         timeout-minutes: 20
         working-directory: runtime/player-ios
         run: |
+          cd ../../apps/mobile/torrent_engine
+          go build -tags 'nosqlite,disable_libutp' -o ../../../runtime/stream-fixture ./cmd/stream-fixture
+          cd ../../..
+          runtime/stream-fixture apps/mobile/torrent_engine/testdata/pattern.mp4 runtime/player-stream-fixture > runtime/player-stream-fixture.log 2>&1 &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            test -f runtime/player-stream-fixture/fixture.json && break
+            kill -0 "$fixture_pid" || { cat runtime/player-stream-fixture.log; exit 1; }
+            sleep 1
+          done
+          test -f runtime/player-stream-fixture/fixture.json
+          cd runtime/player-ios
           xcrun simctl bootstatus "$PLAYER_SIMULATOR_ID" -b
-          flutter test integration_test/standalone_test.dart -d "$PLAYER_SIMULATOR_ID" --timeout 5m --verbose
+          flutter test integration_test/standalone_test.dart -d "$PLAYER_SIMULATOR_ID" --dart-define-from-file=../player-stream-fixture/fixture.json --timeout 5m --verbose
       - name: Preserve simulator diagnostics
         if: always() && env.PLAYER_SIMULATOR_ID != ''
         timeout-minutes: 2
@@ -129,5 +142,6 @@ jobs:
             runtime/player-ios/pubspec.lock
             runtime/player-ios/build/ios/**/*.xcresult
             runtime/player-ios-simulator-diagnostics/
+            runtime/player-stream-fixture.log
           if-no-files-found: ignore
           retention-days: 7

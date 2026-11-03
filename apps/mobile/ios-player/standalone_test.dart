@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:integration_test/integration_test.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -56,6 +58,66 @@ void main() {
       await api('/api/torrents/$id/delete', {});
       expect(((await api('/api/torrents'))['tasks'] as List).where((t) => t['id'] == id), isEmpty);
     } finally {
+      client.close();
+      await channel.invokeMethod<void>('stop');
+    }
+  });
+
+  testWidgets('AVPlayer plays and seeks before a real BT file finishes downloading', (tester) async {
+    const magnet = String.fromEnvironment('magnet');
+    expect(magnet, isNotEmpty, reason: 'CI must start the throttled local seeder');
+    const channel = MethodChannel('torrent_player/engine');
+    const token = 'simulator-video-stream-test-secret-0123456789';
+    final client = http.Client();
+    VideoPlayerController? player;
+    var base = '';
+    Future<Map<String, dynamic>> api(String path, [Map<String, dynamic>? body]) async {
+      final uri = Uri.parse('$base$path');
+      final headers = {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
+      final response = await (body == null ? client.get(uri, headers: headers)
+        : client.post(uri, headers: headers, body: jsonEncode(body))).timeout(const Duration(seconds: 15));
+      expect(response.statusCode, 200, reason: response.body);
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    Future<void> until(bool Function() ready) async {
+      final deadline = DateTime.now().add(const Duration(seconds: 90));
+      while (!ready()) {
+        expect(DateTime.now().isBefore(deadline), true, reason: 'Video playback timed out: ${player?.value}');
+        expect(player?.value.hasError ?? false, false, reason: player?.value.errorDescription);
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+    }
+    try {
+      final started = await channel.invokeMapMethod<String, dynamic>('start', {'token': token});
+      base = started!['baseUrl'] as String;
+      final id = (await api('/api/torrents', {'magnet': magnet}))['id'] as String;
+      final deadline = DateTime.now().add(const Duration(seconds: 30));
+      Map<String, dynamic> task;
+      do {
+        final tasks = (await api('/api/torrents'))['tasks'] as List;
+        task = Map<String, dynamic>.from(tasks.singleWhere((t) => t['id'] == id) as Map);
+        expect(DateTime.now().isBefore(deadline), true, reason: 'No metadata from local seed: $task');
+        if (task['metadata'] != true) await tester.pump(const Duration(milliseconds: 200));
+      } while (task['metadata'] != true);
+      final url = Uri.parse('$base/stream/$id').replace(queryParameters: {'file': '0', 'token': token});
+      final controller = VideoPlayerController.networkUrl(url);
+      player = controller;
+      await controller.initialize().timeout(const Duration(seconds: 90));
+      expect(controller.value.duration.inSeconds, greaterThanOrEqualTo(11));
+      await controller.play();
+      await until(() => controller.value.position.inMilliseconds > 700);
+      await controller.seekTo(const Duration(seconds: 8));
+      await until(() => controller.value.position.inMilliseconds > 8700);
+      final tasks = (await api('/api/torrents'))['tasks'] as List;
+      task = Map<String, dynamic>.from(tasks.singleWhere((t) => t['id'] == id) as Map);
+      expect(task['done'] as num, greaterThan(0));
+      expect(task['done'] as num, lessThan(task['total'] as num), reason: 'Playback must finish its assertions before the download completes');
+      debugPrint('PASS actual AVPlayer decode/play/seek while BT incomplete: ${task['done']}/${task['total']} bytes, position=${controller.value.position}');
+      await controller.dispose();
+      player = null;
+      await api('/api/torrents/$id/delete', {});
+    } finally {
+      await player?.dispose();
       client.close();
       await channel.invokeMethod<void>('stop');
     }

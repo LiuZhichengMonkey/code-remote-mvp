@@ -220,10 +220,10 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
       if (!mounted || revision != _revision) return;
       await player.play();
       if (mounted && revision == _revision) setState(() => _status = '播放中：${file['name']}');
-    } catch (_) {
+    } catch (error) {
       if (mounted && revision == _revision) { setState(() {
         _stop();
-        _error = '暂时无法播放：请检查节点、下载状态或视频编码，然后重试';
+        _error = '暂时无法播放：$error';
       }); }
     }
   }
@@ -234,6 +234,17 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
     var unit = 0;
     while (n >= 1024 && unit < units.length - 1) { n /= 1024; unit++; }
     return '${n.toStringAsFixed(unit == 0 ? 0 : 1)} ${units[unit]}';
+  }
+
+  String _downloadState(Map<String, dynamic> task) {
+
+    if (task['paused'] == true) return '已暂停';
+    if ((task['error'] as String).isNotEmpty) return '下载出错';
+    if (task['metadata'] == true && (task['done'] as num) >= (task['total'] as num)) return '下载完成';
+    if ((task['peers'] as num) == 0) return '寻找节点（尚未连接）';
+    if (task['metadata'] != true) return '已连接节点，等待文件信息';
+    if ((task['speed'] as num) == 0) return '已连接节点，等待数据';
+    return '正在下载';
   }
 
   @override
@@ -271,7 +282,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
         for (final t in _tasks) Card(child: Column(children: [
           ListTile(title: Text((t['name'] as String).isEmpty ? t['id'] as String : t['name'] as String),
             selected: _selectedId == t['id'], onTap: () => _select(t['id'] as String),
-            subtitle: Text('${t['paused'] == true ? '已暂停' : t['metadata'] == true ? '下载中' : '获取磁力信息'} · ${_bytes(t['speed'] as num)}/s · ${t['peers']} 节点\n${_bytes(t['done'] as num)} / ${_bytes(t['total'] as num)}'),
+            subtitle: Text('${_downloadState(t)} · ${_bytes(t['speed'] as num)}/s · ${t['peers']} 节点\n${_bytes(t['done'] as num)} / ${_bytes(t['total'] as num)}'),
             isThreeLine: true),
           if ((t['total'] as num) > 0) LinearProgressIndicator(value: ((t['done'] as num) / (t['total'] as num)).clamp(0.0, 1.0)),
           if ((t['error'] as String).isNotEmpty) Padding(padding: const EdgeInsets.all(8), child: Text(t['error'] as String)),
