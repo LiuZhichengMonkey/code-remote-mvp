@@ -75,12 +75,13 @@ jobs:
         working-directory: runtime/player-ios
         run: flutter build ios --simulator --debug
       - name: Run embedded engine on iPhone simulator
+        timeout-minutes: 10
         working-directory: runtime/player-ios
         run: |
           simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
           xcrun simctl boot "$simulator_id"
           xcrun simctl bootstatus "$simulator_id" -b
-          flutter test integration_test/standalone_test.dart -d "$simulator_id" --timeout 5m
+          flutter test integration_test/standalone_test.dart -d "$simulator_id" --timeout 5m --verbose
       - name: Compile unsigned iPhone app
         working-directory: runtime/player-ios
         run: flutter build ios --release --no-codesign

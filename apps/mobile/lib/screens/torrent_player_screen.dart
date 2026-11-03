@@ -150,7 +150,10 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
       await player.play();
       if (mounted && revision == _revision) setState(() => _status = '播放中：${file['name']}');
     } catch (_) {
-      if (mounted && revision == _revision) setState(() => _error = '暂时无法播放：请检查节点、下载状态或视频编码，然后重试');
+      if (mounted && revision == _revision) { setState(() {
+        _stop();
+        _error = '暂时无法播放：请检查节点、下载状态或视频编码，然后重试';
+      }); }
     }
   }
 

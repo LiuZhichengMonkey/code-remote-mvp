@@ -469,11 +469,9 @@ func (e *Engine) stream(w http.ResponseWriter, r *http.Request) {
 	reader := f.NewReader()
 	e.mu.Unlock()
 	defer reader.Close()
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	defer cancel()
 	reader.SetReadahead(8 * 1024 * 1024)
 	// ponytail: rung 3/5 - net/http handles HEAD and seekable byte ranges; BT reader prioritizes requested pieces.
-	http.ServeContent(w, r, f.DisplayPath(), time.Time{}, contextReader{reader, ctx})
+	http.ServeContent(w, r, f.DisplayPath(), time.Time{}, contextReader{reader, r.Context()})
 }
 
 type contextReader struct {
@@ -481,4 +479,9 @@ type contextReader struct {
 	ctx context.Context
 }
 
-func (r contextReader) Read(p []byte) (int, error) { return r.Reader.ReadContext(r.ctx, p) }
+func (r contextReader) Read(p []byte) (int, error) {
+	// Limit a stalled read, not the duration of an otherwise healthy movie stream.
+	ctx, cancel := context.WithTimeout(r.ctx, 60*time.Second)
+	defer cancel()
+	return r.Reader.ReadContext(ctx, p)
+}
