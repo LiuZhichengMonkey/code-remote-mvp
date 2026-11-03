@@ -33,6 +33,12 @@
 
 ## 验证
 
+2026-11-03：提交 `c0fd176677df9eb91b5ef182fa91eaa93bf5dae5` 的 [完整 CI 41584413771](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/41584413771) **全部成功**：6 项 Go 测试及竞态检测、Dart 分析、模拟器编译、iPhone release 编译、IPA 打包，以及真实 iPhone 模拟器内的 Swift/C/Go 引擎集成测试。模拟器测试验证原生桥接启动、未认证请求拒绝、任务添加和去重、暂停、停止重启后的暂停状态恢复、继续、删除。
+
+最终交付：`runtime/player-ios-standalone-41584413771/TorrentPlayer-unsigned.ipa`，12,264,275 字节；SHA256 `0a462458b704206e2bdd18d3a20b490430f1a22a2ff145e262fde9d206c9cd25`。已复核 ZIP 完整性、arm64/iPhoneOS、内嵌 BT 导出符号、无描述文件，以及源码和依赖附件。检查记录在同目录 `verification.json`，CI 锁文件和模拟器诊断在 `build-evidence/`；完整日志在 `runtime/player-ios-build-41584413771.log`。
+
+签名、真机安装、AVPlayer 实际影片解码、拖动播放的设备表现、后台持续下载和设备内存峰值仍未验证。模拟器引擎管理通过不等于真机影片播放通过。
+
 Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢复、损坏状态保留、真实本地 BT 节点传输与 Range/HEAD、重启离线读取、删除中断恢复、写入失败回滚，以及等待中的视频请求取消（部分测试覆盖多项行为）。
 
 另用同一 Go 引擎在 Windows 上测试了 WebTorrent 官方公开资源 Big Buck Bunny（infohash `dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c`）：从磁力获取元信息、连接公共节点、下载并通过 HTTP 206 读取 1024 字节 MP4 文件头（`ftyp`）成功。日志为 `runtime/standalone-public-probe.log`；这不代表已验证完整影片播放或 iPhone 下载速度。
@@ -43,4 +49,4 @@ Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢�
 
 签名、真机安装、真机实际播放与设备内存峰值尚未验证。此前模拟器测试 run `41579627556` 在安装测试 App 时达到 10 分钟时限，测试用例未开始，不计为运行通过；本轮将首次开机与编译重叠，并增加运行时限。
 
-运行日志与 [Flutter 官方修复 c3ed85e](https://github.com/flutter/flutter/commit/c3ed85ef987759ee54a6bce275490cde2a238dc1) 描述的模拟器日志就绪竞态一致：App 先启动，log stream 后启动，可能漏掉 VM 服务地址。CI 用 `scripts/patch-player-flutter-test.py` 将该等待逻辑移植到固定的 3.35.7 工具源码，严格匹配待替换内容；不改变应用或 Flutter engine 二进制。修复是否解决本项目运行问题仍需重跑验证。
+运行日志与 [Flutter 官方修复 c3ed85e](https://github.com/flutter/flutter/commit/c3ed85ef987759ee54a6bce275490cde2a238dc1) 描述的模拟器日志就绪竞态一致：App 先启动，log stream 后启动，可能漏掉 VM 服务地址。CI 用 `scripts/patch-player-flutter-test.py` 将该等待逻辑移植到固定的 3.35.7 工具源码，严格匹配待替换内容；不改变应用或 Flutter engine 二进制。应用该修复后，run `41584413771` 实际执行模拟器测试并通过。
