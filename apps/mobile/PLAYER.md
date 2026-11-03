@@ -43,6 +43,10 @@
 
 后台下载回归：Windows 7 项引擎测试已通过，包含真实 BT 传输完成后的字节进度、未知总大小、暂停任务不占后台时间、会话中断后恢复、损坏状态保留和请求取消。新增 Flutter 生命周期测试及模拟器原生中断恢复测试；macOS 完整构建结果待本轮 CI 完成后记录。
 
+2026-11-04 交付记录：提交 `634f99a48046c63e9e6b540bc2ad784cc655a5a4` 的 [CI 41621654084](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/41621654084) 全部成功：7 项 Go 测试及竞态检测、Dart 分析、3 项 Flutter 生命周期测试、模拟器/iPhone release 编译、IPA 打包及原生中断恢复集成测试。原生具体任务标识注册通过；模拟器提交持续后台请求返回 `BGTaskSchedulerErrorDomain error 1`，因此本轮验证了拒绝降级与显式中断恢复，没有验证真实后台授权和锁屏持续下载。
+
+后台版交付：`runtime/player-ios-background-41621654084/TorrentPlayer-unsigned.ipa`。同目录 `verification.json` 记录大小和 SHA256，已核对压缩包完整性、后台模式、匹配任务标识、原生进度符号和 Release 不含 Debug 测试入口。完整日志为 `runtime/player-ios-background-41621654084.log`，模拟器诊断在交付目录的 `build-evidence/`。需要自己的签名后安装；真机后台下载和音频播放仍待验收。
+
 Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢复、损坏状态保留、真实本地 BT 节点传输与 Range/HEAD、重启离线读取、删除中断恢复、写入失败回滚，以及等待中的视频请求取消（部分测试覆盖多项行为）。
 
 另用同一 Go 引擎在 Windows 上测试了 WebTorrent 官方公开资源 Big Buck Bunny（infohash `dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c`）：从磁力获取元信息、连接公共节点、下载并通过 HTTP 206 读取 1024 字节 MP4 文件头（`ftyp`）成功。日志为 `runtime/standalone-public-probe.log`；这不代表已验证完整影片播放或 iPhone 下载速度。
