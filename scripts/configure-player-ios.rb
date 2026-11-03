@@ -8,6 +8,9 @@ target.build_configurations.each do |config|
   config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] = '$(inherited) -force_load "$(PROJECT_DIR)/TorrentNative/iphonesimulator.a" -lresolv -framework CoreFoundation -framework Security'
   config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
   config.build_settings['ARCHS'] = 'arm64'
+  if config.name == 'Debug'
+    config.build_settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS'] = '$(inherited) DEBUG'
+  end
 end
 project.save
 
