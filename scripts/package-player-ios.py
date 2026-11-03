@@ -31,8 +31,8 @@ def package(app: Path, output: Path):
     (output / 'SHA256SUMS.txt').write_text(f'{digest}  {ipa.name}\n', encoding='utf-8')
     (output / 'SIGNING.txt').write_text(
         'Unsigned iPhone build. Sign with your own Apple development/distribution identity and matching provisioning profile before installing. '
-        'This player uses no VPN extension. Connect iPhone and Windows to the same trusted Wi-Fi. '
-        'Enable mobile connection in the desktop player and enter its address and pairing token. '
+        'This player embeds its BT engine and downloads into iPhone application storage; no computer service is required. '
+        'Keep the app in the foreground while downloading. Review included source and dependency notices. '
         'Build success does not prove device playback.\n', encoding='utf-8')
     return ipa
 

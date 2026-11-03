@@ -9,6 +9,10 @@ on:
       - .github/workflows/player-ios.yml
       - apps/mobile/lib/main_player.dart
       - apps/mobile/lib/screens/torrent_player_screen.dart
+      - apps/mobile/torrent_engine/**
+      - apps/mobile/ios-player/**
+      - scripts/build-player-torrent-ios.sh
+      - scripts/configure-player-ios.rb
       - scripts/package-player-ios.py
 
 permissions:
@@ -26,6 +30,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.25.5'
+          cache-dependency-path: apps/mobile/torrent_engine/go.sum
+      - name: Verify embedded BT engine
+        working-directory: apps/mobile/torrent_engine
+        run: go test -mod=mod -race -tags 'nosqlite,disable_libutp' ./engine -v -timeout 4m
+      - name: Compile native BT engine
+        run: bash scripts/build-player-torrent-ios.sh
       - name: Install Flutter 3.35.7
         run: |
           git clone --depth 1 --branch 3.35.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/player-flutter"
@@ -39,8 +52,15 @@ jobs:
           sed -i '' "s@screens/torrent_player_screen.dart@player_screen.dart@" runtime/player-ios/lib/main.dart
           cd runtime/player-ios
           flutter pub add http:^1.2.0 video_player:^2.9.2
+          cp ../../apps/mobile/ios-player/AppDelegate.swift ios/Runner/AppDelegate.swift
+          cp ../../apps/mobile/ios-player/TorrentCore.h ios/Runner/TorrentCore.h
+          echo '#import "TorrentCore.h"' >> ios/Runner/Runner-Bridging-Header.h
+          mkdir -p ios/TorrentNative
+          cp ../player-torrent-native/iphoneos.a ios/TorrentNative/iphoneos.a
+          cp ../player-torrent-native/iphonesimulator.a ios/TorrentNative/iphonesimulator.a
+          ruby ../../scripts/configure-player-ios.rb
           /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Torrent Player' ios/Runner/Info.plist
-          /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string Connect to your computer player on the same Wi-Fi.' ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string Discover torrent peers for downloading on this iPhone.' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true' ios/Runner/Info.plist
       - name: Analyze player
