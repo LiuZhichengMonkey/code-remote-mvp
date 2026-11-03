@@ -21,6 +21,8 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
   List<Map<String, dynamic>> _tasks = [];
   String? _selectedId, _base, _error;
   String _token = '', _cachePath = '', _status = '正在启动本机下载引擎…';
+  String _backgroundStatus = '添加或继续任务后，可申请后台下载';
+  bool _playbackActive = false;
   int _revision = 0;
   bool _busy = false, _polling = false, _foreground = true;
   Future<void> _lifecycle = Future.value();
@@ -29,6 +31,20 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _native.setMethodCallHandler((call) async {
+      if (!mounted) return;
+      if (call.method == 'engineStopped') {
+        _timer?.cancel();
+        _revision++;
+        setState(() {
+          _stop(); _base = null;
+          _status = (call.arguments as Map?)?['reason'] == 'interrupted'
+            ? '后台任务已结束或取消，缓存已保留，请点击恢复下载' : '下载会话已暂停，缓存已保留';
+        });
+      } else if (call.method == 'playbackInterrupted') {
+        await _player?.pause();
+      }
+    });
     _queueLifecycle(true);
   }
 
@@ -43,28 +59,70 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
 
   Future<void> _start() async {
     if (_base != null) return;
-    _token = List.generate(32, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+    if (_token.isEmpty) _token = List.generate(32, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join();
     final data = await _native.invokeMapMethod<String, dynamic>('start', {'token': _token});
-    if (!mounted || !_foreground) return;
-    setState(() { _base = data!['baseUrl'] as String; _cachePath = data['cachePath'] as String; _error = null; _status = '本机下载已就绪，无需连接电脑'; });
+    if (!mounted) return;
+    setState(() { _base = data!['baseUrl'] as String; _cachePath = data['cachePath'] as String; _error = null; _status = '本机下载已就绪，无需连接电脑'; _backgroundStatus = data['backgroundStatus'] as String; });
+    if (!_foreground) return;
     await _refresh();
+    if (!mounted || !_foreground || _base == null) return;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.paused) {
       _foreground = false;
       _timer?.cancel();
-      _revision++;
-      _stop();
-      setState(() { _base = null; _status = '已暂停后台下载，回到前台后恢复'; });
+      // ponytail: rung 4 - Swift owns background execution; keep the loopback session and AVPlayer.
+    } else if (state == AppLifecycleState.detached) {
+      _foreground = false;
+      _timer?.cancel();
       _queueLifecycle(false);
     } else if (state == AppLifecycleState.resumed && !_foreground) {
       _foreground = true;
-      _queueLifecycle(true);
+      _lifecycle = _lifecycle.then((_) => _reconcile()).catchError((Object error) {
+        if (mounted) setState(() => _error = '恢复下载失败：$error');
+      });
     }
+  }
+
+  Future<void> _reconcile() async {
+    final state = await _native.invokeMapMethod<String, dynamic>('status');
+    if (!mounted || !_foreground || state == null) return;
+    setState(() => _backgroundStatus = state['backgroundStatus'] as String);
+    if (state['running'] != true) {
+      _revision++;
+      setState(() { _stop(); _base = null; });
+      if (state['reason'] == 'interrupted') {
+        setState(() => _status = '后台任务已结束或取消，点击恢复下载继续');
+        return;
+      }
+    }
+    await _start();
+    if (_base != null) {
+      await _refresh();
+      _timer?.cancel();
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
+    }
+  }
+
+  Future<void> _enableBackground() async {
+    try {
+      final state = await _native.invokeMapMethod<String, dynamic>('enableBackground');
+      if (mounted && state != null) setState(() => _backgroundStatus = state['backgroundStatus'] as String);
+    } catch (error) { if (mounted) setState(() => _error = '申请后台下载失败：$error'); }
+  }
+
+  void _syncPlayback() {
+    final value = _player?.value;
+    final active = value != null && value.isPlaying && !value.hasError && !value.isCompleted;
+    if (active == _playbackActive) return;
+    _playbackActive = active;
+    unawaited(_native.invokeMethod<void>('playback', {'active': active}).catchError((Object error) {
+      if (mounted) setState(() => _error = '后台播放状态更新失败：$error');
+    }));
   }
 
   Future<Map<String, dynamic>> _request(String path, {Map<String, dynamic>? body}) async {
@@ -85,8 +143,10 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
     final base = _base;
     try {
       final data = await _request('/api/torrents');
+      final nativeState = await _native.invokeMapMethod<String, dynamic>('status');
       if (mounted && _base == base) { setState(() {
         _tasks = (data['tasks'] as List).map((item) => Map<String, dynamic>.from(item as Map)).toList();
+        if (nativeState != null) _backgroundStatus = nativeState['backgroundStatus'] as String;
       }); }
     } catch (error) { if (mounted && _base == base) setState(() => _error = '$error'); }
     finally { _polling = false; }
@@ -94,7 +154,9 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
 
   void _stop() {
     final old = _player;
+    old?.removeListener(_syncPlayback);
     _player = null;
+    _syncPlayback();
     if (old != null) unawaited(old.dispose());
   }
 
@@ -111,6 +173,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
       if (!mounted) return;
       _select(data['id'] as String);
       await _refresh();
+      await _enableBackground();
       if (mounted) setState(() => _status = '已添加到手机，正在寻找节点和解析文件…');
     } catch (error) { if (mounted) setState(() => _error = '$error'); }
     finally { if (mounted) setState(() => _busy = false); }
@@ -131,6 +194,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
       if (!mounted) return;
       if (action == 'delete' && _selectedId == id) setState(() => _selectedId = null);
       await _refresh();
+      if (action == 'resume') await _enableBackground();
     } catch (error) { if (mounted) setState(() => _error = '$error'); }
     finally { if (mounted) setState(() => _busy = false); }
   }
@@ -143,9 +207,13 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
     try {
       final url = Uri.parse('$_base/stream/$id').replace(queryParameters: {'file': '${file['index']}', 'token': _token});
       // ponytail: rung 2/4 - keep the existing native AVPlayer and playback generation guard.
-      final player = VideoPlayerController.networkUrl(url);
+      final player = VideoPlayerController.networkUrl(url, videoPlayerOptions: VideoPlayerOptions(allowBackgroundPlayback: true));
+      player.addListener(_syncPlayback);
       setState(() => _player = player);
       await player.initialize().timeout(const Duration(seconds: 90));
+      if (!mounted || revision != _revision) return;
+      _playbackActive = true;
+      await _native.invokeMethod<void>('playback', {'active': true});
       if (!mounted || revision != _revision) return;
       await player.play();
       if (mounted && revision == _revision) setState(() => _status = '播放中：${file['name']}');
@@ -168,6 +236,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _native.setMethodCallHandler(null);
     _foreground = false;
     _timer?.cancel();
     _revision++;
@@ -186,13 +255,15 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
       .where((f) => RegExp(r'\.(mp4|m4v|mov)$', caseSensitive: false).hasMatch(f['name'] as String)).toList();
     return Scaffold(appBar: AppBar(title: const Text('磁力播放器 · 独立版')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
-        const Text('视频直接下载到本机，无需电脑。请保持 App 在前台下载。'),
+        const Text('视频直接下载到本机，无需电脑。后台下载时间由 iOS 决定。'),
         TextField(controller: _magnet, autocorrect: false, maxLines: 3, minLines: 1,
           decoration: const InputDecoration(labelText: '磁力链接', hintText: 'magnet:?xt=urn:btih:…')),
         FilledButton(onPressed: _base == null || _busy ? null : _add, child: Text(_busy ? '处理中…' : '添加并在手机下载')),
         Text(_status),
+        Text(_backgroundStatus),
+        if (_base != null) TextButton(onPressed: _busy ? null : _enableBackground, child: const Text('后台继续下载')),
         if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-        if (_base == null && _foreground) TextButton(onPressed: () => _queueLifecycle(true), child: const Text('重试启动')),
+        if (_base == null && _foreground) TextButton(onPressed: () => _queueLifecycle(true), child: const Text('恢复下载')),
         if (_base != null) TextButton(onPressed: _refresh, child: const Text('刷新任务')),
         for (final t in _tasks) Card(child: Column(children: [
           ListTile(title: Text((t['name'] as String).isEmpty ? t['id'] as String : t['name'] as String),

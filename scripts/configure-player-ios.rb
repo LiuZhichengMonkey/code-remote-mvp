@@ -10,3 +10,10 @@ target.build_configurations.each do |config|
   config.build_settings['ARCHS'] = 'arm64'
 end
 project.save
+
+# ponytail: rung 4 - declare only the native modes actually used by the player.
+plist_path = 'ios/Runner/Info.plist'
+plist = Xcodeproj::Plist.read_from_path(plist_path)
+plist['UIBackgroundModes'] = ['audio', 'processing']
+plist['BGTaskSchedulerPermittedIdentifiers'] = ['$(PRODUCT_BUNDLE_IDENTIFIER).download']
+Xcodeproj::Plist.write_to_path(plist, plist_path)

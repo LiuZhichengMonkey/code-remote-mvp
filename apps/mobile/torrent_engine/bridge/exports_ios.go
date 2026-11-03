@@ -2,6 +2,9 @@
 
 package main
 
+/*
+#include <stdint.h>
+*/
 import "C"
 import (
 	"coderemote/torrentengine/engine"
@@ -13,6 +16,19 @@ import (
 
 var bridgeMu sync.Mutex
 var session *engine.Engine
+
+//export TorrentProgress
+func TorrentProgress(done, total *C.int64_t) C.int {
+	bridgeMu.Lock()
+	defer bridgeMu.Unlock()
+	if session == nil {
+		*done, *total = 0, 0
+		return 0
+	}
+	pending, d, t := session.BackgroundProgress()
+	*done, *total = C.int64_t(d), C.int64_t(t)
+	return C.int(pending)
+}
 
 //export TorrentStart
 func TorrentStart(path, token *C.char) C.int {

@@ -234,6 +234,9 @@ func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 	if got := body(t, r); !bytes.Equal(got, payload) {
 		t.Fatal("BT payload differs")
 	}
+	if pending, done, total := e.BackgroundProgress(); pending != 0 || done != int64(len(payload)) || total != done {
+		t.Fatalf("completed background transfer: pending=%d done=%d total=%d", pending, done, total)
+	}
 	// A canceled media request must unblock its BT reader.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -262,6 +265,34 @@ func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 	r = request(t, e, "GET", stream, "")
 	if got := body(t, r); !bytes.Equal(got, payload) {
 		t.Fatal("offline disk playback differs")
+	}
+}
+
+func TestBackgroundProgressAndInterruptedRecovery(t *testing.T) {
+	root := t.TempDir()
+	e := launch(t, root)
+	id := add(t, e, testMagnet)
+	if pending, done, total := e.BackgroundProgress(); pending != 1 || done != 0 || total != 1 {
+		t.Fatalf("unknown metadata must remain pending: %d %d %d", pending, done, total)
+	}
+	body(t, request(t, e, "POST", "/api/torrents/"+id+"/pause", "{}"))
+	if pending, done, total := e.BackgroundProgress(); pending != 0 || done != 0 || total != 0 {
+		t.Fatalf("paused task kept background alive: %d %d %d", pending, done, total)
+	}
+	body(t, request(t, e, "POST", "/api/torrents/"+id+"/resume", "{}"))
+	e.Close()
+	if pending, _, _ := e.BackgroundProgress(); pending != 0 {
+		t.Fatal("closed engine reports active background work")
+	}
+	e = launch(t, root)
+	if pending, _, _ := e.BackgroundProgress(); pending != 1 {
+		t.Fatal("interruption lost the unpaused download")
+	}
+	e.mu.Lock()
+	e.tasks[id].err = "disk write failed"
+	e.mu.Unlock()
+	if pending, _, _ := e.BackgroundProgress(); pending != 0 {
+		t.Fatal("failed task kept background alive")
 	}
 }
 

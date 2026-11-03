@@ -37,6 +37,19 @@ void main() {
       final tasks = (await api('/api/torrents'))['tasks'] as List;
       expect(tasks.where((t) => t['id'] == id).single['paused'], true);
       await api('/api/torrents/$id/resume', {});
+      final background = await channel.invokeMapMethod<String, dynamic>('enableBackground');
+      expect(background!['backgroundStatus'], isA<String>());
+      final retained = await channel.invokeMapMethod<String, dynamic>('status');
+      expect(retained!['running'], true);
+      expect(retained['baseUrl'], base);
+      await channel.invokeMethod<void>('testExpireBackground');
+      final expired = await channel.invokeMapMethod<String, dynamic>('status');
+      expect(expired!['running'], false);
+      expect(expired['reason'], 'interrupted');
+      final restarted = await channel.invokeMapMethod<String, dynamic>('start', {'token': token});
+      base = restarted!['baseUrl'] as String;
+      final recovered = (await api('/api/torrents'))['tasks'] as List;
+      expect(recovered.where((t) => t['id'] == id).single['paused'], false);
       await api('/api/torrents/$id/delete', {});
       expect(((await api('/api/torrents'))['tasks'] as List).where((t) => t['id'] == id), isEmpty);
     } finally {

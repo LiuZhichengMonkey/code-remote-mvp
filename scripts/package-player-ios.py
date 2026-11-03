@@ -32,7 +32,9 @@ def package(app: Path, output: Path):
     (output / 'SIGNING.txt').write_text(
         'Unsigned iPhone build. Sign with your own Apple development/distribution identity and matching provisioning profile before installing. '
         'This player embeds its BT engine and downloads into iPhone application storage; no computer service is required. '
-        'Keep the app in the foreground while downloading. Review included source and dependency notices. '
+        'iOS 26 supports user-requested continued background downloads when the system grants execution; older iOS has limited background runtime. '
+        'Cancellation or resource limits can stop background work; reopen and resume. Actual background playback uses native audio. '
+        'Review included source and dependency notices. '
         'Build success does not prove device playback.\n', encoding='utf-8')
     return ipa
 

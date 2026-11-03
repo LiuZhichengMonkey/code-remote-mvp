@@ -1,0 +1,15 @@
+# iOS background torrent downloads
+
+The user approved implementing the previously described native background solution. Flutter remains the user entry, Swift owns OS execution grants, Go owns torrent/disk state, and signed-device testing is the final acceptance gate.
+
+Reuse the existing engine, atomic task persistence, channel, AVPlayer and isolated macOS build. Replace unconditional stop-on-background with native lifecycle management. Use iOS 26 BGContinuedProcessingTask for user-started downloads, beginBackgroundTask for a limited fallback, and the native audio session for actual background media playback. No cloud relay, new scheduler dependency, silent audio, GPU entitlement or fake progress.
+
+<!-- ponytail: rung 2/4 - reuse engine persistence and native Apple background/audio APIs. -->
+
+Submit continued work only after Add/Resume or the explicit background-download button, while foregrounded. Use immediate/fail submission so unavailable grants are visible and cannot queue unexpected future work. Register before launch completes, permit the identifier in generated Info.plist, report real byte progress from Go on a native timer independent of Dart, finish when no incomplete unpaused tasks remain. Cancel/expiration ends the attempt and closes the engine; display an explicit recovery button, preserving all cached data and saved user pause states. A rejected grant falls back to limited runtime with a visible explanation. Legacy expiration resumes on return to foreground. Stop timer/background grants on manual engine stop, completion and teardown; stale async callbacks cannot alter a newer session.
+
+Keep the loopback URL/token when backgrounding. Return to foreground reconciles native running state before resuming polling or rebuilding a stopped session. Playback uses the existing AVPlayer background option and native playback audio session; buffering and audio interruptions must not grant fictitious unlimited download time. Paused/stopped media no longer counts as active playback. Download-only completion closes background peer connections instead of seeding indefinitely.
+
+Risk checks: Windows baseline engine tests pass (2026-11-03). Apple documentation confirms iOS 26 continued work supports network, requires user action and progress reporting, and can expire/cancel. The actual Swift SDK/API/linking risk will be exercised by CI, followed by simulator lifecycle tests. Real locked-device scheduling/audio, low-power interruption and battery/memory effects remain unverified until a signed-device run. Prior foreground-only IPA remains preserved.
+
+Validation: test byte-progress aggregation, paused/unknown/completed tasks and restart; native simulator bridge/lifecycle recovery; Flutter lifecycle regression via mocked channel, analyze, simulator and iPhone release builds; verify packaged background modes/identifier and hashes. Do not equate a simulated grant with real OS scheduling.

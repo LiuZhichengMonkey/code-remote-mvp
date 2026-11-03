@@ -143,6 +143,33 @@ func parseMagnet(raw string) (metainfo.Magnet, error) {
 
 func (e *Engine) Port() int { return e.listener.Addr().(*net.TCPAddr).Port }
 
+// BackgroundProgress is independent of HTTP/Dart polling. Unknown metadata stays
+// pending; paused, deleting and failed tasks must not keep the app awake.
+func (e *Engine) BackgroundProgress() (pending int, done, total int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return
+	}
+	for _, x := range e.tasks {
+		if x.Paused || x.Deleting || x.err != "" || x.t == nil {
+			continue
+		}
+		if x.t.Info() == nil {
+			pending++
+			total++
+			continue
+		}
+		size, complete := x.t.Length(), x.t.BytesCompleted()
+		total += size
+		done += complete
+		if complete < size {
+			pending++
+		}
+	}
+	return
+}
+
 func atomicWrite(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".pending-")
 	if err != nil {
