@@ -16,6 +16,7 @@ import BackgroundTasks
   private var grace: UIBackgroundTaskIdentifier = .invalid
   private var continued: BGTask?
   private var submitted = false
+  private var requestID: String?
   private var registered = false
   private var playing = false
   private var stopReason = ""
@@ -29,11 +30,11 @@ import BackgroundTasks
     GeneratedPluginRegistrant.register(with: self)
     // ponytail: rung 4 - native execution grants; no Dart background scheduler.
     if #available(iOS 26.0, *) {
-      registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
+      registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier + ".*", using: .main) { [weak self] task in
         guard let self = self, let task = task as? BGContinuedProcessingTask else {
           task.setTaskCompleted(success: false); return
         }
-        guard self.submitted, self.port > 0 else { task.setTaskCompleted(success: false); return }
+        guard self.submitted, self.requestID == task.identifier, self.port > 0 else { task.setTaskCompleted(success: false); return }
         self.submitted = false
         self.continued = task
         self.backgroundStatus = "系统已允许后台下载，仍可能因资源限制而中止"
@@ -143,14 +144,17 @@ import BackgroundTasks
     }
     if continued != nil || submitted { return }
     if #available(iOS 26.0, *), registered {
-      let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: "磁力下载", subtitle: "正在连接节点和读取下载进度")
+      let id = identifier + "." + UUID().uuidString
+      let request = BGContinuedProcessingTaskRequest(identifier: id, title: "磁力下载", subtitle: "正在连接节点和读取下载进度")
       request.strategy = .fail
       submitted = true
+      requestID = id
       do {
         try BGTaskScheduler.shared.submit(request)
         backgroundStatus = "已申请后台下载，等待系统确认"
       } catch {
         submitted = false
+        requestID = nil
         backgroundStatus = "系统暂未允许持续后台下载；切后台后仅有有限运行时间"
         NSLog("Background download request rejected: %@", error.localizedDescription)
       }
@@ -170,9 +174,9 @@ import BackgroundTasks
         self.readingProgress = false
         guard revision == self.generation, self.port > 0 else { return }
         if #available(iOS 26.0, *), let task = self.continued as? BGContinuedProcessingTask {
-          task.progress.totalUnitCount = max(1, total)
-          task.progress.completedUnitCount = min(done, total)
-          let subtitle = total > 1 ? "已下载 \(ByteCountFormatter.string(fromByteCount: done, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))" : "正在获取磁力信息"
+          task.progress.totalUnitCount = total > 0 ? total : -1
+          task.progress.completedUnitCount = done
+          let subtitle = total > 0 ? "已下载 \(ByteCountFormatter.string(fromByteCount: done, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))" : "已下载 \(ByteCountFormatter.string(fromByteCount: done, countStyle: .file))，正在获取资源总大小"
           task.updateTitle("磁力下载 · \(pending) 个未完成任务", subtitle: subtitle)
         }
         if pending == 0 {
@@ -187,7 +191,8 @@ import BackgroundTasks
   }
 
   private func finishContinued(success: Bool) {
-    if submitted { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier); submitted = false }
+    if submitted, let id = requestID { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: id) }
+    submitted = false; requestID = nil
     let task = continued
     continued = nil
     task?.expirationHandler = nil
@@ -203,6 +208,7 @@ import BackgroundTasks
     if reason == "interrupted" {
       continued?.expirationHandler = nil; continued = nil
       submitted = false
+      requestID = nil
       backgroundStatus = "后台下载被系统结束或取消；点击恢复下载，缓存已保留"
     } else { finishContinued(success: reason == "idle") }
     let heldGrace = grace

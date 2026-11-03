@@ -7,7 +7,8 @@ import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
 
 class TorrentPlayerScreen extends StatefulWidget {
-  const TorrentPlayerScreen({super.key});
+  const TorrentPlayerScreen({super.key, this.client});
+  final http.Client? client;
   @override
   State<TorrentPlayerScreen> createState() => _TorrentPlayerScreenState();
 }
@@ -15,7 +16,7 @@ class TorrentPlayerScreen extends StatefulWidget {
 class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsBindingObserver {
   static const _native = MethodChannel('torrent_player/engine');
   final _magnet = TextEditingController();
-  final _http = http.Client();
+  late final http.Client _http;
   VideoPlayerController? _player;
   Timer? _timer;
   List<Map<String, dynamic>> _tasks = [];
@@ -30,6 +31,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
   @override
   void initState() {
     super.initState();
+    _http = widget.client ?? http.Client();
     WidgetsBinding.instance.addObserver(this);
     _native.setMethodCallHandler((call) async {
       if (!mounted) return;
@@ -62,7 +64,8 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
     if (_token.isEmpty) _token = List.generate(32, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join();
     final data = await _native.invokeMapMethod<String, dynamic>('start', {'token': _token});
     if (!mounted) return;
-    setState(() { _base = data!['baseUrl'] as String; _cachePath = data['cachePath'] as String; _error = null; _status = '本机下载已就绪，无需连接电脑'; _backgroundStatus = data['backgroundStatus'] as String; });
+    if (data == null || data['running'] != true) throw StateError('系统未允许下载引擎继续运行，请回到前台恢复');
+    setState(() { _base = data['baseUrl'] as String; _cachePath = data['cachePath'] as String; _error = null; _status = '本机下载已就绪，无需连接电脑'; _backgroundStatus = data['backgroundStatus'] as String; });
     if (!_foreground) return;
     await _refresh();
     if (!mounted || !_foreground || _base == null) return;

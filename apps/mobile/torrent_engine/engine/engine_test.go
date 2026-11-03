@@ -272,7 +272,7 @@ func TestBackgroundProgressAndInterruptedRecovery(t *testing.T) {
 	root := t.TempDir()
 	e := launch(t, root)
 	id := add(t, e, testMagnet)
-	if pending, done, total := e.BackgroundProgress(); pending != 1 || done != 0 || total != 1 {
+	if pending, done, total := e.BackgroundProgress(); pending != 1 || done != 0 || total != -1 {
 		t.Fatalf("unknown metadata must remain pending: %d %d %d", pending, done, total)
 	}
 	body(t, request(t, e, "POST", "/api/torrents/"+id+"/pause", "{}"))

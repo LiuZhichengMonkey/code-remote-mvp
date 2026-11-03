@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import '../lib/player_screen.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import '../lib/screens/torrent_player_screen.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -13,6 +15,7 @@ void main() {
     'running': running, 'baseUrl': 'http://127.0.0.1:1', 'cachePath': '/cache',
     'reason': reason, 'backgroundStatus': 'background status',
   };
+  Widget app() => MaterialApp(home: TorrentPlayerScreen(client: MockClient((_) async => http.Response('{"tasks":[]}', 200))));
   setUp(() {
     calls.clear(); running = true; reason = '';
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
@@ -37,10 +40,9 @@ void main() {
   }
 
   testWidgets('background keeps native session; interruption requires explicit recovery', (tester) async {
-    await tester.pumpWidget(const MaterialApp(home: TorrentPlayerScreen()));
-    await tester.pump(); await tester.pump();
-    // HTTP is intentionally not faked as a successful download. The widget test
-    // isolates lifecycle decisions; native integration separately exercises I/O.
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    // HTTP isolates lifecycle decisions; native integration separately exercises I/O.
     expect(calls.where((c) => c == 'start').length, 1);
     await lifecycle(tester, AppLifecycleState.paused);
     expect(calls, isNot(contains('stop')));
@@ -58,13 +60,28 @@ void main() {
   });
 
   testWidgets('limited background expiry resumes when foreground returns', (tester) async {
-    await tester.pumpWidget(const MaterialApp(home: TorrentPlayerScreen()));
-    await tester.pump(); await tester.pump();
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
     await lifecycle(tester, AppLifecycleState.paused);
     running = false; reason = 'budgetExpired';
     await lifecycle(tester, AppLifecycleState.resumed);
     await tester.pump(); await tester.pump();
     expect(calls.where((c) => c == 'start').length, 2);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
+
+  testWidgets('foreground retains session and background request requires user action', (tester) async {
+    await tester.pumpWidget(app());
+    await tester.pumpAndSettle();
+    await lifecycle(tester, AppLifecycleState.paused);
+    await lifecycle(tester, AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(calls.where((c) => c == 'start').length, 1);
+    expect(calls, isNot(contains('enableBackground')));
+    await tester.tap(find.text('后台继续下载'));
+    await tester.pumpAndSettle();
+    expect(calls.where((c) => c == 'enableBackground').length, 1);
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
   });

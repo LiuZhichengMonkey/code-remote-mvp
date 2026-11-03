@@ -151,13 +151,14 @@ func (e *Engine) BackgroundProgress() (pending int, done, total int64) {
 	if e.closed {
 		return
 	}
+	unknown := false
 	for _, x := range e.tasks {
 		if x.Paused || x.Deleting || x.err != "" || x.t == nil {
 			continue
 		}
 		if x.t.Info() == nil {
 			pending++
-			total++
+			unknown = true
 			continue
 		}
 		size, complete := x.t.Length(), x.t.BytesCompleted()
@@ -166,6 +167,9 @@ func (e *Engine) BackgroundProgress() (pending int, done, total int64) {
 		if complete < size {
 			pending++
 		}
+	}
+	if unknown {
+		total = -1 // Native Progress uses a negative total for indeterminate work.
 	}
 	return
 }
