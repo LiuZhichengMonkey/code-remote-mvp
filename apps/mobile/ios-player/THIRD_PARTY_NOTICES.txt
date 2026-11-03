@@ -1,0 +1,11 @@
+Standalone Torrent Player uses the following existing engines:
+
+github.com/anacrolix/torrent v1.58.1 (MPL-2.0)
+Unmodified source: https://github.com/anacrolix/torrent/tree/v1.58.1
+License: https://github.com/anacrolix/torrent/blob/v1.58.1/LICENSE
+The signing kit includes its source archive, exact module dependency manifest,
+and this application's player source. Go module checksums are in go.sum.
+
+Flutter and video_player (BSD-3-Clause) provide UI and native AVPlayer playback.
+http (BSD-3-Clause) provides the private loopback API client.
+Flutter's built-in license registry contains its package notices.

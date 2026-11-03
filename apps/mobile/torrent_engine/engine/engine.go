@@ -207,7 +207,7 @@ func (e *Engine) attach(r Record) (*task, error) {
 		go func() {
 			e.mu.Lock()
 			defer e.mu.Unlock()
-			if e.closed || e.tasks[r.ID] != x {
+			if e.closed || e.tasks[r.ID] != x || x.Deleting {
 				return
 			}
 			x.err = "写入缓存失败：" + err.Error()
@@ -381,9 +381,10 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	case "delete":
 		// Durable tombstone permits retry after interruption or a filesystem failure.
+		wasDeleting := x.Deleting
 		x.Deleting = true
 		if err := e.persist(); err != nil {
-			x.Deleting = false
+			x.Deleting = wasDeleting
 			fail(w, 500, err)
 			return
 		}

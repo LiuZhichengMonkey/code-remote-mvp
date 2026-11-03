@@ -6,7 +6,7 @@ The user approved the standalone contract on 2026-11-03: add a magnet on the pho
 
 The existing Flutter screen is a remote client. Reuse its `video_player` AVPlayer integration, revision guard for switching, IPA packaging and isolated macOS workflow. Replace address/token entry and remote task transport with an embedded engine. The mobile directory has no complete Xcode project; keep generating the standalone project in CI.
 
-Two published Flutter native torrent wrappers were inspected in `runtime/`. Their prebuilt GitHub repositories return 404, so they cannot support a reproducible delivery. Compiling libtorrent and its C++ dependency stack ourselves adds unnecessary build work. Use the available, pinned `github.com/anacrolix/torrent v1.61.0` engine, its file storage and seekable reader, with a small Go C archive and Flutter platform channel.
+Two published Flutter native torrent wrappers were inspected in `runtime/`. Their prebuilt GitHub repositories return 404, so they cannot support a reproducible delivery. Compiling libtorrent and its C++ dependency stack ourselves adds unnecessary build work. Use the available, pinned `github.com/anacrolix/torrent v1.58.1` engine, its file storage and seekable reader, with a small Go C archive and Flutter platform channel. The first v1.61.0 probe exposed retained mmap file handles on shutdown; v1.58.1 uses regular disk I/O and passes the same transfer/restart/cleanup tests without a library fork.
 
 <!-- ponytail: rung 2/3/5 - reuse player, IPA pipeline, Go net/http range serving and anacrolix BT; no new torrent protocol or media decoder. -->
 
@@ -30,3 +30,5 @@ No cloud account, paid service, desktop backend, automatic upload limit tuning o
 ## Initial risk report
 
 Windows lacks an installed Go/Flutter SDK and macOS/Xcode. An official Go archive was downloaded into runtime and its SHA256 checked. The source-pinned BT library and its path-boundary/reader implementations were inspected. Initial direct Go module downloads timed out; retry through the existing local network proxy. iOS ABI linking, peer transfer and signed-device playback are unverified at design time and must not be reported as passed.
+
+Implementation verification: Windows Go tests pass for authentication/body limits, invalid state preservation, magnet deduplication, persisted pause/resume/delete, a real 2 MiB local peer-to-peer transfer with metadata exchange, HTTP byte ranges/HEAD and offline disk playback after restart. CI additionally runs the engine tests with the race detector, and the simulator integration test calls the real Swift/C/Go bridge. Record actual CI results and artifact paths in apps/mobile/PLAYER.md upon completion.

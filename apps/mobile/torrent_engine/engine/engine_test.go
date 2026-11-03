@@ -264,3 +264,93 @@ func TestRealPeerTransferRangesAndRestart(t *testing.T) {
 		t.Fatal("offline disk playback differs")
 	}
 }
+
+func TestDeletionTombstoneRestoresWithoutDownloading(t *testing.T) {
+	root := t.TempDir()
+	m, _ := parseMagnet(testMagnet)
+	id := m.InfoHash.HexString()
+	data, _ := json.Marshal([]Record{{ID: id, Magnet: testMagnet, Deleting: true}})
+	if err := os.WriteFile(filepath.Join(root, "tasks.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := launch(t, root)
+	if e.tasks[id].t != nil {
+		t.Fatal("pending deletion restarted torrent")
+	}
+	r := request(t, e, "GET", "/api/torrents", "")
+	body(t, r)
+	if r.StatusCode != 200 {
+		t.Fatal("tombstone not visible")
+	}
+	r = request(t, e, "POST", "/api/torrents/"+id+"/delete", "{}")
+	body(t, r)
+	if r.StatusCode != 200 {
+		t.Fatal("cannot retry deletion")
+	}
+}
+
+func TestWriteFailureDoesNotApplyPause(t *testing.T) {
+	root := t.TempDir()
+	e := launch(t, root)
+	id := add(t, e, testMagnet)
+	path := filepath.Join(root, "tasks.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	r := request(t, e, "POST", "/api/torrents/"+id+"/pause", "{}")
+	body(t, r)
+	if r.StatusCode != 500 || e.tasks[id].Paused {
+		t.Fatal("failed persistent mutation was applied")
+	}
+}
+
+func TestWaitingMediaRequestCancelsOnSwitch(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "metadata"), 0700)
+	info := metainfo.Info{Name: "waiting.mp4", PieceLength: 16384, Length: 16384, Pieces: make([]byte, 20)}
+	infoBytes, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
+	id := mi.HashInfoBytes().HexString()
+	var encoded bytes.Buffer
+	if err = mi.Write(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(root, "metadata", id+".torrent"), encoded.Bytes(), 0600)
+	e := launch(t, root)
+	add(t, e, mi.Magnet(nil, &info).String())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://127.0.0.1:%d/stream/%s?file=0&token=%s", e.Port(), id, secret), nil)
+	done := make(chan error, 1)
+	go func() {
+		r, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, err = io.ReadAll(r.Body)
+			r.Body.Close()
+		}
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("waiting stream ignored cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("media request did not cancel")
+	}
+	closed := make(chan struct{})
+	go func() { e.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("BT reader remained blocked after cancellation")
+	}
+}

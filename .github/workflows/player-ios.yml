@@ -52,6 +52,9 @@ jobs:
           sed -i '' "s@screens/torrent_player_screen.dart@player_screen.dart@" runtime/player-ios/lib/main.dart
           cd runtime/player-ios
           flutter pub add http:^1.2.0 video_player:^2.9.2
+          flutter pub add --dev integration_test --sdk=flutter
+          mkdir -p integration_test
+          cp ../../apps/mobile/ios-player/standalone_test.dart integration_test/standalone_test.dart
           cp ../../apps/mobile/ios-player/AppDelegate.swift ios/Runner/AppDelegate.swift
           cp ../../apps/mobile/ios-player/TorrentCore.h ios/Runner/TorrentCore.h
           echo '#import "TorrentCore.h"' >> ios/Runner/Runner-Bridging-Header.h
@@ -71,12 +74,25 @@ jobs:
       - name: Compile simulator
         working-directory: runtime/player-ios
         run: flutter build ios --simulator --debug
+      - name: Run embedded engine on iPhone simulator
+        working-directory: runtime/player-ios
+        run: |
+          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
+          xcrun simctl boot "$simulator_id"
+          xcrun simctl bootstatus "$simulator_id" -b
+          flutter test integration_test/standalone_test.dart -d "$simulator_id" --timeout 5m
       - name: Compile unsigned iPhone app
         working-directory: runtime/player-ios
         run: flutter build ios --release --no-codesign
       - name: Package unsigned IPA
         run: |
           python3 scripts/package-player-ios.py runtime/player-ios/build/ios/iphoneos/Runner.app runtime/player-ios-kit
+          cp apps/mobile/ios-player/THIRD_PARTY_NOTICES.txt runtime/player-ios-kit/
+          tar -czf runtime/player-ios-kit/player-source.tar.gz apps/mobile/lib/main_player.dart apps/mobile/lib/screens/torrent_player_screen.dart apps/mobile/torrent_engine apps/mobile/ios-player scripts/build-player-torrent-ios.sh scripts/configure-player-ios.rb .github/workflows/player-ios.yml
+          cd apps/mobile/torrent_engine
+          go list -m all > ../../../runtime/player-ios-kit/go-dependencies.txt
+          torrent_source="$(go mod download -json github.com/anacrolix/torrent | python3 -c 'import json,sys; print(json.load(sys.stdin)["Zip"])')"
+          cp "$torrent_source" ../../../runtime/player-ios-kit/anacrolix-torrent-source.zip
       - name: Preserve unsigned signing kit
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

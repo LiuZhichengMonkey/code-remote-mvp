@@ -5,6 +5,8 @@ package main
 import "C"
 import (
 	"coderemote/torrentengine/engine"
+	"fmt"
+	"os"
 	"runtime/debug"
 	"sync"
 )
@@ -23,6 +25,7 @@ func TorrentStart(path, token *C.char) C.int {
 	debug.SetMemoryLimit(128 * 1024 * 1024)
 	e, err := engine.Start(C.GoString(path), C.GoString(token))
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "Torrent engine initialization failed:", err)
 		return -1
 	}
 	session = e

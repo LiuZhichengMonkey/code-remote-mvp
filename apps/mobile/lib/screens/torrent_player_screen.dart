@@ -85,9 +85,9 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
     final base = _base;
     try {
       final data = await _request('/api/torrents');
-      if (mounted && _base == base) setState(() {
+      if (mounted && _base == base) { setState(() {
         _tasks = (data['tasks'] as List).map((item) => Map<String, dynamic>.from(item as Map)).toList();
-      });
+      }); }
     } catch (error) { if (mounted && _base == base) setState(() => _error = '$error'); }
     finally { _polling = false; }
   }
