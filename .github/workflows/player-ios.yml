@@ -58,7 +58,7 @@ jobs:
           mkdir -p integration_test
           cp ../../apps/mobile/ios-player/standalone_test.dart integration_test/standalone_test.dart
           cp ../../apps/mobile/ios-player/player_lifecycle_test.dart test/player_lifecycle_test.dart
-          sed -i '' 's@../lib/screens/torrent_player_screen.dart@../lib/player_screen.dart@' test/player_lifecycle_test.dart
+          sed -i '' 's@package:coderemote_mvp/screens/torrent_player_screen.dart@package:torrent_player/player_screen.dart@' test/player_lifecycle_test.dart
           cp ../../apps/mobile/ios-player/AppDelegate.swift ios/Runner/AppDelegate.swift
           cp ../../apps/mobile/ios-player/TorrentCore.h ios/Runner/TorrentCore.h
           echo '#import "TorrentCore.h"' >> ios/Runner/Runner-Bridging-Header.h
@@ -70,11 +70,6 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string Discover torrent peers for downloading on this iPhone.' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity dict' ios/Runner/Info.plist
           /usr/libexec/PlistBuddy -c 'Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true' ios/Runner/Info.plist
-      - name: Start simulator while compiling
-        run: |
-          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
-          echo "PLAYER_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
-          xcrun simctl boot "$simulator_id"
       - name: Analyze player
         timeout-minutes: 4
         working-directory: runtime/player-ios
@@ -85,6 +80,11 @@ jobs:
         timeout-minutes: 4
         working-directory: runtime/player-ios
         run: flutter test --no-pub test/player_lifecycle_test.dart
+      - name: Start simulator while compiling
+        run: |
+          simulator_id="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for group in d["devices"].values() for v in group if v["name"].startswith("iPhone")))')"
+          echo "PLAYER_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          xcrun simctl boot "$simulator_id"
       - name: Compile simulator
         working-directory: runtime/player-ios
         run: flutter build ios --simulator --debug

@@ -42,7 +42,7 @@ import BackgroundTasks
           DispatchQueue.main.async {
             guard let self = self, let task = task, self.continued === task else { return }
             self.playing = false
-            self.stopEngine(reason: "interrupted") { task.setTaskCompleted(success: false) }
+            self.stopEngine(reason: "interrupted") {}
           }
         }
         self.endGrace()
@@ -204,9 +204,11 @@ import BackgroundTasks
     port = 0
     stopReason = reason
     monitor?.invalidate(); monitor = nil
+    let expiredTask = reason == "interrupted" ? continued : nil
     // Expiration completes its task after disk/network shutdown, exactly once.
     if reason == "interrupted" {
       continued?.expirationHandler = nil; continued = nil
+      if submitted, let id = requestID { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: id) }
       submitted = false
       requestID = nil
       backgroundStatus = "后台下载被系统结束或取消；点击恢复下载，缓存已保留"
@@ -218,6 +220,7 @@ import BackgroundTasks
       TorrentStop()
       DispatchQueue.main.async {
         if heldGrace != .invalid { UIApplication.shared.endBackgroundTask(heldGrace) }
+        expiredTask?.setTaskCompleted(success: false)
         completion()
       }
     }
