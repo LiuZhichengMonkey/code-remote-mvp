@@ -13,6 +13,123 @@ class TorrentPlayerScreen extends StatefulWidget {
   State<TorrentPlayerScreen> createState() => _TorrentPlayerScreenState();
 }
 
+class TorrentVideoView extends StatefulWidget {
+  const TorrentVideoView({super.key, required this.controller, this.fullscreen = false});
+  final VideoPlayerController controller;
+  final bool fullscreen;
+
+  @override
+  State<TorrentVideoView> createState() => _TorrentVideoViewState();
+}
+
+class _TorrentVideoViewState extends State<TorrentVideoView> {
+  double? _dragPosition;
+  bool _seeking = false;
+  String? _error;
+  MaterialPageRoute<void>? _fullscreenRoute;
+  NavigatorState? _navigator;
+
+  String _time(double milliseconds) {
+    final seconds = milliseconds ~/ 1000;
+    final minutes = (seconds ~/ 60).toString().padLeft(2, '0');
+    return '$minutes:${(seconds % 60).toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _seek(double milliseconds) async {
+    setState(() { _seeking = true; _error = null; _dragPosition = milliseconds; });
+    try {
+      await widget.controller.seekTo(Duration(milliseconds: milliseconds.round()));
+    } catch (error) {
+      if (mounted) setState(() => _error = '跳转失败：$error');
+    } finally {
+      if (mounted) setState(() { _seeking = false; _dragPosition = null; });
+    }
+  }
+
+  Future<void> _fullscreen() async {
+    if (_fullscreenRoute != null) return;
+    final navigator = Navigator.of(context);
+    final route = MaterialPageRoute<void>(fullscreenDialog: true, builder: (_) =>
+      Scaffold(backgroundColor: Colors.black, body: SafeArea(child: Theme(
+        data: ThemeData.dark(), child: TorrentVideoView(controller: widget.controller, fullscreen: true)))));
+    _navigator = navigator;
+    setState(() => _fullscreenRoute = route);
+    try {
+      // ponytail: rung 2/4 - one AVPlayer session; Flutter routes and native orientation APIs.
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      await SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+      if (!mounted) return;
+      await navigator.push(route);
+    } catch (error) {
+      if (mounted) setState(() => _error = '无法进入全屏：$error');
+    } finally {
+      await SystemChrome.setPreferredOrientations([]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      if (mounted) setState(() => _fullscreenRoute = null);
+    }
+  }
+
+  @override
+  void dispose() {
+    final route = _fullscreenRoute;
+    final navigator = _navigator;
+    // Closing or replacing the task also closes its fullscreen view.
+    if (route != null && navigator != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (navigator.mounted && route.isActive) navigator.removeRoute(route);
+      });
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_fullscreenRoute != null) return const SizedBox(height: 220);
+    return ValueListenableBuilder<VideoPlayerValue>(valueListenable: widget.controller, builder: (context, value, _) {
+      final duration = value.duration.inMilliseconds.toDouble();
+      final position = (_dragPosition ?? value.position.inMilliseconds.toDouble()).clamp(0.0, duration).toDouble();
+      final controls = Column(mainAxisSize: MainAxisSize.min, children: [
+        if (value.hasError) Text('播放失败：${value.errorDescription}'),
+        if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        if (value.isBuffering || _seeking) const LinearProgressIndicator(),
+        Row(children: [
+          Text(_time(position)),
+          Expanded(child: Slider(
+            key: const ValueKey('playback-slider'),
+            semanticFormatterCallback: (value) => '${_time(value)} / ${_time(duration)}',
+            value: position, max: duration > 0 ? duration : 1,
+            onChanged: !value.isInitialized || value.hasError || _seeking || duration <= 0 ? null
+              : (next) => setState(() => _dragPosition = next),
+            onChangeEnd: _seek,
+          )),
+          Text(_time(duration)),
+        ]),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(tooltip: value.isPlaying ? '暂停播放' : '播放',
+            icon: Icon(value.isPlaying ? Icons.pause : Icons.play_arrow),
+            onPressed: !value.isInitialized || value.hasError ? null : () async {
+              try {
+                if (value.isPlaying) { await widget.controller.pause(); }
+                else { await widget.controller.play(); }
+              } catch (error) { if (mounted) setState(() => _error = '播放操作失败：$error'); }
+            }),
+          IconButton(tooltip: widget.fullscreen ? '退出全屏' : '全屏播放',
+            icon: Icon(widget.fullscreen ? Icons.fullscreen_exit : Icons.fullscreen),
+            onPressed: widget.fullscreen ? () => Navigator.of(context).pop() : _fullscreen),
+        ]),
+      ]);
+      final picture = value.isInitialized
+        ? AspectRatio(aspectRatio: value.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
+            child: VideoPlayer(widget.controller))
+        : const Center(child: CircularProgressIndicator());
+      if (widget.fullscreen) {
+        return Column(children: [Expanded(child: Center(child: picture)), controls]);
+      }
+      return Column(children: [picture, controls]);
+    });
+  }
+}
+
 class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsBindingObserver {
   static const _native = MethodChannel('torrent_player/engine');
   final _magnet = TextEditingController();
@@ -295,18 +412,7 @@ class _TorrentPlayerScreenState extends State<TorrentPlayerScreen> with WidgetsB
         for (final file in files) ListTile(title: Text(file['name'] as String), subtitle: Text(_bytes(file['size'] as num)),
           leading: const Icon(Icons.play_circle_outline), onTap: selected?['paused'] == true || _base == null ? null : () => _play(file)),
         if (selected?['metadata'] == true && files.isEmpty) const Text('当前支持 MP4/M4V/MOV 容器，实际播放还取决于设备支持的编码。'),
-        if (player != null) ValueListenableBuilder<VideoPlayerValue>(valueListenable: player, builder: (context, value, _) {
-          if (value.hasError) return const Text('解码失败或连接中断，请重新选择文件');
-          if (!value.isInitialized) return const Center(child: CircularProgressIndicator());
-          return Column(children: [
-            AspectRatio(aspectRatio: value.aspectRatio > 0 ? value.aspectRatio : 16 / 9, child: VideoPlayer(player)),
-            if (value.isBuffering) const LinearProgressIndicator(),
-            VideoProgressIndicator(player, allowScrubbing: true, padding: const EdgeInsets.symmetric(vertical: 12)),
-            IconButton(tooltip: value.isPlaying ? '暂停播放' : '播放', icon: Icon(value.isPlaying ? Icons.pause : Icons.play_arrow),
-              onPressed: () async { try { if (value.isPlaying) { await player.pause(); } else { await player.play(); } }
-                catch (_) { if (mounted) setState(() => _error = '播放操作失败，请重新选择文件'); } }),
-          ]);
-        }),
+        if (player != null) TorrentVideoView(key: ObjectKey(player), controller: player),
         const SizedBox(height: 16),
         Text('缓存位置：$_cachePath/data\n下载占用手机磁盘，播放和 BT 引擎也会使用部分运行内存。'),
       ]));

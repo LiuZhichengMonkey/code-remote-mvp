@@ -59,6 +59,7 @@ jobs:
           flutter pub add --dev integration_test --sdk=flutter
           mkdir -p integration_test
           cp ../../apps/mobile/ios-player/standalone_test.dart integration_test/standalone_test.dart
+          sed -i '' 's@package:coderemote_mvp/screens/torrent_player_screen.dart@package:torrent_player/player_screen.dart@' integration_test/standalone_test.dart
           cp ../../apps/mobile/ios-player/player_lifecycle_test.dart test/player_lifecycle_test.dart
           sed -i '' 's@package:coderemote_mvp/screens/torrent_player_screen.dart@package:torrent_player/player_screen.dart@' test/player_lifecycle_test.dart
           cp ../../apps/mobile/ios-player/AppDelegate.swift ios/Runner/AppDelegate.swift
