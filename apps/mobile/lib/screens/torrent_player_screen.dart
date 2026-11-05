@@ -122,10 +122,13 @@ class _TorrentVideoViewState extends State<TorrentVideoView> {
         ? AspectRatio(aspectRatio: value.aspectRatio > 0 ? value.aspectRatio : 16 / 9,
             child: VideoPlayer(widget.controller))
         : const Center(child: CircularProgressIndicator());
-      if (widget.fullscreen) {
-        return Column(children: [Expanded(child: Center(child: picture)), controls]);
-      }
-      return Column(children: [picture, controls]);
+      return LayoutBuilder(builder: (context, constraints) {
+        // Rotation can finish after the route pops; fit the interim landscape viewport too.
+        if (constraints.hasBoundedHeight) {
+          return Column(children: [Expanded(child: Center(child: picture)), controls]);
+        }
+        return Column(children: [picture, controls]);
+      });
     });
   }
 }
