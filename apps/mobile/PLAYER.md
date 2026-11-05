@@ -68,3 +68,9 @@ Windows 已通过 6 项 Go 测试：认证和输入边界、任务去重及恢�
 最终回归：[CI 41696847216](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/41696847216)（提交 `a33d785`）全部成功，包含 Go 竞态检测、Dart 分析、生命周期、模拟器和 iPhone 编译、原生引擎恢复，以及真实 AVPlayer 解码/播放/跳转。视频在仅下载 1,867,203 / 33,652,163 字节时完成播放和跳转断言，跳转后时间为 8.804 秒。首轮 41693838247 因 GitHub macOS ARM runner 容量不足未执行；改用 macOS 15/Xcode 26.3 后通过。
 
 新版 IPA：`runtime/player-ios-streaming-41696847216/TorrentPlayer-unsigned.ipa`，12,292,347 字节，SHA256 `5958aa4e38a1b3e7c825e1c4d25e180f3efa4f96e7c665e4b1ff344e76c87858`。已核对 ZIP、iPhoneOS、后台配置、原生符号和 Release 不含 Debug 入口，记录在同目录 `verification.json`。模拟器通过不能代表用户真机网络或锁屏后台授权，仍需签名后安装验收。
+
+2026-11-05 全屏/进度修复：新增横屏全屏入口、退出入口、当前时间/总时长和 Material Slider。拖动松手后跳转，保留原有播放或暂停状态；全屏复用同一个 AVPlayer。修复旋转退出时有界布局溢出。
+
+[CI 42010861275](https://github.com/LiuZhichengMonkey/code-remote-mvp/actions/runs/42010861275)（提交 `2b5c297`）全部通过：Go 竞态测试、Dart 分析、生命周期测试、模拟器和 iPhone 编译、原生恢复以及真实 AVPlayer 触摸测试。实际触摸验证内嵌暂停跳转、进入全屏、全屏拖动、退出后继续同一播放会话，未发现布局异常；此时仅下载 2,883,011 / 33,652,163 字节，播放时间 9.982 秒。首轮 42005770768 因重复导入未通过分析，42007707734 触摸断言通过但退出旋转发生布局溢出，不计整体验证通过，修复后本轮通过。
+
+新版安装包 `runtime/player-ios-fullscreen-42010861275/TorrentPlayer-unsigned.ipa`，12,334,214 字节，SHA256 `3bf4eaa562f9ee95289faaf58bf66bb7687f90dfc1dd8b7d963ceee82f202203`。已核对 ZIP、iPhoneOS、横屏声明、原生符号及 Release 不含 Debug 入口，记录在同目录 verification.json。完整日志 `runtime/player-ios-fullscreen-42010861275.log`。需要签名安装，真机旋转手感和公网网络表现仍待用户验收。
